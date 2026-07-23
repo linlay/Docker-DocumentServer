@@ -67,11 +67,12 @@ const docEditor = new DocsAPI.DocEditor("editor", editorConfig);
 The bundled example injects this configuration through
 `nginx-ds-example.conf`.
 
-The bundled example selects its native `Anonymous` account by default, so the
-editor asks for a display name instead of using `John Smith`. It also removes
-the complete left-menu layout container, including its reserved width, and
-hides the unused Collaboration, Plugins, and default AI toolbar tabs in the
-same-origin demo without changing document permissions.
+The bundled Nginx injection does not select or rewrite an editor user. The
+example application's `userid` input remains authoritative, and ai-bridge reads
+the resulting signed `editorConfig.user.id`. The injection removes the complete
+left-menu layout container, including its reserved width, and hides the unused
+Collaboration, Plugins, and default AI toolbar tabs in the same-origin demo
+without changing document permissions.
 
 ## Load the external-page API
 

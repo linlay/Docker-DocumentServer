@@ -137,6 +137,10 @@ tenantId:documentId:storageVersion
 `document.key`；稳定绑定不能绕过页面级文档校验。生产系统应把这里的文件名替换为
 真实租户 ID 与文档 ID。
 
+`userId` 必须来自当前编辑器签名配置中的 `editorConfig.user.id`。本机示例应用的
+`userid` URL 参数或页面选择是其来源；Nginx 注入和 ai-bridge 均不得固定、覆盖或
+猜测具体用户 ID。
+
 ## Copilot 怎样发命令
 
 推荐流程：
