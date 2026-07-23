@@ -1,4 +1,4 @@
-# ai-bridge 0.1.0 外部工程接入说明
+# ai-bridge 0.2.0 外部工程接入说明
 
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
@@ -25,7 +25,7 @@
       user: { id: "user-9", name: "张三" },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev12"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       },
@@ -37,7 +37,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
 ```
 
 页面加载后：
@@ -68,13 +68,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.1.0-rev12"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.2.0-rev19"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -195,7 +195,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-所有 44 个快捷方法：
+所有 56 个快捷方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -208,16 +208,20 @@ word.scaleFont               word.addTable             word.setTableCell
 word.formatTable             word.editTable            word.setPageLayout
 word.setHeaderFooter         word.setDocumentText
 
-slides.inspect               slides.replaceText        slides.scaleFont
-slides.formatText            slides.formatSelection    slides.addSlide
-slides.duplicateSlide        slides.deleteSlide        slides.addTextBox
+slides.inspect               slides.inspectObjects     slides.replaceText
+slides.scaleFont             slides.formatText         slides.formatSelection
+slides.addSlide              slides.duplicateSlide     slides.deleteSlide
+slides.addTextBox            slides.setBackground      slides.addShape
+slides.updateShape           slides.deleteObject       slides.inspectCharts
+slides.addChart              slides.updateChart        slides.deleteChart
 
 sheets.inspect               sheets.setValues          sheets.setFormula
 sheets.replaceText           sheets.formatRange        sheets.addSheet
 sheets.renameSheet           sheets.deleteSheet        sheets.addChart
+sheets.inspectCharts         sheets.updateChart        sheets.deleteChart
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.1.0`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.2.0`。
 
 ### Word 完整操作边界
 
@@ -227,6 +231,124 @@ sheets.renameSheet           sheets.deleteSheet        sheets.addChart
 - 表格操作支持创建填充、样式、单元格格式、增删行列、合并/拆分、清空和删除。
 - 页面操作支持纸张大小、横竖向、页边距、页眉页脚及动态页码。
 - `word_scroll` 是稳定的按页上滚/下滚；`word_navigate` 还支持首页、末页、指定页、上一页、下一页、相对页和搜索定位。ONLYOFFICE Office API 没有跨版本稳定的像素级鼠标滚轮契约，因此 Bridge 不注入浏览器鼠标事件，也不会把按页导航误报成像素滚动。
+
+### PPTX 图形、渐变和图表完整边界
+
+- `slides_inspect_objects` 读取图形、图表、图片、表格、OLE、组合等绘图对象，返回零基 `objectIndex`、内部 ID、名称、类型、位置、尺寸、旋转、翻转；图形还返回几何类型、文本、填充和线条。
+- `slides_add_shape` / `slides_update_shape` 支持任意 ONLYOFFICE 预设 `shapeType`，以及 `text`、`xMm`、`yMm`、`widthMm`、`heightMm`、`rotationDeg`、`flipH`、`flipV`、`name`、字体、对齐、`paddingMm`、`fill` 和 `line`。
+- `slides_delete_object` 可用 `objectId`、零基 `objectIndex` 或 `name` 删除任意绘图对象。
+- `slides_set_background` 支持 `custom`、`clear`、`layout`、`master`；`custom` 使用同一套 `fill` 模型。
+- `slides_inspect_charts` / `slides_add_chart` / `slides_update_chart` / `slides_delete_chart` 覆盖图表类型、二维数值系列、系列名、分类、数值格式、标题、样式、位置、尺寸、旋转、图表区/绘图区/标题填充与线条、图例、横纵轴、标签、网格线、系列和数据点格式、系列增删。
+- `seriesUpdates[].type` 可修改组合图中的单个系列类型；数据点还支持
+  `markerFill`、`markerLine` 和 `allMarkers`。`line`、`lineMarker`、`column`
+  等友好名称会转换为 ONLYOFFICE 的 `lineNormal`、`lineNormalMarker`、`bar`。
+
+填充模型：
+
+```ts
+type Fill =
+  | { type: "none" }
+  | { type: "solid"; color: "#RRGGBB" }
+  | {
+      type: "linearGradient";
+      angleDeg?: number;
+      stops: Array<{ position: number /* 0..100 */; color: "#RRGGBB" }>;
+    }
+  | {
+      type: "radialGradient";
+      stops: Array<{ position: number /* 0..100 */; color: "#RRGGBB" }>;
+    }
+  | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: "#RRGGBB";
+      foregroundColor: "#RRGGBB";
+    }
+  | { type?: "raw"; raw: unknown };
+```
+
+`includeRaw: true` 会返回 ONLYOFFICE `ToJSON()` 的无损对象；把
+`inspectObjects` 得到的 `fill.raw` 或 `line.raw` 原样传回
+`fill: { raw }` / `line: { raw }`，即可保留 Bridge 尚未单独建模的高级
+Office 属性。
+
+创建带线性渐变的图形：
+
+```js
+await window.aiBridge.slides.addShape({
+  slide: 1,
+  shapeType: "roundRect",
+  name: "KPI",
+  text: "42%",
+  xMm: 20,
+  yMm: 25,
+  widthMm: 70,
+  heightMm: 32,
+  fill: {
+    type: "linearGradient",
+    angleDeg: 45,
+    stops: [
+      { position: 0, color: "#2F80ED" },
+      { position: 100, color: "#56CCF2" },
+    ],
+  },
+  line: { widthPt: 1.5, color: "#1B4F9C" },
+});
+```
+
+创建和更新 PPT 图表：
+
+```js
+await window.aiBridge.slides.addChart({
+  slide: 1,
+  type: "bar",
+  series: [[120, 180, 240], [90, 150, 210]],
+  seriesNames: ["收入", "成本"],
+  categories: ["Q1", "Q2", "Q3"],
+  title: "季度趋势",
+  legend: { position: "bottom" },
+  dataLabels: { showValue: true },
+  xMm: 20,
+  yMm: 55,
+  widthMm: 190,
+  heightMm: 100,
+});
+
+await window.aiBridge.slides.updateChart({
+  slide: 1,
+  chartIndex: 0,
+  horizontalAxis: { title: "季度" },
+  verticalAxis: { title: "金额", numberFormat: "#,##0" },
+  seriesUpdates: [{
+    index: 0,
+    name: "净收入",
+    values: [125, 190, 260],
+    fill: { type: "solid", color: "#2F80ED" },
+  }],
+});
+```
+
+### XLSX 图表完整边界
+
+`sheets_add_chart`、`sheets_inspect_charts`、`sheets_update_chart` 和
+`sheets_delete_chart` 使用零基 `chartIndex` 或名称定位。除 PPT 图表共有的
+标题、样式、填充、线条、图例、坐标轴、标签、网格线、系列和数据点格式外，
+还支持：
+
+- `range`：新图表的 A1 数据源，可使用 `selection`。
+- `categoryRange`：更新分类来源区域。
+- `addSeries`：用 `name`、`valuesRange`、可选 `xValuesRange` 新增系列。
+- `seriesUpdates[].valuesRange` / `xValuesRange`：重定向已有系列。
+- `fromColumn` / `fromRow`、`columnOffsetMm` / `rowOffsetMm`、`widthMm` /
+  `heightMm`：设置单元格锚点和尺寸。
+
+所有尺寸参数均为毫米，线宽为磅；渐变节点位置为 `0..100`，内部会转换为
+ONLYOFFICE 的 `0..100000` 单位，角度会转换为 `1/60000` 度单位。
+
+`sheets_delete_chart` 调用官方 `ApiDrawing.Delete()`。该方法在部分
+ONLYOFFICE Docs 版本/许可中属于付费能力；方法不可用时 Bridge 会明确返回
+“当前 ONLYOFFICE 版本不支持删除图表”，不会伪装删除成功。本仓库默认 Community
+DocumentServer 9.4 已实测支持图表创建、读取和更新，但不暴露该删除方法。
 
 ## 不使用 Client SDK 时的底层 postMessage 协议
 
@@ -253,7 +375,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -331,6 +453,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.1.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.1.0-rev12`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.2.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.2.0-rev19`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   const PROTOCOL_VERSION = 1;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CLIENT_SOURCE = "ai-bridge-client";
@@ -110,6 +110,7 @@
       });
       this.slides = this.createToolGroup({
         inspect: "slides_inspect",
+        inspectObjects: "slides_inspect_objects",
         replaceText: "slides_replace_text",
         scaleFont: "slides_scale_font",
         formatText: "slides_format_text",
@@ -118,6 +119,14 @@
         duplicateSlide: "slides_duplicate_slide",
         deleteSlide: "slides_delete_slide",
         addTextBox: "slides_add_textbox",
+        setBackground: "slides_set_background",
+        addShape: "slides_add_shape",
+        updateShape: "slides_update_shape",
+        deleteObject: "slides_delete_object",
+        inspectCharts: "slides_inspect_charts",
+        addChart: "slides_add_chart",
+        updateChart: "slides_update_chart",
+        deleteChart: "slides_delete_chart",
       });
       this.sheets = this.createToolGroup({
         inspect: "sheets_inspect",
@@ -129,6 +138,9 @@
         renameSheet: "sheets_rename_sheet",
         deleteSheet: "sheets_delete_sheet",
         addChart: "sheets_add_chart",
+        inspectCharts: "sheets_inspect_charts",
+        updateChart: "sheets_update_chart",
+        deleteChart: "sheets_delete_chart",
       });
     }
 

@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -486,6 +486,7 @@
     },
     slides: {
       inspect: function (args, options) { return executeTool("slides_inspect", args, options); },
+      inspectObjects: function (args, options) { return executeTool("slides_inspect_objects", args, options); },
       replaceText: function (args, options) { return executeTool("slides_replace_text", args, options); },
       scaleFont: function (args, options) { return executeTool("slides_scale_font", args, options); },
       formatText: function (args, options) { return executeTool("slides_format_text", args, options); },
@@ -494,6 +495,14 @@
       duplicateSlide: function (args, options) { return executeTool("slides_duplicate_slide", args, options); },
       deleteSlide: function (args, options) { return executeTool("slides_delete_slide", args, options); },
       addTextBox: function (args, options) { return executeTool("slides_add_textbox", args, options); },
+      setBackground: function (args, options) { return executeTool("slides_set_background", args, options); },
+      addShape: function (args, options) { return executeTool("slides_add_shape", args, options); },
+      updateShape: function (args, options) { return executeTool("slides_update_shape", args, options); },
+      deleteObject: function (args, options) { return executeTool("slides_delete_object", args, options); },
+      inspectCharts: function (args, options) { return executeTool("slides_inspect_charts", args, options); },
+      addChart: function (args, options) { return executeTool("slides_add_chart", args, options); },
+      updateChart: function (args, options) { return executeTool("slides_update_chart", args, options); },
+      deleteChart: function (args, options) { return executeTool("slides_delete_chart", args, options); },
     },
     sheets: {
       inspect: function (args, options) { return executeTool("sheets_inspect", args, options); },
@@ -505,6 +514,9 @@
       renameSheet: function (args, options) { return executeTool("sheets_rename_sheet", args, options); },
       deleteSheet: function (args, options) { return executeTool("sheets_delete_sheet", args, options); },
       addChart: function (args, options) { return executeTool("sheets_add_chart", args, options); },
+      inspectCharts: function (args, options) { return executeTool("sheets_inspect_charts", args, options); },
+      updateChart: function (args, options) { return executeTool("sheets_update_chart", args, options); },
+      deleteChart: function (args, options) { return executeTool("sheets_delete_chart", args, options); },
     },
   };
 

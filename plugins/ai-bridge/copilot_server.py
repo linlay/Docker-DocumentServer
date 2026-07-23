@@ -172,28 +172,44 @@ def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[
 WORD_TOOLS = load_contract_tools("word", WORD_TOOL_DESCRIPTIONS)
 
 
-SLIDE_TOOLS = [
-    tool("slides_replace_text", "在 PPT 全部或指定幻灯片中查找替换", {"search": STRING, "replace": STRING, "matchCase": BOOLEAN, "slide": {"type": "integer", "minimum": 1}}, ["search", "replace"]),
-    tool("slides_scale_font", "按比例缩放 PPT 全部或指定页字号", {"slide": {"type": "integer", "minimum": 1}, "scale": NUMBER}, ["scale"]),
-    tool("slides_format_text", "格式化 PPT 全部或指定页文本", {"slide": {"type": "integer", "minimum": 1}, "fontSize": NUMBER, "fontFamily": STRING, "bold": BOOLEAN, "italic": BOOLEAN, "underline": BOOLEAN, "color": STRING}),
-    tool("slides_format_selection", "格式化 PPT 当前选中的文本框或形状", {"fontSize": NUMBER, "fontFamily": STRING, "bold": BOOLEAN, "italic": BOOLEAN, "underline": BOOLEAN, "color": STRING}),
-    tool("slides_add_slide", "新建幻灯片", {"index": {"type": "integer", "minimum": 1}, "title": STRING, "titleFontSize": NUMBER, "backgroundColor": STRING}),
-    tool("slides_duplicate_slide", "复制指定幻灯片", {"slide": {"type": "integer", "minimum": 1}}, ["slide"]),
-    tool("slides_delete_slide", "删除指定幻灯片", {"slide": {"type": "integer", "minimum": 1}}, ["slide"]),
-    tool("slides_add_textbox", "在指定 PPT 页添加文本框；位置与尺寸单位为毫米", {"slide": {"type": "integer", "minimum": 1}, "text": STRING, "xMm": NUMBER, "yMm": NUMBER, "widthMm": NUMBER, "heightMm": NUMBER, "fontSize": NUMBER, "fontFamily": STRING, "bold": BOOLEAN, "italic": BOOLEAN, "color": STRING, "fillColor": STRING, "align": STRING}, ["slide", "text"]),
-]
+SLIDE_TOOL_DESCRIPTIONS = {
+    "slides_inspect": "只读检查 PPT 页数与文本摘要；修改前优先调用",
+    "slides_inspect_objects": "只读检查 PPT 图形、图表、图片、表格、组合等对象及填充、线条、位置和可选原始 JSON",
+    "slides_replace_text": "在 PPT 全部或指定幻灯片中查找替换",
+    "slides_scale_font": "按比例缩放 PPT 全部或指定页字号",
+    "slides_format_text": "格式化 PPT 全部或指定页文本",
+    "slides_format_selection": "格式化 PPT 当前选中的文本框或形状",
+    "slides_add_slide": "新建幻灯片",
+    "slides_duplicate_slide": "复制指定幻灯片",
+    "slides_delete_slide": "删除指定幻灯片",
+    "slides_add_textbox": "在指定 PPT 页添加可设置位置、尺寸、文本、渐变填充和线条的文本框；尺寸单位为毫米",
+    "slides_set_background": "设置、清除或恢复 PPT 页背景；自定义背景支持纯色、线性渐变、径向渐变、图案和 raw 填充",
+    "slides_add_shape": "在指定 PPT 页添加任意预设图形，并设置文本、几何、渐变填充、线条、旋转和内边距",
+    "slides_update_shape": "按 objectId、objectIndex 或 name 更新 PPT 图形的文本、类型、位置、尺寸、旋转、填充和线条",
+    "slides_delete_object": "按 objectId、objectIndex 或 name 删除 PPT 页中的任意对象",
+    "slides_inspect_charts": "只读检查 PPT 图表类型、标题、系列、位置、样式和可选原始 JSON",
+    "slides_add_chart": "用数值系列和分类在 PPT 页创建图表，并设置系列、坐标轴、图例、标签、渐变填充和位置",
+    "slides_update_chart": "按 chartId、chartIndex 或 name 更新 PPT 图表系列、分类、坐标轴、图例、标签、颜色、位置和尺寸",
+    "slides_delete_chart": "按 chartId、chartIndex 或 name 删除 PPT 图表",
+}
 
+SHEET_TOOL_DESCRIPTIONS = {
+    "sheets_inspect": "只读检查 XLSX 工作表、使用区域和值；修改前优先调用",
+    "sheets_set_values": "向 XLSX 单元格区域写入单个值或二维数组",
+    "sheets_set_formula": "向 XLSX 单元格写入公式",
+    "sheets_replace_text": "在 XLSX 使用区域或指定区域查找替换",
+    "sheets_format_range": "设置 XLSX 区域字体、填充、对齐、数字格式和行列尺寸",
+    "sheets_add_sheet": "新建工作表",
+    "sheets_rename_sheet": "重命名工作表",
+    "sheets_delete_sheet": "删除工作表",
+    "sheets_add_chart": "基于区域数据创建 XLSX 图表，并设置系列、坐标轴、图例、标签、渐变填充和位置",
+    "sheets_inspect_charts": "只读检查 XLSX 图表类型、标题、系列、位置、样式和可选原始 JSON",
+    "sheets_update_chart": "按 chartIndex 或 name 更新 XLSX 图表系列、数据区域、坐标轴、图例、标签、颜色、位置和尺寸",
+    "sheets_delete_chart": "按 chartIndex 或 name 删除 XLSX 图表；部分 ONLYOFFICE 版本/许可不提供 ApiDrawing.Delete，此时会明确失败",
+}
 
-SHEET_TOOLS = [
-    tool("sheets_set_values", "向 XLSX 单元格区域写入单个值或二维数组", {"sheet": SHEET, "range": RANGE, "values": {}}, ["range", "values"]),
-    tool("sheets_set_formula", "向 XLSX 单元格写入公式", {"sheet": SHEET, "range": RANGE, "formula": STRING}, ["range", "formula"]),
-    tool("sheets_replace_text", "在 XLSX 使用区域或指定区域查找替换", {"sheet": SHEET, "range": RANGE, "search": STRING, "replace": STRING}, ["search", "replace"]),
-    tool("sheets_format_range", "设置 XLSX 区域字体、填充、对齐、数字格式和行列尺寸", {"sheet": SHEET, "range": RANGE, "fontSize": NUMBER, "fontName": STRING, "bold": BOOLEAN, "italic": BOOLEAN, "underline": BOOLEAN, "fontColor": STRING, "fillColor": STRING, "horizontalAlign": STRING, "verticalAlign": STRING, "numberFormat": STRING, "wrap": BOOLEAN, "columnWidth": NUMBER, "rowHeight": NUMBER}, ["range"]),
-    tool("sheets_add_sheet", "新建工作表", {"name": STRING}, ["name"]),
-    tool("sheets_rename_sheet", "重命名工作表", {"sheet": SHEET, "newName": STRING}, ["newName"]),
-    tool("sheets_delete_sheet", "删除工作表", {"sheet": SHEET}, ["sheet"]),
-    tool("sheets_add_chart", "基于区域数据创建图表", {"sheet": SHEET, "range": RANGE, "type": STRING, "title": STRING, "titleFontSize": NUMBER, "inRows": BOOLEAN, "style": NUMBER, "widthMm": NUMBER, "heightMm": NUMBER, "fromColumn": NUMBER, "fromRow": NUMBER}, ["range"]),
-]
+SLIDE_TOOLS = load_contract_tools("slide", SLIDE_TOOL_DESCRIPTIONS)
+SHEET_TOOLS = load_contract_tools("cell", SHEET_TOOL_DESCRIPTIONS)
 
 
 TOOLS_BY_EDITOR = {"word": WORD_TOOLS, "slide": SLIDE_TOOLS, "cell": SHEET_TOOLS}

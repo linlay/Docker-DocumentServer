@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const PLUGIN_VERSION = "0.1.0";
+  const PLUGIN_VERSION = "0.2.0";
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const MAX_CALLS = 20;
@@ -12,7 +12,10 @@
     "word_navigate",
     "word_scroll",
     "slides_inspect",
+    "slides_inspect_objects",
+    "slides_inspect_charts",
     "sheets_inspect",
+    "sheets_inspect_charts",
   ]);
 
   const ALLOWED_TOOLS = {
@@ -54,6 +57,15 @@
       "slides_duplicate_slide",
       "slides_delete_slide",
       "slides_add_textbox",
+      "slides_inspect_objects",
+      "slides_set_background",
+      "slides_add_shape",
+      "slides_update_shape",
+      "slides_delete_object",
+      "slides_inspect_charts",
+      "slides_add_chart",
+      "slides_update_chart",
+      "slides_delete_chart",
     ]),
     cell: new Set([
       "sheets_inspect",
@@ -65,6 +77,9 @@
       "sheets_rename_sheet",
       "sheets_delete_sheet",
       "sheets_add_chart",
+      "sheets_inspect_charts",
+      "sheets_update_chart",
+      "sheets_delete_chart",
     ]),
   };
 

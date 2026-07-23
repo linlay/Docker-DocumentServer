@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.1.0`
+- Version: `0.2.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -54,7 +54,7 @@ const editorConfig = {
     user: { id: "user-42", name: "Demo User" },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev12",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
     },
@@ -86,7 +86,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -173,12 +173,16 @@ The versioned public contract is available as:
   `word_add_table`, `word_set_table_cell`, `word_format_table`,
   `word_edit_table`, `word_set_page_layout`, `word_set_header_footer`,
   `word_set_document_text`.
-- Slides: `slides_inspect`, `slides_replace_text`, `slides_scale_font`,
-  `slides_format_text`, `slides_format_selection`, `slides_add_slide`,
-  `slides_duplicate_slide`, `slides_delete_slide`, `slides_add_textbox`.
+- Slides: `slides_inspect`, `slides_inspect_objects`, `slides_replace_text`,
+  `slides_scale_font`, `slides_format_text`, `slides_format_selection`,
+  `slides_add_slide`, `slides_duplicate_slide`, `slides_delete_slide`,
+  `slides_add_textbox`, `slides_set_background`, `slides_add_shape`,
+  `slides_update_shape`, `slides_delete_object`, `slides_inspect_charts`,
+  `slides_add_chart`, `slides_update_chart`, `slides_delete_chart`.
 - Sheets: `sheets_inspect`, `sheets_set_values`, `sheets_set_formula`,
   `sheets_replace_text`, `sheets_format_range`, `sheets_add_sheet`,
-  `sheets_rename_sheet`, `sheets_delete_sheet`, `sheets_add_chart`.
+  `sheets_rename_sheet`, `sheets_delete_sheet`, `sheets_add_chart`,
+  `sheets_inspect_charts`, `sheets_update_chart`, `sheets_delete_chart`.
 
 The external agent must send tool names and JSON arguments, never JavaScript
 source. `plugin.js` checks the editor-specific allow list before calling a
@@ -203,6 +207,26 @@ so a retried transport message cannot apply the same edit twice.
 mouse events. The Office API exposes stable page navigation and selection
 movement, but not a cross-version pixel-wheel contract. Page-granular scrolling
 therefore remains deterministic and does not create an undo entry.
+
+### Slides and Sheets capability coverage
+
+| Area | Supported operations |
+| --- | --- |
+| PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, chart summary, and optional raw Office JSON |
+| PPT slides | Add, duplicate, delete, and set custom/clear/layout/master background |
+| PPT shapes | Add any preset geometry; update text, geometry, name, position, size, rotation, flips, padding, text style, fill, and line; delete any drawing |
+| PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
+| XLSX cells | Inspect workbook, set values/formulas, replace text, format ranges, and add/rename/delete sheets |
+| XLSX charts | Inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
+| Fill model | None, solid, linear gradient, radial gradient, pattern, and lossless `raw` Office JSON replay |
+
+Gradient stops use `position: 0..100`; `angleDeg` is in degrees. Object and
+chart indexes are zero-based. All physical dimensions use millimetres and line
+widths use points. `inspectObjects` and `inspectCharts` can return the exact
+`raw` JSON accepted by later `fill: { raw }` or `line: { raw }` updates.
+Spreadsheet chart deletion delegates to `ApiDrawing.Delete()`, which is a paid
+capability in some ONLYOFFICE Docs editions; unsupported editions return an
+explicit error without reporting a false deletion.
 
 ## Persistence service
 

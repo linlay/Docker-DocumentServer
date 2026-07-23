@@ -51,7 +51,7 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.1.0";
+  version: "0.2.0";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   ready: boolean;
@@ -273,7 +273,172 @@ export interface WordSetHeaderFooterArgs extends BasicTextFormat {
 }
 export interface WordSetDocumentTextArgs { text: string; }
 
+export interface AiBridgeGradientStop {
+  /** Position along the gradient, from 0 to 100 percent. */
+  position: number;
+  color: string;
+}
+export type AiBridgeFill =
+  | { type: "none" }
+  | { type: "solid"; color: string }
+  | { type: "linearGradient"; stops: AiBridgeGradientStop[]; angleDeg?: number }
+  | { type: "radialGradient"; stops: AiBridgeGradientStop[] }
+  | { type: "pattern"; pattern: string; backgroundColor: string; foregroundColor: string }
+  | { type?: "raw"; raw: unknown };
+export interface AiBridgeLine {
+  type?: "solid" | "none";
+  enabled?: boolean;
+  widthPt?: number;
+  color?: string;
+  fill?: AiBridgeFill;
+  raw?: unknown;
+}
+export interface AiBridgePadding {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+}
+export interface AiBridgeChartDataLabels {
+  showSeriesName?: boolean;
+  showCategoryName?: boolean;
+  showValue?: boolean;
+  showPercent?: boolean;
+}
+export interface AiBridgeChartAxis {
+  title?: string;
+  titleFontSize?: number;
+  labelsFontSize?: number;
+  normalOrder?: boolean;
+  majorTickMark?: string;
+  minorTickMark?: string;
+  tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+  numberFormat?: string;
+  /** Axis position used by ONLYOFFICE SetAxieNumFormat, e.g. left or bottom. */
+  position?: string;
+}
+export interface AiBridgeChartLegend {
+  position?: "left" | "top" | "right" | "bottom" | "none";
+  fontSize?: number;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+}
+export interface AiBridgeChartPointUpdate {
+  index: number;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  markerFill?: AiBridgeFill;
+  markerLine?: AiBridgeLine;
+  numberFormat?: string;
+  allSeries?: boolean;
+  allMarkers?: boolean;
+  dataLabels?: AiBridgeChartDataLabels;
+}
+export interface AiBridgeChartSeriesUpdate {
+  /** Zero-based series index. */
+  index: number;
+  type?: AiBridgeChartType;
+  name?: string;
+  /** PPT chart values. */
+  values?: number[];
+  /** XLSX source range for series values. */
+  valuesRange?: string;
+  /** PPT scatter-chart X values. */
+  xValues?: number[];
+  /** XLSX source range for scatter-chart X values. */
+  xValuesRange?: string;
+  numberFormat?: string;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  allSeries?: boolean;
+  points?: AiBridgeChartPointUpdate[];
+}
+export interface AiBridgeChartGridlines {
+  majorHorizontal?: { line: AiBridgeLine };
+  minorHorizontal?: { line: AiBridgeLine };
+  majorVertical?: { line: AiBridgeLine };
+  minorVertical?: { line: AiBridgeLine };
+}
+export type AiBridgeChartType =
+  | "bar" | "barStacked" | "barStackedPercent" | "bar3D"
+  | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective"
+  | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent"
+  | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D"
+  | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker"
+  | "lineStackedMarker" | "lineStackedPerMarker" | "line3D"
+  | "pie" | "pie3D" | "doughnut"
+  | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker"
+  | "stock" | "area" | "areaStacked" | "areaStackedPercent"
+  | "comboCustom" | "comboBarLine" | "comboBarLineSecondary"
+  | "radar" | "radarMarker" | "radarFilled"
+  /** Friendly aliases normalized by the bridge. */
+  | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent"
+  | "stackedLine" | "stackedLinePercent" | "column";
+export interface AiBridgeChartFormatting {
+  name?: string;
+  style?: number;
+  title?: string;
+  titleFontSize?: number;
+  rotationDeg?: number;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  plotAreaFill?: AiBridgeFill;
+  plotAreaLine?: AiBridgeLine;
+  titleFill?: AiBridgeFill;
+  titleLine?: AiBridgeLine;
+  legend?: AiBridgeChartLegend;
+  horizontalAxis?: AiBridgeChartAxis;
+  verticalAxis?: AiBridgeChartAxis;
+  dataLabels?: AiBridgeChartDataLabels;
+  gridlines?: AiBridgeChartGridlines;
+  seriesUpdates?: AiBridgeChartSeriesUpdate[];
+  removeSeries?: number[];
+  includeRaw?: boolean;
+}
+export interface SlidesObjectTarget {
+  slide: number;
+  objectId?: string;
+  /** Zero-based index returned by slides_inspect_objects. */
+  objectIndex?: number;
+  name?: string;
+}
+export interface SlidesChartTarget {
+  slide: number;
+  chartId?: string;
+  /** Zero-based index returned by slides_inspect_charts. */
+  chartIndex?: number;
+  name?: string;
+}
+export interface SlidesShapeFormatting extends BasicTextFormat {
+  shapeType?: string;
+  text?: string;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  paddingMm?: AiBridgePadding;
+  /** Legacy solid fill. Prefer fill. */
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+}
 export interface SlidesInspectArgs { maxChars?: number; }
+export interface SlidesInspectObjectsArgs {
+  slide?: number;
+  kinds?: Array<"shape" | "chart" | "image" | "table" | "oleObject" | "group" | string>;
+  maxObjects?: number;
+  includeRaw?: boolean;
+  includeSlideRaw?: boolean;
+}
 export interface SlidesReplaceTextArgs { search: string; replace: string; matchCase?: boolean; slide?: number; }
 export interface SlidesScaleFontArgs { scale: number; slide?: number; }
 export interface SlidesFormatTextArgs extends TextFormat { slide?: number; }
@@ -281,16 +446,46 @@ export interface SlidesFormatSelectionArgs extends TextFormat {}
 export interface SlidesAddSlideArgs { index?: number; title?: string; titleFontSize?: number; backgroundColor?: string; }
 export interface SlidesDuplicateSlideArgs { slide: number; }
 export interface SlidesDeleteSlideArgs { slide: number; }
-export interface SlidesAddTextBoxArgs extends BasicTextFormat {
+export interface SlidesAddTextBoxArgs extends SlidesShapeFormatting {
   slide: number;
   text: string;
+}
+export interface SlidesSetBackgroundArgs {
+  slide: number;
+  mode?: "custom" | "clear" | "layout" | "master";
+  fill?: AiBridgeFill;
+}
+export interface SlidesAddShapeArgs extends SlidesShapeFormatting {
+  slide: number;
+  shapeType: string;
+}
+export interface SlidesUpdateShapeArgs extends SlidesObjectTarget, SlidesShapeFormatting {}
+export interface SlidesDeleteObjectArgs extends SlidesObjectTarget {}
+export interface SlidesInspectChartsArgs {
+  slide?: number;
+  maxCharts?: number;
+  includeRaw?: boolean;
+}
+export interface SlidesAddChartArgs extends AiBridgeChartFormatting {
+  slide: number;
+  type?: AiBridgeChartType;
+  series: number[][];
+  seriesNames: Array<string | number>;
+  categories: Array<string | number>;
+  numFormats?: string[];
   xMm?: number;
   yMm?: number;
   widthMm?: number;
   heightMm?: number;
-  fillColor?: string;
-  align?: string;
 }
+export interface SlidesUpdateChartArgs extends SlidesChartTarget, AiBridgeChartFormatting {
+  categories?: Array<string | number>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+}
+export interface SlidesDeleteChartArgs extends SlidesChartTarget {}
 
 export interface SheetsInspectArgs { maxCells?: number; }
 export interface SheetTarget { sheet?: string; }
@@ -318,7 +513,7 @@ export interface SheetsRenameSheetArgs extends SheetTarget { newName: string; }
 export interface SheetsDeleteSheetArgs { sheet: string; }
 export interface SheetsAddChartArgs extends SheetTarget {
   range: string;
-  type?: string;
+  type?: AiBridgeChartType;
   title?: string;
   titleFontSize?: number;
   inRows?: boolean;
@@ -327,7 +522,45 @@ export interface SheetsAddChartArgs extends SheetTarget {
   heightMm?: number;
   fromColumn?: number;
   fromRow?: number;
+  columnOffsetMm?: number;
+  rowOffsetMm?: number;
+  categoryRange?: string;
+  addSeries?: Array<{ name: string; valuesRange: string; xValuesRange?: string }>;
+  rotationDeg?: number;
+  name?: string;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  plotAreaFill?: AiBridgeFill;
+  plotAreaLine?: AiBridgeLine;
+  titleFill?: AiBridgeFill;
+  titleLine?: AiBridgeLine;
+  legend?: AiBridgeChartLegend;
+  horizontalAxis?: AiBridgeChartAxis;
+  verticalAxis?: AiBridgeChartAxis;
+  dataLabels?: AiBridgeChartDataLabels;
+  gridlines?: AiBridgeChartGridlines;
+  seriesUpdates?: AiBridgeChartSeriesUpdate[];
+  removeSeries?: number[];
+  includeRaw?: boolean;
 }
+export interface SheetsInspectChartsArgs extends SheetTarget { maxCharts?: number; includeRaw?: boolean; }
+export interface SheetsChartTarget extends SheetTarget {
+  /** Zero-based index returned by sheets_inspect_charts. */
+  chartIndex?: number;
+  name?: string;
+}
+export interface SheetsUpdateChartArgs extends SheetsChartTarget, AiBridgeChartFormatting {
+  widthMm?: number;
+  heightMm?: number;
+  fromColumn?: number;
+  fromRow?: number;
+  columnOffsetMm?: number;
+  rowOffsetMm?: number;
+  categoryRange?: string;
+  addSeries?: Array<{ name: string; valuesRange: string; xValuesRange?: string }>;
+}
+/** Requires ApiDrawing.Delete, a paid capability in some ONLYOFFICE Docs editions. */
+export interface SheetsDeleteChartArgs extends SheetsChartTarget {}
 
 export interface AiBridgeToolArgumentsMap {
   word_inspect: WordInspectArgs;
@@ -357,6 +590,7 @@ export interface AiBridgeToolArgumentsMap {
   word_set_header_footer: WordSetHeaderFooterArgs;
   word_set_document_text: WordSetDocumentTextArgs;
   slides_inspect: SlidesInspectArgs;
+  slides_inspect_objects: SlidesInspectObjectsArgs;
   slides_replace_text: SlidesReplaceTextArgs;
   slides_scale_font: SlidesScaleFontArgs;
   slides_format_text: SlidesFormatTextArgs;
@@ -365,6 +599,14 @@ export interface AiBridgeToolArgumentsMap {
   slides_duplicate_slide: SlidesDuplicateSlideArgs;
   slides_delete_slide: SlidesDeleteSlideArgs;
   slides_add_textbox: SlidesAddTextBoxArgs;
+  slides_set_background: SlidesSetBackgroundArgs;
+  slides_add_shape: SlidesAddShapeArgs;
+  slides_update_shape: SlidesUpdateShapeArgs;
+  slides_delete_object: SlidesDeleteObjectArgs;
+  slides_inspect_charts: SlidesInspectChartsArgs;
+  slides_add_chart: SlidesAddChartArgs;
+  slides_update_chart: SlidesUpdateChartArgs;
+  slides_delete_chart: SlidesDeleteChartArgs;
   sheets_inspect: SheetsInspectArgs;
   sheets_set_values: SheetsSetValuesArgs;
   sheets_set_formula: SheetsSetFormulaArgs;
@@ -374,6 +616,9 @@ export interface AiBridgeToolArgumentsMap {
   sheets_rename_sheet: SheetsRenameSheetArgs;
   sheets_delete_sheet: SheetsDeleteSheetArgs;
   sheets_add_chart: SheetsAddChartArgs;
+  sheets_inspect_charts: SheetsInspectChartsArgs;
+  sheets_update_chart: SheetsUpdateChartArgs;
+  sheets_delete_chart: SheetsDeleteChartArgs;
 }
 
 export type AiBridgeToolName = keyof AiBridgeToolArgumentsMap;
@@ -418,6 +663,7 @@ export interface AiBridgeWordApi {
 
 export interface AiBridgeSlidesApi {
   inspect(args?: SlidesInspectArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  inspectObjects(args?: SlidesInspectObjectsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   replaceText(args: SlidesReplaceTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   scaleFont(args: SlidesScaleFontArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   formatText(args: SlidesFormatTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
@@ -426,6 +672,14 @@ export interface AiBridgeSlidesApi {
   duplicateSlide(args: SlidesDuplicateSlideArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   deleteSlide(args: SlidesDeleteSlideArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   addTextBox(args: SlidesAddTextBoxArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setBackground(args: SlidesSetBackgroundArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addShape(args: SlidesAddShapeArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  updateShape(args: SlidesUpdateShapeArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteObject(args: SlidesDeleteObjectArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  inspectCharts(args?: SlidesInspectChartsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addChart(args: SlidesAddChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  updateChart(args: SlidesUpdateChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteChart(args: SlidesDeleteChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
 }
 
 export interface AiBridgeSheetsApi {
@@ -438,12 +692,15 @@ export interface AiBridgeSheetsApi {
   renameSheet(args: SheetsRenameSheetArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   deleteSheet(args: SheetsDeleteSheetArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   addChart(args: SheetsAddChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  inspectCharts(args?: SheetsInspectChartsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  updateChart(args: SheetsUpdateChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteChart(args: SheetsDeleteChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
 }
 
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.1.0";
+  readonly version: "0.2.0";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

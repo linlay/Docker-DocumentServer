@@ -329,7 +329,7 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const { hostWindow } = createHarness();
   await hostWindow.aiBridge.ready({ timeoutMs: 1000 });
 
-  assert.equal(hostWindow.aiBridge.version, "0.1.0");
+  assert.equal(hostWindow.aiBridge.version, "0.2.0");
   assert.equal(hostWindow.aiBridge.editorType, "word");
   assert.equal(hostWindow.aiBridge.context.documentKey, "doc-key-v1");
   assert.ok(hostWindow.aiBridge.capabilities.tools.includes("word_inspect"));
@@ -446,7 +446,7 @@ test("plugin rejects a command when the host document key changes", async () => 
   });
 });
 
-test("public contract, plugin allow-lists, and all 44 convenience methods stay aligned", async () => {
+test("public contract, plugin allow-lists, and all convenience methods stay aligned", async () => {
   const cases = {
     word: {
       group: "word",
@@ -483,6 +483,7 @@ test("public contract, plugin allow-lists, and all 44 convenience methods stay a
       group: "slides",
       methods: {
         inspect: ["slides_inspect", {}],
+        inspectObjects: ["slides_inspect_objects", {}],
         replaceText: ["slides_replace_text", { search: "a", replace: "b" }],
         scaleFont: ["slides_scale_font", { scale: 0.9 }],
         formatText: ["slides_format_text", { bold: true }],
@@ -491,6 +492,14 @@ test("public contract, plugin allow-lists, and all 44 convenience methods stay a
         duplicateSlide: ["slides_duplicate_slide", { slide: 1 }],
         deleteSlide: ["slides_delete_slide", { slide: 1 }],
         addTextBox: ["slides_add_textbox", { slide: 1, text: "a" }],
+        setBackground: ["slides_set_background", { slide: 1, fill: { type: "solid", color: "#FFFFFF" } }],
+        addShape: ["slides_add_shape", { slide: 1, shapeType: "rect" }],
+        updateShape: ["slides_update_shape", { slide: 1, objectIndex: 1, fill: { type: "none" } }],
+        deleteObject: ["slides_delete_object", { slide: 1, objectIndex: 1 }],
+        inspectCharts: ["slides_inspect_charts", {}],
+        addChart: ["slides_add_chart", { slide: 1, series: [[1]], seriesNames: ["S1"], categories: ["C1"] }],
+        updateChart: ["slides_update_chart", { slide: 1, chartIndex: 1, title: "T" }],
+        deleteChart: ["slides_delete_chart", { slide: 1, chartIndex: 1 }],
       },
     },
     cell: {
@@ -505,6 +514,9 @@ test("public contract, plugin allow-lists, and all 44 convenience methods stay a
         renameSheet: ["sheets_rename_sheet", { newName: "S2" }],
         deleteSheet: ["sheets_delete_sheet", { sheet: "S2" }],
         addChart: ["sheets_add_chart", { range: "A1:B2" }],
+        inspectCharts: ["sheets_inspect_charts", {}],
+        updateChart: ["sheets_update_chart", { chartIndex: 1, title: "T" }],
+        deleteChart: ["sheets_delete_chart", { chartIndex: 1 }],
       },
     },
   };
@@ -645,7 +657,7 @@ test("cross-origin client SDK connects through an explicit relay allow-list", as
     Object.keys(office.word).length +
     Object.keys(office.slides).length +
     Object.keys(office.sheets).length,
-    44,
+    56,
   );
 
   const result = await office.word.replaceText(

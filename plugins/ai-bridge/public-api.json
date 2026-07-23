@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "transport": {
@@ -72,6 +72,127 @@
     "color": { "type": "string", "pattern": "^#?[0-9A-Fa-f]{6}$" },
     "sheet": { "type": "string", "description": "工作表名称；省略时使用活动工作表" },
     "range": { "type": "string", "description": "A1 表示法，例如 A1:D10；selection 表示当前选区" },
+    "gradientStop": {
+      "type": "object",
+      "required": ["position", "color"],
+      "properties": {
+        "position": { "type": "number", "minimum": 0, "maximum": 100 },
+        "color": { "$ref": "#/$defs/color" }
+      },
+      "additionalProperties": false
+    },
+    "fill": {
+      "oneOf": [
+        { "type": "object", "required": ["type"], "properties": { "type": { "const": "none" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "color"], "properties": { "type": { "const": "solid" }, "color": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "stops"], "properties": { "type": { "const": "linearGradient" }, "stops": { "type": "array", "minItems": 2, "maxItems": 16, "items": { "$ref": "#/$defs/gradientStop" } }, "angleDeg": { "type": "number" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "stops"], "properties": { "type": { "const": "radialGradient" }, "stops": { "type": "array", "minItems": 2, "maxItems": 16, "items": { "$ref": "#/$defs/gradientStop" } } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "pattern", "backgroundColor", "foregroundColor"], "properties": { "type": { "const": "pattern" }, "pattern": { "type": "string" }, "backgroundColor": { "$ref": "#/$defs/color" }, "foregroundColor": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+        { "type": "object", "required": ["raw"], "properties": { "type": { "const": "raw" }, "raw": {} }, "additionalProperties": false }
+      ]
+    },
+    "line": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["solid", "none"] },
+        "enabled": { "type": "boolean" },
+        "widthPt": { "type": "number", "minimum": 0 },
+        "color": { "$ref": "#/$defs/color" },
+        "fill": { "$ref": "#/$defs/fill" },
+        "raw": {}
+      },
+      "additionalProperties": false
+    },
+    "padding": {
+      "type": "object",
+      "properties": {
+        "left": { "type": "number", "minimum": 0 },
+        "top": { "type": "number", "minimum": 0 },
+        "right": { "type": "number", "minimum": 0 },
+        "bottom": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "chartDataLabels": {
+      "type": "object",
+      "properties": {
+        "showSeriesName": { "type": "boolean" },
+        "showCategoryName": { "type": "boolean" },
+        "showValue": { "type": "boolean" },
+        "showPercent": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "chartAxis": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "titleFontSize": { "type": "number" },
+        "labelsFontSize": { "type": "number" },
+        "normalOrder": { "type": "boolean" },
+        "majorTickMark": { "type": "string" },
+        "minorTickMark": { "type": "string" },
+        "tickLabelPosition": { "enum": ["none", "nextTo", "low", "high"] },
+        "numberFormat": { "type": "string" },
+        "position": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "chartLegend": {
+      "type": "object",
+      "properties": {
+        "position": { "enum": ["left", "top", "right", "bottom", "none"] },
+        "fontSize": { "type": "number" },
+        "fill": { "$ref": "#/$defs/fill" },
+        "line": { "$ref": "#/$defs/line" }
+      },
+      "additionalProperties": false
+    },
+    "chartPointUpdate": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "fill": { "$ref": "#/$defs/fill" },
+        "line": { "$ref": "#/$defs/line" },
+        "markerFill": { "$ref": "#/$defs/fill" },
+        "markerLine": { "$ref": "#/$defs/line" },
+        "numberFormat": { "type": "string" },
+        "allSeries": { "type": "boolean" },
+        "allMarkers": { "type": "boolean" },
+        "dataLabels": { "$ref": "#/$defs/chartDataLabels" }
+      },
+      "additionalProperties": false
+    },
+    "chartSeriesUpdate": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "type": { "type": "string" },
+        "name": { "type": "string" },
+        "values": { "type": "array", "items": { "type": "number" } },
+        "valuesRange": { "type": "string" },
+        "xValues": { "type": "array", "items": { "type": "number" } },
+        "xValuesRange": { "type": "string" },
+        "numberFormat": { "type": "string" },
+        "fill": { "$ref": "#/$defs/fill" },
+        "line": { "$ref": "#/$defs/line" },
+        "allSeries": { "type": "boolean" },
+        "points": { "type": "array", "items": { "$ref": "#/$defs/chartPointUpdate" } }
+      },
+      "additionalProperties": false
+    },
+    "chartGridlines": {
+      "type": "object",
+      "properties": {
+        "majorHorizontal": { "type": "object", "required": ["line"], "properties": { "line": { "$ref": "#/$defs/line" } }, "additionalProperties": false },
+        "minorHorizontal": { "type": "object", "required": ["line"], "properties": { "line": { "$ref": "#/$defs/line" } }, "additionalProperties": false },
+        "majorVertical": { "type": "object", "required": ["line"], "properties": { "line": { "$ref": "#/$defs/line" } }, "additionalProperties": false },
+        "minorVertical": { "type": "object", "required": ["line"], "properties": { "line": { "$ref": "#/$defs/line" } }, "additionalProperties": false }
+      },
+      "additionalProperties": false
+    },
     "textFormat": {
       "type": "object",
       "properties": {
@@ -114,7 +235,8 @@
       "word_set_document_text": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } }, "additionalProperties": false }
     },
     "slide": {
-      "slides_inspect": { "type": "object", "properties": { "maxChars": { "type": "number" } }, "additionalProperties": false },
+      "slides_inspect": { "type": "object", "properties": { "maxChars": { "type": "number", "minimum": 500, "maximum": 60000 } }, "additionalProperties": false },
+      "slides_inspect_objects": { "type": "object", "properties": { "slide": { "type": "integer", "minimum": 1 }, "kinds": { "type": "array", "items": { "type": "string" }, "maxItems": 20 }, "maxObjects": { "type": "integer", "minimum": 1, "maximum": 1000 }, "includeRaw": { "type": "boolean" }, "includeSlideRaw": { "type": "boolean" } }, "additionalProperties": false },
       "slides_replace_text": { "type": "object", "required": ["search", "replace"], "properties": { "search": { "type": "string" }, "replace": { "type": "string" }, "matchCase": { "type": "boolean" }, "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
       "slides_scale_font": { "type": "object", "required": ["scale"], "properties": { "scale": { "type": "number", "exclusiveMinimum": 0, "maximum": 3 }, "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
       "slides_format_text": { "type": "object", "properties": { "slide": { "type": "integer", "minimum": 1 }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
@@ -122,10 +244,18 @@
       "slides_add_slide": { "type": "object", "properties": { "index": { "type": "integer", "minimum": 1 }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "backgroundColor": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
       "slides_duplicate_slide": { "type": "object", "required": ["slide"], "properties": { "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
       "slides_delete_slide": { "type": "object", "required": ["slide"], "properties": { "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
-      "slides_add_textbox": { "type": "object", "required": ["slide", "text"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number" }, "heightMm": { "type": "number" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "fillColor": { "$ref": "#/$defs/color" }, "align": { "type": "string" } }, "additionalProperties": false }
+      "slides_add_textbox": { "type": "object", "required": ["slide", "text"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "rotationDeg": { "type": "number" }, "flipH": { "type": "boolean" }, "flipV": { "type": "boolean" }, "name": { "type": "string" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "paddingMm": { "$ref": "#/$defs/padding" }, "fillColor": { "$ref": "#/$defs/color" }, "lineColor": { "$ref": "#/$defs/color" }, "lineWidthPt": { "type": "number", "minimum": 0 }, "align": { "type": "string" }, "verticalAlign": { "enum": ["top", "center", "bottom"] }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_set_background": { "type": "object", "required": ["slide"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "mode": { "enum": ["custom", "clear", "layout", "master"] }, "fill": { "$ref": "#/$defs/fill" } }, "additionalProperties": false },
+      "slides_add_shape": { "type": "object", "required": ["slide", "shapeType"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "shapeType": { "type": "string" }, "text": { "type": "string" }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "rotationDeg": { "type": "number" }, "flipH": { "type": "boolean" }, "flipV": { "type": "boolean" }, "name": { "type": "string" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "paddingMm": { "$ref": "#/$defs/padding" }, "fillColor": { "$ref": "#/$defs/color" }, "lineColor": { "$ref": "#/$defs/color" }, "lineWidthPt": { "type": "number", "minimum": 0 }, "align": { "type": "string" }, "verticalAlign": { "enum": ["top", "center", "bottom"] }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_update_shape": { "type": "object", "required": ["slide"], "anyOf": [{ "required": ["objectId"] }, { "required": ["objectIndex"] }, { "required": ["name"] }], "properties": { "slide": { "type": "integer", "minimum": 1 }, "objectId": { "type": "string" }, "objectIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" }, "shapeType": { "type": "string" }, "text": { "type": "string" }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "rotationDeg": { "type": "number" }, "flipH": { "type": "boolean" }, "flipV": { "type": "boolean" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "paddingMm": { "$ref": "#/$defs/padding" }, "fillColor": { "$ref": "#/$defs/color" }, "lineColor": { "$ref": "#/$defs/color" }, "lineWidthPt": { "type": "number", "minimum": 0 }, "align": { "type": "string" }, "verticalAlign": { "enum": ["top", "center", "bottom"] }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_delete_object": { "type": "object", "required": ["slide"], "anyOf": [{ "required": ["objectId"] }, { "required": ["objectIndex"] }, { "required": ["name"] }], "properties": { "slide": { "type": "integer", "minimum": 1 }, "objectId": { "type": "string" }, "objectIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" } }, "additionalProperties": false },
+      "slides_inspect_charts": { "type": "object", "properties": { "slide": { "type": "integer", "minimum": 1 }, "maxCharts": { "type": "integer", "minimum": 1, "maximum": 500 }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_add_chart": { "type": "object", "required": ["slide", "series", "seriesNames", "categories"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "type": { "type": "string" }, "series": { "type": "array", "minItems": 1, "items": { "type": "array", "items": { "type": "number" } } }, "seriesNames": { "type": "array", "minItems": 1, "items": { "type": ["string", "number"] } }, "categories": { "type": "array", "items": { "type": ["string", "number"] } }, "numFormats": { "type": "array", "items": { "type": "string" } }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "name": { "type": "string" }, "style": { "type": "number", "minimum": 1, "maximum": 48 }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "rotationDeg": { "type": "number" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "plotAreaFill": { "$ref": "#/$defs/fill" }, "plotAreaLine": { "$ref": "#/$defs/line" }, "titleFill": { "$ref": "#/$defs/fill" }, "titleLine": { "$ref": "#/$defs/line" }, "legend": { "$ref": "#/$defs/chartLegend" }, "horizontalAxis": { "$ref": "#/$defs/chartAxis" }, "verticalAxis": { "$ref": "#/$defs/chartAxis" }, "dataLabels": { "$ref": "#/$defs/chartDataLabels" }, "gridlines": { "$ref": "#/$defs/chartGridlines" }, "seriesUpdates": { "type": "array", "items": { "$ref": "#/$defs/chartSeriesUpdate" } }, "removeSeries": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_update_chart": { "type": "object", "required": ["slide"], "anyOf": [{ "required": ["chartId"] }, { "required": ["chartIndex"] }, { "required": ["name"] }], "properties": { "slide": { "type": "integer", "minimum": 1 }, "chartId": { "type": "string" }, "chartIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" }, "categories": { "type": "array", "items": { "type": ["string", "number"] } }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "style": { "type": "number", "minimum": 1, "maximum": 48 }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "rotationDeg": { "type": "number" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "plotAreaFill": { "$ref": "#/$defs/fill" }, "plotAreaLine": { "$ref": "#/$defs/line" }, "titleFill": { "$ref": "#/$defs/fill" }, "titleLine": { "$ref": "#/$defs/line" }, "legend": { "$ref": "#/$defs/chartLegend" }, "horizontalAxis": { "$ref": "#/$defs/chartAxis" }, "verticalAxis": { "$ref": "#/$defs/chartAxis" }, "dataLabels": { "$ref": "#/$defs/chartDataLabels" }, "gridlines": { "$ref": "#/$defs/chartGridlines" }, "seriesUpdates": { "type": "array", "items": { "$ref": "#/$defs/chartSeriesUpdate" } }, "removeSeries": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "slides_delete_chart": { "type": "object", "required": ["slide"], "anyOf": [{ "required": ["chartId"] }, { "required": ["chartIndex"] }, { "required": ["name"] }], "properties": { "slide": { "type": "integer", "minimum": 1 }, "chartId": { "type": "string" }, "chartIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" } }, "additionalProperties": false }
     },
     "cell": {
-      "sheets_inspect": { "type": "object", "properties": { "maxCells": { "type": "number" } }, "additionalProperties": false },
+      "sheets_inspect": { "type": "object", "properties": { "maxCells": { "type": "number", "minimum": 1, "maximum": 10000 } }, "additionalProperties": false },
       "sheets_set_values": { "type": "object", "required": ["range", "values"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "values": {} }, "additionalProperties": false },
       "sheets_set_formula": { "type": "object", "required": ["range", "formula"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "formula": { "type": "string" } }, "additionalProperties": false },
       "sheets_replace_text": { "type": "object", "required": ["search", "replace"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "search": { "type": "string" }, "replace": { "type": "string" } }, "additionalProperties": false },
@@ -133,7 +263,10 @@
       "sheets_add_sheet": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } }, "additionalProperties": false },
       "sheets_rename_sheet": { "type": "object", "required": ["newName"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "newName": { "type": "string" } }, "additionalProperties": false },
       "sheets_delete_sheet": { "type": "object", "required": ["sheet"], "properties": { "sheet": { "$ref": "#/$defs/sheet" } }, "additionalProperties": false },
-      "sheets_add_chart": { "type": "object", "required": ["range"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "type": { "type": "string" }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "inRows": { "type": "boolean" }, "style": { "type": "number" }, "widthMm": { "type": "number" }, "heightMm": { "type": "number" }, "fromColumn": { "type": "number" }, "fromRow": { "type": "number" } }, "additionalProperties": false }
+      "sheets_add_chart": { "type": "object", "required": ["range"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "type": { "type": "string" }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "inRows": { "type": "boolean" }, "style": { "type": "number", "minimum": 1, "maximum": 48 }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "fromColumn": { "type": "integer", "minimum": 0 }, "fromRow": { "type": "integer", "minimum": 0 }, "columnOffsetMm": { "type": "number", "minimum": 0 }, "rowOffsetMm": { "type": "number", "minimum": 0 }, "categoryRange": { "type": "string" }, "addSeries": { "type": "array", "items": { "type": "object", "required": ["name", "valuesRange"], "properties": { "name": { "type": "string" }, "valuesRange": { "type": "string" }, "xValuesRange": { "type": "string" } }, "additionalProperties": false } }, "rotationDeg": { "type": "number" }, "name": { "type": "string" }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "plotAreaFill": { "$ref": "#/$defs/fill" }, "plotAreaLine": { "$ref": "#/$defs/line" }, "titleFill": { "$ref": "#/$defs/fill" }, "titleLine": { "$ref": "#/$defs/line" }, "legend": { "$ref": "#/$defs/chartLegend" }, "horizontalAxis": { "$ref": "#/$defs/chartAxis" }, "verticalAxis": { "$ref": "#/$defs/chartAxis" }, "dataLabels": { "$ref": "#/$defs/chartDataLabels" }, "gridlines": { "$ref": "#/$defs/chartGridlines" }, "seriesUpdates": { "type": "array", "items": { "$ref": "#/$defs/chartSeriesUpdate" } }, "removeSeries": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "sheets_inspect_charts": { "type": "object", "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "maxCharts": { "type": "integer", "minimum": 1, "maximum": 500 }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "sheets_update_chart": { "type": "object", "anyOf": [{ "required": ["chartIndex"] }, { "required": ["name"] }], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "chartIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" }, "style": { "type": "number", "minimum": 1, "maximum": 48 }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "rotationDeg": { "type": "number" }, "widthMm": { "type": "number", "exclusiveMinimum": 0 }, "heightMm": { "type": "number", "exclusiveMinimum": 0 }, "fromColumn": { "type": "integer", "minimum": 0 }, "fromRow": { "type": "integer", "minimum": 0 }, "columnOffsetMm": { "type": "number", "minimum": 0 }, "rowOffsetMm": { "type": "number", "minimum": 0 }, "categoryRange": { "type": "string" }, "addSeries": { "type": "array", "items": { "type": "object", "required": ["name", "valuesRange"], "properties": { "name": { "type": "string" }, "valuesRange": { "type": "string" }, "xValuesRange": { "type": "string" } }, "additionalProperties": false } }, "fill": { "$ref": "#/$defs/fill" }, "line": { "$ref": "#/$defs/line" }, "plotAreaFill": { "$ref": "#/$defs/fill" }, "plotAreaLine": { "$ref": "#/$defs/line" }, "titleFill": { "$ref": "#/$defs/fill" }, "titleLine": { "$ref": "#/$defs/line" }, "legend": { "$ref": "#/$defs/chartLegend" }, "horizontalAxis": { "$ref": "#/$defs/chartAxis" }, "verticalAxis": { "$ref": "#/$defs/chartAxis" }, "dataLabels": { "$ref": "#/$defs/chartDataLabels" }, "gridlines": { "$ref": "#/$defs/chartGridlines" }, "seriesUpdates": { "type": "array", "items": { "$ref": "#/$defs/chartSeriesUpdate" } }, "removeSeries": { "type": "array", "items": { "type": "integer", "minimum": 0 } }, "includeRaw": { "type": "boolean" } }, "additionalProperties": false },
+      "sheets_delete_chart": { "type": "object", "anyOf": [{ "required": ["chartIndex"] }, { "required": ["name"] }], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "chartIndex": { "type": "integer", "minimum": 0 }, "name": { "type": "string" } }, "additionalProperties": false }
     }
   }
 }
