@@ -7,6 +7,13 @@
   const MAX_CALLS = 20;
   const MAX_CACHED_REQUESTS = 100;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+  const READ_ONLY_TOOLS = new Set([
+    "word_inspect",
+    "word_navigate",
+    "word_scroll",
+    "slides_inspect",
+    "sheets_inspect",
+  ]);
 
   const ALLOWED_TOOLS = {
     word: new Set([
@@ -16,8 +23,25 @@
       "word_insert_paragraph",
       "word_format_document",
       "word_format_selection",
+      "word_format_matches",
+      "word_delete_matches",
+      "word_add_hyperlink",
+      "word_add_comment",
+      "word_add_bookmark",
+      "word_format_paragraphs",
+      "word_set_paragraph_text",
+      "word_delete_paragraphs",
+      "word_set_list",
+      "word_insert_page_break",
+      "word_navigate",
+      "word_scroll",
       "word_scale_font",
       "word_add_table",
+      "word_set_table_cell",
+      "word_format_table",
+      "word_edit_table",
+      "word_set_page_layout",
+      "word_set_header_footer",
       "word_set_document_text",
     ]),
     slide: new Set([
@@ -251,18 +275,31 @@
     });
   }
 
+  function storageVersionChanged(saved) {
+    if (!saved || !saved.persisted) return false;
+    if (saved.promoted === true) return true;
+    const before = Number(saved.beforeMtime);
+    const after = Number(saved.afterMtime);
+    return Number.isFinite(before) && Number.isFinite(after) && after > before + 0.0001;
+  }
+
   async function executeTools(toolCalls) {
-    const mutating = toolCalls.some(function (call) { return !call.name.endsWith("_inspect"); });
+    const mutating = toolCalls.some(function (call) { return !READ_ONLY_TOOLS.has(call.name); });
     if (mutating) await versionRequest("checkpoint");
 
     const result = toolCalls.length
       ? await state.bridge.execute(toolCalls)
       : { changed: 0, results: [] };
 
-    if (!mutating) return { ...result, persisted: false };
+    if (!mutating || !result.needsSave) {
+      return { result: { ...result, persisted: false }, reload: false };
+    }
     await saveInsideEditor();
     const saved = await forceSave();
-    return { ...result, forceSave: saved, persisted: Boolean(saved.persisted) };
+    return {
+      result: { ...result, forceSave: saved, persisted: Boolean(saved.persisted) },
+      reload: storageVersionChanged(saved),
+    };
   }
 
   async function executeCommand(command) {
@@ -276,7 +313,8 @@
     switch (action) {
       case "save": {
         await saveInsideEditor();
-        return { result: await forceSave({ allowNoChanges: true }), reload: false };
+        const saved = await forceSave({ allowNoChanges: true });
+        return { result: saved, reload: storageVersionChanged(saved) };
       }
       case "history":
         return { result: await versionRequest("history"), reload: false };
@@ -313,7 +351,9 @@
       try {
         validateTarget(message.target);
         if (message.type === "execute") {
-          response = { type: "result", requestId, result: await executeCommand(message.command) };
+          const executed = await executeCommand(message.command);
+          response = { type: "result", requestId, result: executed.result };
+          reload = executed.reload;
         } else if (message.type === "control") {
           const controlled = await executeControl(message.action);
           response = { type: "result", requestId, result: controlled.result };
@@ -329,7 +369,10 @@
 
       rememberResponse(requestId, response);
       publish(response);
-      if (reload) window.setTimeout(function () { publish({ type: "reload", reason: message.action }); }, 50);
+      if (reload) {
+        const reason = message.type === "execute" ? "document-version-changed" : message.action;
+        window.setTimeout(function () { publish({ type: "reload", reason }); }, 50);
+      }
     }).catch(function () {
       state.inFlight.delete(requestId);
     });

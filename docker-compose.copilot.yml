@@ -13,8 +13,8 @@ services:
         /etc/nginx/conf.d/copilot-loopback.conf &&
         exec /app/ds/run-document-server.sh
     ports:
-      - "8088:80"
-      - "8443:443"
+      - "127.0.0.1:8088:80"
+      - "127.0.0.1:8443:443"
     environment:
       EXAMPLE_ENABLED: "true"
       PLUGINS_ENABLED: "${ONLYOFFICE_DEFAULT_PLUGINS_ENABLED:-false}"

@@ -89,34 +89,187 @@ export interface BasicTextFormat {
   italic?: boolean;
   color?: string;
 }
-export interface TextFormat extends BasicTextFormat { underline?: boolean; }
-
-export interface WordInspectArgs { maxChars?: number; }
-export interface WordReplaceTextArgs { search: string; replace: string; matchCase?: boolean; }
-export interface WordAppendParagraphArgs extends BasicTextFormat {
-  text: string;
+export interface TextFormat extends BasicTextFormat {
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  highlightColor?: string;
+  characterSpacing?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+}
+export interface WordParagraphFormat extends TextFormat {
   align?: "left" | "center" | "right" | "both";
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
   spacingBefore?: number;
   spacingAfter?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
 }
-export interface WordInsertParagraphArgs extends BasicTextFormat {
+export interface WordParagraphTarget {
+  /** One-based indexes from word_inspect.paragraphDetails. */
+  paragraphIndexes?: number[];
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+}
+export interface WordSearchTarget {
+  search: string;
+  matchCase?: boolean;
+  occurrence?: number;
+  maxMatches?: number;
+}
+
+export interface WordInspectArgs {
+  maxChars?: number;
+  maxParagraphs?: number;
+  includeStructure?: boolean;
+  includeComments?: boolean;
+}
+export interface WordReplaceTextArgs { search: string; replace: string; matchCase?: boolean; }
+export interface WordAppendParagraphArgs extends WordParagraphFormat {
+  text: string;
+  listType?: "bullet" | "numbered";
+  listLevel?: number;
+}
+export interface WordInsertParagraphArgs extends WordParagraphFormat {
   text: string;
   inline?: boolean;
-  align?: "left" | "center" | "right" | "both" | string;
+  listType?: "bullet" | "numbered";
+  listLevel?: number;
 }
-export interface WordFormatDocumentArgs extends TextFormat {
-  strikeout?: boolean;
-  align?: "left" | "center" | "right" | "both";
-  spacingBefore?: number;
-  spacingAfter?: number;
+export interface WordFormatDocumentArgs extends WordParagraphFormat {}
+export interface WordFormatSelectionArgs extends TextFormat {}
+export interface WordFormatMatchesArgs extends WordSearchTarget, TextFormat {}
+export interface WordDeleteMatchesArgs extends WordSearchTarget {}
+export interface WordAddHyperlinkArgs extends WordSearchTarget {
+  url: string;
+  screenTip?: string;
+  bookmarkName?: string;
 }
-export interface WordFormatSelectionArgs extends TextFormat { strikeout?: boolean; }
+export interface WordAddCommentArgs extends WordSearchTarget {
+  text: string;
+  author?: string;
+  userId?: string;
+}
+export interface WordAddBookmarkArgs extends WordSearchTarget {
+  occurrence: number;
+  name: string;
+}
+export interface WordFormatParagraphsArgs extends WordParagraphTarget, WordParagraphFormat {}
+export interface WordSetParagraphTextArgs extends WordParagraphTarget, WordParagraphFormat { text: string; }
+export interface WordDeleteParagraphsArgs extends WordParagraphTarget {}
+export interface WordSetListArgs extends WordParagraphTarget {
+  listType: "bullet" | "numbered";
+  level?: number;
+  contextualSpacing?: boolean;
+}
+export interface WordInsertPageBreakArgs extends WordParagraphTarget {
+  position?: "before" | "after";
+}
+export interface WordNavigateArgs {
+  target?: "start" | "end" | "page" | "next" | "previous" | "relative" | "current" | "search";
+  /** One-based page number; required when target is "page". */
+  page?: number;
+  pageDelta?: number;
+  search?: string;
+  matchCase?: boolean;
+  occurrence?: number;
+}
+export interface WordScrollArgs { direction?: "up" | "down"; pages?: number; }
 export interface WordScaleFontArgs { scale: number; }
-export interface WordAddTableArgs {
+export interface WordAddTableArgs extends BasicTextFormat {
   rows: number;
   cols: number;
   data?: unknown[][];
   widthPercent?: number;
+  styleName?: string;
+  firstRow?: boolean;
+  lastRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  horizontalBanding?: boolean;
+  verticalBanding?: boolean;
+  title?: string;
+  description?: string;
+}
+export interface WordSetTableCellArgs extends WordParagraphFormat {
+  tableIndex: number;
+  row: number;
+  column: number;
+  text?: string;
+  backgroundColor?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  widthPercent?: number;
+}
+export interface WordFormatTableArgs extends BasicTextFormat {
+  tableIndex: number;
+  widthPercent?: number;
+  align?: "left" | "center" | "right";
+  styleName?: string;
+  backgroundColor?: string;
+  title?: string;
+  description?: string;
+  firstRow?: boolean;
+  lastRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  horizontalBanding?: boolean;
+  verticalBanding?: boolean;
+  verticalAlign?: "top" | "center" | "bottom";
+}
+export interface WordEditTableArgs {
+  tableIndex: number;
+  action: "addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete";
+  row?: number;
+  column?: number;
+  position?: "before" | "after";
+  rowStart?: number;
+  rowEnd?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  rows?: number;
+  columns?: number;
+}
+export interface WordSetPageLayoutArgs {
+  sectionIndex?: number;
+  pageSize?: "A4" | "Letter" | "Legal" | "custom";
+  orientation?: "portrait" | "landscape";
+  widthMm?: number;
+  heightMm?: number;
+  marginLeftMm?: number;
+  marginTopMm?: number;
+  marginRightMm?: number;
+  marginBottomMm?: number;
+  headerDistanceMm?: number;
+  footerDistanceMm?: number;
+  titlePage?: boolean;
+}
+export interface WordSetHeaderFooterArgs extends BasicTextFormat {
+  kind: "header" | "footer";
+  type?: "default" | "first" | "even";
+  action?: "set" | "remove";
+  sectionIndex?: number;
+  text?: string;
+  replace?: boolean;
+  pageNumber?: boolean;
+  pagesCount?: boolean;
+  align?: "left" | "center" | "right" | "both";
 }
 export interface WordSetDocumentTextArgs { text: string; }
 
@@ -183,8 +336,25 @@ export interface AiBridgeToolArgumentsMap {
   word_insert_paragraph: WordInsertParagraphArgs;
   word_format_document: WordFormatDocumentArgs;
   word_format_selection: WordFormatSelectionArgs;
+  word_format_matches: WordFormatMatchesArgs;
+  word_delete_matches: WordDeleteMatchesArgs;
+  word_add_hyperlink: WordAddHyperlinkArgs;
+  word_add_comment: WordAddCommentArgs;
+  word_add_bookmark: WordAddBookmarkArgs;
+  word_format_paragraphs: WordFormatParagraphsArgs;
+  word_set_paragraph_text: WordSetParagraphTextArgs;
+  word_delete_paragraphs: WordDeleteParagraphsArgs;
+  word_set_list: WordSetListArgs;
+  word_insert_page_break: WordInsertPageBreakArgs;
+  word_navigate: WordNavigateArgs;
+  word_scroll: WordScrollArgs;
   word_scale_font: WordScaleFontArgs;
   word_add_table: WordAddTableArgs;
+  word_set_table_cell: WordSetTableCellArgs;
+  word_format_table: WordFormatTableArgs;
+  word_edit_table: WordEditTableArgs;
+  word_set_page_layout: WordSetPageLayoutArgs;
+  word_set_header_footer: WordSetHeaderFooterArgs;
   word_set_document_text: WordSetDocumentTextArgs;
   slides_inspect: SlidesInspectArgs;
   slides_replace_text: SlidesReplaceTextArgs;
@@ -224,8 +394,25 @@ export interface AiBridgeWordApi {
   insertParagraph(args: WordInsertParagraphArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   formatDocument(args: WordFormatDocumentArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   formatSelection(args: WordFormatSelectionArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  formatMatches(args: WordFormatMatchesArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteMatches(args: WordDeleteMatchesArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addHyperlink(args: WordAddHyperlinkArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addComment(args: WordAddCommentArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addBookmark(args: WordAddBookmarkArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  formatParagraphs(args: WordFormatParagraphsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setParagraphText(args: WordSetParagraphTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteParagraphs(args: WordDeleteParagraphsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setList(args: WordSetListArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  insertPageBreak(args: WordInsertPageBreakArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  navigate(args?: WordNavigateArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  scroll(args?: WordScrollArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   scaleFont(args: WordScaleFontArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   addTable(args: WordAddTableArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setTableCell(args: WordSetTableCellArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  formatTable(args: WordFormatTableArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  editTable(args: WordEditTableArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setPageLayout(args: WordSetPageLayoutArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  setHeaderFooter(args: WordSetHeaderFooterArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   setDocumentText(args: WordSetDocumentTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
 }
 

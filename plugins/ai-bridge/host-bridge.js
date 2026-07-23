@@ -147,6 +147,11 @@
     return typeof config === "object" && config ? config : {};
   }
 
+  function editorToken() {
+    const editorConfig = editorConfiguration();
+    return typeof editorConfig.token === "string" ? editorConfig.token : "";
+  }
+
   function currentConfig() {
     const editorConfig = editorConfiguration();
     return {
@@ -458,8 +463,25 @@
       insertParagraph: function (args, options) { return executeTool("word_insert_paragraph", args, options); },
       formatDocument: function (args, options) { return executeTool("word_format_document", args, options); },
       formatSelection: function (args, options) { return executeTool("word_format_selection", args, options); },
+      formatMatches: function (args, options) { return executeTool("word_format_matches", args, options); },
+      deleteMatches: function (args, options) { return executeTool("word_delete_matches", args, options); },
+      addHyperlink: function (args, options) { return executeTool("word_add_hyperlink", args, options); },
+      addComment: function (args, options) { return executeTool("word_add_comment", args, options); },
+      addBookmark: function (args, options) { return executeTool("word_add_bookmark", args, options); },
+      formatParagraphs: function (args, options) { return executeTool("word_format_paragraphs", args, options); },
+      setParagraphText: function (args, options) { return executeTool("word_set_paragraph_text", args, options); },
+      deleteParagraphs: function (args, options) { return executeTool("word_delete_paragraphs", args, options); },
+      setList: function (args, options) { return executeTool("word_set_list", args, options); },
+      insertPageBreak: function (args, options) { return executeTool("word_insert_page_break", args, options); },
+      navigate: function (args, options) { return executeTool("word_navigate", args, options); },
+      scroll: function (args, options) { return executeTool("word_scroll", args, options); },
       scaleFont: function (args, options) { return executeTool("word_scale_font", args, options); },
       addTable: function (args, options) { return executeTool("word_add_table", args, options); },
+      setTableCell: function (args, options) { return executeTool("word_set_table_cell", args, options); },
+      formatTable: function (args, options) { return executeTool("word_format_table", args, options); },
+      editTable: function (args, options) { return executeTool("word_edit_table", args, options); },
+      setPageLayout: function (args, options) { return executeTool("word_set_page_layout", args, options); },
+      setHeaderFooter: function (args, options) { return executeTool("word_set_header_footer", args, options); },
       setDocumentText: function (args, options) { return executeTool("word_set_document_text", args, options); },
     },
     slides: {
@@ -489,6 +511,230 @@
   window.aiBridge = api;
   window.onlyofficeAI = api;
   window.AiBridgeError = window.AiBridgeError || AiBridgeError;
+
+  function localHttpRelayEnabled() {
+    if (window.aiBridgeOptions && window.aiBridgeOptions.httpRelay === false) return false;
+    return window.location.hostname === "localhost"
+      || window.location.hostname === "127.0.0.1"
+      || window.location.hostname === "::1";
+  }
+
+  async function httpRelayPost(path, payload) {
+    const response = await window.fetch(`/copilot-api/bridge/${path}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw bridgeError("HTTP_RELAY_INVALID_RESPONSE", `HTTP Relay 返回了无效响应：${response.status}`);
+    }
+    if (!response.ok || !body || body.ok === false) {
+      const error = body && body.error || {};
+      throw bridgeError(
+        error.code || "HTTP_RELAY_FAILED",
+        error.message || `HTTP Relay 请求失败：${response.status}`,
+        { details: error.details },
+      );
+    }
+    return body;
+  }
+
+  function startLocalHttpRelay() {
+    if (!localHttpRelayEnabled() || typeof window.fetch !== "function") return;
+    const httpSessionId = createRequestId("http-session");
+    const credentialReloadWindowMs = 60000;
+    let relayKey = null;
+    let resumeToken = null;
+    let stopped = false;
+    let retryDelayMs = 1000;
+
+    function setRelayState(value) {
+      if (document.documentElement && document.documentElement.dataset) {
+        document.documentElement.dataset.aiBridgeRelayState = value;
+      }
+    }
+
+    function credentialReloadKey() {
+      const snapshot = stateSnapshot();
+      const context = snapshot && snapshot.context || {};
+      return "aiBridgeCredentialReloadAt:" + [
+        context.fileName,
+        context.fileType,
+        context.editorType,
+        context.userId,
+      ].map(function (value) { return String(value || ""); }).join("|");
+    }
+
+    function credentialReloadAt() {
+      const key = credentialReloadKey();
+      let latest = 0;
+      try {
+        const stored = Number(window.localStorage && window.localStorage.getItem(key));
+        if (Number.isFinite(stored) && stored > latest) latest = stored;
+      } catch (error) {
+        // Fall back to per-tab storage when persistent storage is unavailable.
+      }
+      try {
+        const stored = Number(window.sessionStorage && window.sessionStorage.getItem(key));
+        if (Number.isFinite(stored) && stored > latest) latest = stored;
+      } catch (error) {
+        // Fall back to a URL marker when sessionStorage is unavailable.
+      }
+      if (latest > 0) return latest;
+      try {
+        return Number(new URL(window.location.href).searchParams.get("aiBridgeCredentialReloadAt")) || 0;
+      } catch (error) {
+        return 0;
+      }
+    }
+
+    function rememberCredentialReload(value) {
+      const key = credentialReloadKey();
+      let stored = false;
+      try {
+        if (window.localStorage) {
+          window.localStorage.setItem(key, String(value));
+          stored = true;
+        }
+      } catch (error) {
+        // Fall back to per-tab storage when persistent storage is unavailable.
+      }
+      try {
+        if (window.sessionStorage) {
+          window.sessionStorage.setItem(key, String(value));
+          stored = true;
+        }
+      } catch (error) {
+        // Fall back to a URL marker when sessionStorage is unavailable.
+      }
+      if (stored) return;
+      try {
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set("aiBridgeCredentialReloadAt", String(value));
+        window.history.replaceState(null, "", currentUrl.toString());
+      } catch (error) {
+        // The in-page terminal state still prevents another request loop.
+      }
+    }
+
+    function stopRelay(reason, code) {
+      stopped = true;
+      relayKey = null;
+      setRelayState(reason);
+      emit("relayError", { reason, code: code || "HTTP_RELAY_STOPPED" });
+    }
+
+    function reloadForCredentialError(code) {
+      const now = Date.now();
+      if (now - credentialReloadAt() < credentialReloadWindowMs) {
+        stopRelay("credential-error", code);
+        return;
+      }
+      rememberCredentialReload(now);
+      stopped = true;
+      setRelayState("credential-reload");
+      emit("reload", { reason: "relay-credentials-expired", code });
+      window.setTimeout(function () { window.location.reload(); }, 50);
+    }
+
+    async function register() {
+      await waitUntilReady(30000);
+      const payload = {
+        sessionId: httpSessionId,
+        state: stateSnapshot(),
+      };
+      if (resumeToken) {
+        payload.resumeToken = resumeToken;
+      } else {
+        const token = editorToken();
+        if (!token) throw bridgeError("EDITOR_TOKEN_REQUIRED", "当前编辑器没有可用于 HTTP Relay 的绑定凭证");
+        payload.editorToken = token;
+      }
+      const response = await httpRelayPost("register", payload);
+      relayKey = response.relayKey;
+      resumeToken = response.resumeToken || resumeToken;
+      setRelayState("ready");
+    }
+
+    async function report(command, outcome) {
+      await httpRelayPost("result", {
+        sessionId: httpSessionId,
+        relayKey,
+        commandId: command.commandId,
+        state: stateSnapshot(),
+        ...outcome,
+      });
+    }
+
+    async function loop() {
+      while (!stopped) {
+        try {
+          if (!relayKey) await register();
+          const response = await httpRelayPost("poll", {
+            sessionId: httpSessionId,
+            relayKey,
+            timeoutMs: 25000,
+            state: stateSnapshot(),
+          });
+          retryDelayMs = 1000;
+          const command = response.command;
+          if (!command) continue;
+          const internalRequestId = relayRequestId(httpSessionId, command.requestId);
+          try {
+            const result = await executeRelayMethod(command.method, command.params || {}, internalRequestId);
+            await report(command, { ok: true, result });
+          } catch (error) {
+            await report(command, { ok: false, error: serializedError(error, command.requestId) });
+          }
+        } catch (error) {
+          const code = error && error.code;
+          if (code === "INVALID_RELAY_SESSION") {
+            relayKey = null;
+            continue;
+          }
+          if (code === "INVALID_BRIDGE_RESUME_TOKEN") {
+            relayKey = null;
+            resumeToken = null;
+            continue;
+          }
+          if (code === "SESSION_SUPERSEDED") {
+            stopRelay("superseded", code);
+            return;
+          }
+          if (
+            code === "EDITOR_TOKEN_REQUIRED" ||
+            code === "INVALID_EDITOR_TOKEN" ||
+            code === "EDITOR_TOKEN_EXPIRED" ||
+            code === "BRIDGE_RESUME_TOKEN_EXPIRED" ||
+            code === "DOCUMENT_MISMATCH" ||
+            code === "EDITOR_MISMATCH" ||
+            code === "DOCUMENT_IDENTITY_MISMATCH" ||
+            code === "INCOMPLETE_BRIDGE_IDENTITY"
+          ) {
+            reloadForCredentialError(code);
+            return;
+          }
+          setRelayState("retrying");
+          await new Promise(function (resolve) { window.setTimeout(resolve, retryDelayMs); });
+          retryDelayMs = Math.min(10000, retryDelayMs * 2);
+        }
+      }
+    }
+
+    window.addEventListener("beforeunload", function () {
+      stopped = true;
+      if (!relayKey || !window.navigator || typeof window.navigator.sendBeacon !== "function") return;
+      const body = JSON.stringify({ sessionId: httpSessionId, relayKey });
+      window.navigator.sendBeacon("/copilot-api/bridge/unregister", body);
+    });
+    loop();
+  }
+
+  startLocalHttpRelay();
 
   const currentUrl = new URL(window.location.href);
   const initialCommand = currentUrl.searchParams.get("aiCommand");

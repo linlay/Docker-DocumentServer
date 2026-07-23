@@ -18,6 +18,7 @@ Plugin identity:
 External Copilot UI
   -> window.aiBridge (same-page API)
      OR client-sdk.js -> allow-listed postMessage relay
+     OR local HTTPX -> editor-JWT-bound /copilot-api/bridge relay
   -> host-bridge.js
   -> instance-bound postMessage protocol
   -> headless ai-bridge plugin (plugin.js)
@@ -53,7 +54,7 @@ const editorConfig = {
     user: { id: "user-42", name: "Demo User" },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev12",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
     },
@@ -84,14 +85,24 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
 Copilot iframe or popup can use the allow-listed `client-sdk.js` relay described
 in `INTEGRATION.zh-CN.md`. A completely unrelated tab or process with no window
 reference must relay its command through the application's authenticated
-WebSocket or HTTP channel.
+WebSocket or HTTP channel. The bundled localhost demo now includes such an HTTP
+Relay for HTTPX: the browser registers with its signed ONLYOFFICE editor JWT,
+while HTTPX exchanges the same short-lived JWT once for a scoped 12-hour bridge
+binding token. The binding follows the authoritative browser session for the
+same file, editor type, and user even when a save rotates `document.key`. The
+compose ports are bound to `127.0.0.1`; this demo Relay is not a production
+authentication design.
+
+The bundled Nginx example keeps the pre-existing demo storage identity
+`185.199.108.133` stable after the loopback bind, so previously uploaded local
+example files continue resolving to the same storage directory.
 
 ## External Copilot API
 
@@ -154,7 +165,13 @@ The versioned public contract is available as:
 
 - Word: `word_inspect`, `word_replace_text`, `word_append_paragraph`,
   `word_insert_paragraph`, `word_format_document`, `word_format_selection`,
-  `word_scale_font`, `word_add_table`, `word_set_document_text`.
+  `word_format_matches`, `word_delete_matches`, `word_add_hyperlink`,
+  `word_add_comment`, `word_add_bookmark`, `word_format_paragraphs`,
+  `word_set_paragraph_text`, `word_delete_paragraphs`, `word_set_list`,
+  `word_insert_page_break`, `word_navigate`, `word_scroll`, `word_scale_font`,
+  `word_add_table`, `word_set_table_cell`, `word_format_table`,
+  `word_edit_table`, `word_set_page_layout`, `word_set_header_footer`,
+  `word_set_document_text`.
 - Slides: `slides_inspect`, `slides_replace_text`, `slides_scale_font`,
   `slides_format_text`, `slides_format_selection`, `slides_add_slide`,
   `slides_duplicate_slide`, `slides_delete_slide`, `slides_add_textbox`.
@@ -166,6 +183,25 @@ The external agent must send tool names and JSON arguments, never JavaScript
 source. `plugin.js` checks the editor-specific allow list before calling a
 bridge. Requests are serialized, deduplicated by request ID, and cached briefly
 so a retried transport message cannot apply the same edit twice.
+
+### Word capability coverage
+
+| Area | Supported operations |
+| --- | --- |
+| Read/context | Full text, selection, pages, visible pages, paragraph indexes/styles, table dimensions, optional comments |
+| Text | Replace, delete exact matches, overwrite a paragraph or the whole document |
+| Character style | Font, size, bold, italic, underline, strikeout, color, highlight, caps, spacing, sub/superscript |
+| Paragraph style | Named/heading styles, outline level, alignment, spacing, line spacing, indents, keep/widow/page-break rules |
+| Structure | Append/insert/delete paragraphs, bullet/numbered lists, page breaks, bookmarks, links, comments |
+| Tables | Create/fill, style, format cells, add/remove rows and columns, merge/split, clear/delete |
+| Page layout | A4/Letter/Legal/custom size, portrait/landscape, margins, header/footer distances |
+| Header/footer | Default/first/even header or footer, text, dynamic page number and page count |
+| View navigation | Start/end/page, next/previous/relative page, search-to-selection, page-granular up/down scrolling |
+
+`word_scroll` deliberately uses document pages rather than synthetic browser
+mouse events. The Office API exposes stable page navigation and selection
+movement, but not a cross-version pixel-wheel contract. Page-granular scrolling
+therefore remains deterministic and does not create an undo entry.
 
 ## Persistence service
 
@@ -182,6 +218,29 @@ example storage. These same-origin endpoints are used:
 `copilot_server.py` implements the endpoints for the example application. In a
 production integration, persist ONLYOFFICE callback statuses `6` and `2` in
 your own storage service.
+
+## Local HTTPX Relay
+
+The localhost example exposes these additional endpoints:
+
+- `POST /copilot-api/bridge/register`: the open editor page registers with its
+  signed editor JWT and receives an opaque page relay key.
+- `POST /copilot-api/bridge/poll` and `POST /copilot-api/bridge/result`: the
+  registered page receives commands and returns `window.aiBridge` results.
+- `GET /copilot-api/bridge/sessions`: accepts an editor JWT or bridge binding
+  token, returns the single authoritative page, and renews the scoped binding
+  token.
+- `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
+  requested tool against the authoritative page capabilities, and waits for the
+  live result.
+
+The caller first fetches the exact local `/example/editor?...` page and stores
+its short-lived editor JWT without printing it. The first `sessions` request
+exchanges that JWT for a 12-hour `ai-bridge-binding` token scoped to the exact
+file name, file type, editor type, and user. A newly registered page for that
+stable identity supersedes the previous Relay session, so a storage-version
+change does not require another bind. Stable `requestId` values deduplicate
+retries across page handoff. The editor page must remain open.
 
 ## Local run
 

@@ -25,7 +25,7 @@
       user: { id: "user-9", name: "张三" },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev12"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       },
@@ -37,7 +37,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
 ```
 
 页面加载后：
@@ -68,13 +68,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev12"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.1.0"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.1.0-rev12"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -94,6 +94,32 @@ Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给�
 
 popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是两个互不引用的独立标签页、两台设备或两个后端进程，浏览器 `postMessage` 无法直接连接；此时由你的业务后端通过已认证 HTTP/WebSocket 把命令投递到仍打开编辑器的宿主页，再调用 `window.aiBridge`。本插件有意不使用 `BroadcastChannel`，以免同源打开多个文档时把一条编辑命令广播到错误文档。
 
+### 本机示例：HTTPX 调用当前编辑器
+
+仓库自带的 `localhost` demo 实现了上述 HTTP 后端投递通道，供 Agent
+Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
+
+1. 浏览器中的 `host-bridge.js` 使用当前 ONLYOFFICE editor JWT 注册长轮询会话。
+2. HTTPX 先获取用户明确给出的 `/example/editor?...` 页面，把其中短期 editor
+   JWT 保存进自身 state，不能输出或记录该 JWT。
+3. 首次 `GET /copilot-api/bridge/sessions` 用短期 editor JWT 换取 12 小时
+   `ai-bridge-binding` token；HTTPX 立即用新 token 覆盖临时凭证。
+4. Bridge token 绑定准确的文件名、文件类型、编辑器类型与用户，但不绑定保存后会
+   变化的 `document.key`。服务端只把命令投递给该稳定身份最后注册的权威页面。
+5. 新页面注册后会接管旧 Relay；旧页面停止 Relay，但不循环刷新，也不影响手工编辑。
+6. 浏览器页面通过 `/bridge/poll` 取得命令，调用 `window.aiBridge`，再通过
+   `/bridge/result` 返回真实执行结果。
+
+`bridge/execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、
+`undo`、`redo`、`getState`。写操作仍应先 inspect，并使用稳定 `requestId`；
+超时重试必须复用同一 ID。compose 将 `8088/8443` 绑定到 `127.0.0.1`，浏览器
+页面必须保持打开。生产系统应换成自身的用户鉴权、权限校验、审计与 WebSocket/HTTP
+投递服务。
+
+为避免回环端口绑定改变 DocumentServer example 按访问地址划分的本地存储目录，
+示例 Nginx 配置固定沿用既有 demo 存储身份 `185.199.108.133`。这只属于本机示例
+数据兼容逻辑，生产系统不得用来源地址代替真实用户或租户身份。
+
 ## ai-bridge 怎样知道操作哪个文档
 
 文档身份来自创建 ONLYOFFICE 编辑器时的 `editorConfig.document.key`。宿主页每次发命令时自动附带当前 `documentKey` 和 `editorType`，插件会与它初始化时绑定的文档再次比对。外部 Client SDK 不允许自行指定另一个文档键。
@@ -105,6 +131,11 @@ tenantId:documentId:storageVersion
 ```
 
 注意：`document.key` 既是路由身份，也是 ONLYOFFICE 协作会话/缓存身份。文件内容产生新存储版本并重新打开时，应按你的集成规则生成新 key；不要用文件名代替唯一键。
+
+本机 HTTPX demo 另外维护 `(fileName, fileType, editorType, userId)` 稳定绑定，
+只用于把版本轮换前后的浏览器会话串起来。页面注册时仍必须用 editor JWT 校验准确
+`document.key`；稳定绑定不能绕过页面级文档校验。生产系统应把这里的文件名替换为
+真实租户 ID 与文档 ID。
 
 ## Copilot 怎样发命令
 
@@ -160,12 +191,18 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-所有 27 个快捷方法：
+所有 44 个快捷方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
 word.insertParagraph         word.formatDocument       word.formatSelection
-word.scaleFont               word.addTable             word.setDocumentText
+word.formatMatches           word.deleteMatches        word.addHyperlink
+word.addComment              word.addBookmark          word.formatParagraphs
+word.setParagraphText        word.deleteParagraphs     word.setList
+word.insertPageBreak         word.navigate             word.scroll
+word.scaleFont               word.addTable             word.setTableCell
+word.formatTable             word.editTable            word.setPageLayout
+word.setHeaderFooter         word.setDocumentText
 
 slides.inspect               slides.replaceText        slides.scaleFont
 slides.formatText            slides.formatSelection    slides.addSlide
@@ -177,6 +214,15 @@ sheets.renameSheet           sheets.deleteSheet        sheets.addChart
 ```
 
 完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.1.0`。
+
+### Word 完整操作边界
+
+- `word_inspect` 返回正文、选区、当前页/可见页、带一基序号的段落结构、表格尺寸，并可按需返回批注。
+- 精确文本操作包括替换、删除、字符样式、超链接、批注和书签；`occurrence` 用于只处理第 N 次命中。
+- 段落操作支持标题/命名样式、字体、对齐、段前段后、行距、缩进、同页/孤行控制、分页符和项目符号/编号。
+- 表格操作支持创建填充、样式、单元格格式、增删行列、合并/拆分、清空和删除。
+- 页面操作支持纸张大小、横竖向、页边距、页眉页脚及动态页码。
+- `word_scroll` 是稳定的按页上滚/下滚；`word_navigate` 还支持首页、末页、指定页、上一页、下一页、相对页和搜索定位。ONLYOFFICE Office API 没有跨版本稳定的像素级鼠标滚轮契约，因此 Bridge 不注入浏览器鼠标事件，也不会把按页导航误报成像素滚动。
 
 ## 不使用 Client SDK 时的底层 postMessage 协议
 
@@ -281,4 +327,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.1.0`，消息协议版本为 `1`。生产页面应固定 `?v=0.1.0`，升级前先比较 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。
+当前插件版本为 `0.1.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.1.0-rev12`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+`public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

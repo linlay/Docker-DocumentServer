@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const pluginSource = fs.readFileSync(path.join(__dirname, "plugin.js"), "utf8");
 const hostSource = fs.readFileSync(path.join(__dirname, "host-bridge.js"), "utf8");
 const clientSource = fs.readFileSync(path.join(__dirname, "client-sdk.js"), "utf8");
+const wordBridgeSource = fs.readFileSync(path.join(__dirname, "bridges/word-bridge.js"), "utf8");
 const publicContract = JSON.parse(fs.readFileSync(path.join(__dirname, "public-api.json"), "utf8"));
 
 function eventTarget(target) {
@@ -33,26 +34,51 @@ function createHarness(options = {}) {
     documentType: editorType,
     document: { key: "doc-key-v1", title: `demo.${editorType === "word" ? "docx" : editorType === "slide" ? "pptx" : "xlsx"}`, fileType: editorType === "word" ? "docx" : editorType === "slide" ? "pptx" : "xlsx" },
     editorConfig: { callbackUrl: "https://app.test/callback", user: { id: "user-1" } },
+    token: options.editorToken || "editor-token",
   };
   const executedToolCalls = [];
   const servicePaths = [];
+  const hostRelayPaths = [];
   let reloadCount = 0;
+  const documentElement = { dataset: {} };
+  const sessionValues = new Map(Object.entries(options.sessionValues || {}));
+  const localValues = new Map(Object.entries(options.localValues || {}));
+  const sessionStorage = {
+    getItem(key) { return sessionValues.has(key) ? sessionValues.get(key) : null; },
+    setItem(key, value) { sessionValues.set(key, String(value)); },
+    removeItem(key) { sessionValues.delete(key); },
+  };
+  const localStorage = {
+    getItem(key) { return localValues.has(key) ? localValues.get(key) : null; },
+    setItem(key, value) { localValues.set(key, String(value)); },
+    removeItem(key) { localValues.delete(key); },
+  };
 
   const hostWindow = eventTarget({
     location: {
       origin: "https://app.test",
       href: "https://app.test/editor",
+      hostname: options.hostname || "app.test",
       reload() { reloadCount += 1; },
     },
     crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
     setTimeout,
     clearTimeout,
     history: { replaceState() {} },
+    navigator: { sendBeacon() { return true; } },
+    sessionStorage,
+    localStorage,
     aiBridgeOptions: {
       getEditorConfig: () => editorConfig,
       clientOrigins: options.clientOrigins || [],
     },
   });
+  if (typeof options.hostFetch === "function") {
+    hostWindow.fetch = async (requestPath, requestOptions) => {
+      hostRelayPaths.push(requestPath);
+      return options.hostFetch(requestPath, requestOptions);
+    };
+  }
 
   const pluginWindow = eventTarget({
     location: {
@@ -66,7 +92,14 @@ function createHarness(options = {}) {
     clearInterval,
     fetch: async path => {
       servicePaths.push(path);
-      return { ok: true, status: 200, json: async () => ({ persisted: true, path }) };
+      const configured = typeof options.serviceResponse === "function"
+        ? options.serviceResponse(path)
+        : options.serviceResponse;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => configured || { persisted: true, path },
+      };
     },
   });
 
@@ -98,8 +131,17 @@ function createHarness(options = {}) {
       execute: async toolCalls => {
         executedToolCalls.push(...toolCalls);
         return {
-          changed: toolCalls.filter(call => !call.name.endsWith("_inspect")).length,
+          changed: toolCalls.filter(call => (
+            !call.name.endsWith("_inspect") &&
+            call.name !== "word_navigate" &&
+            call.name !== "word_scroll"
+          )).length,
           results: toolCalls.map(call => ({ name: call.name, document: "demo" })),
+          needsSave: toolCalls.some(call => (
+            !call.name.endsWith("_inspect") &&
+            call.name !== "word_navigate" &&
+            call.name !== "word_scroll"
+          )),
         };
       },
     },
@@ -115,7 +157,7 @@ function createHarness(options = {}) {
   vm.runInNewContext(hostSource, {
     window: hostWindow,
     document: {
-      documentElement: { dataset: {} },
+      documentElement,
       querySelector() { return null; },
       currentScript: {
         src: "https://docs.test/sdkjs-plugins/ai-bridge/host-bridge.js",
@@ -145,9 +187,141 @@ function createHarness(options = {}) {
     editorConfig,
     executedToolCalls,
     servicePaths,
+    hostRelayPaths,
+    documentElement,
+    sessionValues,
+    localValues,
     pluginHandle,
     topProxy,
     get reloadCount() { return reloadCount; },
+  };
+}
+
+async function waitFor(check, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}
+
+function relayResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
+function replaceLiteral(text, properties) {
+  const source = String(text);
+  const search = String(properties.searchString);
+  const replacement = String(properties.replaceString);
+  const haystack = properties.matchCase ? source : source.toLowerCase();
+  const needle = properties.matchCase ? search : search.toLowerCase();
+  let result = "";
+  let offset = 0;
+  let match;
+  while (needle && (match = haystack.indexOf(needle, offset)) !== -1) {
+    result += source.slice(offset, match) + replacement;
+    offset = match + needle.length;
+  }
+  return result + source.slice(offset);
+}
+
+function createWordBridgeHarness(options = {}) {
+  let documentText = String(options.text || "");
+  let currentPage = Number(options.currentPage) || 0;
+  const executeMethodCalls = [];
+  const formattedRanges = [];
+  const navigatedPages = [];
+  const rangeActions = [];
+  const scope = {};
+  const document = {
+    GetText() { return documentText; },
+    Search(search, matchCase) {
+      const source = matchCase ? documentText : documentText.toLowerCase();
+      const needle = matchCase ? String(search) : String(search).toLowerCase();
+      const ranges = [];
+      let offset = 0;
+      while (needle && (offset = source.indexOf(needle, offset)) !== -1) {
+        const format = { start: offset, end: offset + needle.length };
+        formattedRanges.push(format);
+        ranges.push({
+          SetFontSize(value) { format.fontSize = value; },
+          SetFontFamily(value) { format.fontFamily = value; },
+          SetBold(value) { format.bold = value; },
+          SetItalic(value) { format.italic = value; },
+          SetUnderline(value) { format.underline = value; },
+          SetStrikeout(value) { format.strikeout = value; },
+          SetColor(value) { format.color = value; },
+          SetHighlight(value) { format.highlightColor = value; },
+          Delete() { rangeActions.push({ action: "delete", start: format.start, end: format.end }); return true; },
+          AddHyperlink(url, screenTip, bookmarkName) {
+            rangeActions.push({ action: "hyperlink", start: format.start, url, screenTip, bookmarkName });
+            return {};
+          },
+          AddComment(text, author, userId) {
+            rangeActions.push({ action: "comment", start: format.start, text, author, userId });
+            return { GetId() { return `comment-${format.start}`; } };
+          },
+          AddBookmark(name) {
+            rangeActions.push({ action: "bookmark", start: format.start, name });
+            return true;
+          },
+          Select() { rangeActions.push({ action: "select", start: format.start }); return true; },
+          GetStartPage() { return Number(options.searchPage) || 0; },
+        });
+        offset += needle.length;
+      }
+      return ranges;
+    },
+    GetPageCount() { return Number(options.pageCount) || 1; },
+    GetCurrentPage() { return currentPage; },
+    GetCurrentVisiblePages() { return [currentPage]; },
+    GoToPage(index) {
+      currentPage = index;
+      navigatedPages.push(index);
+      return true;
+    },
+  };
+  const officeContext = vm.createContext({
+    Asc: { scope },
+    Api: { GetDocument: () => document, Color: value => value },
+    JSON,
+    String,
+  });
+  const pluginWindow = {};
+  const Asc = {
+    scope,
+    plugin: {
+      info: {},
+      callCommand(command, close, recalculate, callback) {
+        assert.equal(close, false);
+        try {
+          callback(vm.runInContext(`(${command.toString()})()`, officeContext));
+        } catch (error) {
+          callback(JSON.stringify({ ok: false, error: error.message }));
+        }
+      },
+      executeMethod(name, args, callback) {
+        executeMethodCalls.push({ name, args: JSON.parse(JSON.stringify(args)) });
+        if (options.executeMethodAccepted === false) return false;
+        documentText = replaceLiteral(documentText, args[0]);
+        queueMicrotask(() => callback(undefined));
+        return true;
+      },
+    },
+  };
+  vm.runInNewContext(wordBridgeSource, { window: pluginWindow, Asc, console, Promise, JSON, String });
+  return {
+    bridge: pluginWindow.AICopilotBridges.word,
+    document,
+    executeMethodCalls,
+    formattedRanges,
+    navigatedPages,
+    rangeActions,
+    get text() { return documentText; },
   };
 }
 
@@ -163,6 +337,96 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const result = await hostWindow.aiBridge.word.inspect({}, { timeoutMs: 1000 });
   assert.equal(result.changed, 0);
   assert.equal(result.results[0].name, "word_inspect");
+});
+
+test("superseded HTTP Relay stops without re-registering or reloading", async () => {
+  let registerCalls = 0;
+  let pollCalls = 0;
+  const harness = createHarness({
+    hostname: "localhost",
+    hostFetch: async requestPath => {
+      if (requestPath.endsWith("/register")) {
+        registerCalls += 1;
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        pollCalls += 1;
+        return relayResponse(409, {
+          ok: false,
+          error: {
+            code: "SESSION_SUPERSEDED",
+            message: "new page is authoritative",
+          },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
+  const requestCount = harness.hostRelayPaths.length;
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  assert.equal(registerCalls, 1);
+  assert.equal(pollCalls, 1);
+  assert.equal(harness.hostRelayPaths.length, requestCount);
+  assert.equal(harness.reloadCount, 0);
+});
+
+test("first Relay credential failure schedules only one page reload", async () => {
+  const harness = createHarness({
+    hostname: "localhost",
+    hostFetch: async requestPath => {
+      assert.ok(requestPath.endsWith("/register"));
+      return relayResponse(401, {
+        ok: false,
+        error: {
+          code: "EDITOR_TOKEN_EXPIRED",
+          message: "expired",
+        },
+      });
+    },
+  });
+
+  await waitFor(() => harness.reloadCount === 1);
+
+  assert.equal(harness.documentElement.dataset.aiBridgeRelayState, "credential-reload");
+  assert.ok(
+    [...harness.localValues.entries()].some(
+      ([key, value]) => key.startsWith("aiBridgeCredentialReloadAt:") && Number(value) > 0,
+    ),
+  );
+  assert.equal(harness.hostRelayPaths.length, 1);
+});
+
+test("repeated Relay credential failure inside the guard window becomes terminal", async () => {
+  const harness = createHarness({
+    hostname: "localhost",
+    localValues: {
+      "aiBridgeCredentialReloadAt:demo.docx|docx|word|user-1": String(Date.now()),
+    },
+    hostFetch: async requestPath => {
+      assert.ok(requestPath.endsWith("/register"));
+      return relayResponse(401, {
+        ok: false,
+        error: {
+          code: "EDITOR_TOKEN_EXPIRED",
+          message: "expired again",
+        },
+      });
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "credential-error");
+  const requestCount = harness.hostRelayPaths.length;
+  await new Promise(resolve => setTimeout(resolve, 75));
+
+  assert.equal(harness.reloadCount, 0);
+  assert.equal(harness.hostRelayPaths.length, requestCount);
 });
 
 test("plugin rejects a command when the host document key changes", async () => {
@@ -182,7 +446,7 @@ test("plugin rejects a command when the host document key changes", async () => 
   });
 });
 
-test("public contract, plugin allow-lists, and all 27 convenience methods stay aligned", async () => {
+test("public contract, plugin allow-lists, and all 44 convenience methods stay aligned", async () => {
   const cases = {
     word: {
       group: "word",
@@ -193,8 +457,25 @@ test("public contract, plugin allow-lists, and all 27 convenience methods stay a
         insertParagraph: ["word_insert_paragraph", { text: "a" }],
         formatDocument: ["word_format_document", { bold: true }],
         formatSelection: ["word_format_selection", { italic: true }],
+        formatMatches: ["word_format_matches", { search: "a", bold: true }],
+        deleteMatches: ["word_delete_matches", { search: "a" }],
+        addHyperlink: ["word_add_hyperlink", { search: "a", url: "https://example.test" }],
+        addComment: ["word_add_comment", { search: "a", text: "review" }],
+        addBookmark: ["word_add_bookmark", { search: "a", occurrence: 1, name: "a1" }],
+        formatParagraphs: ["word_format_paragraphs", { paragraphIndexes: [1], headingLevel: 1 }],
+        setParagraphText: ["word_set_paragraph_text", { paragraphIndexes: [1], text: "a" }],
+        deleteParagraphs: ["word_delete_paragraphs", { paragraphIndexes: [1] }],
+        setList: ["word_set_list", { paragraphIndexes: [1], listType: "bullet" }],
+        insertPageBreak: ["word_insert_page_break", { current: true }],
+        navigate: ["word_navigate", { target: "end" }],
+        scroll: ["word_scroll", { direction: "down", pages: 1 }],
         scaleFont: ["word_scale_font", { scale: 0.9 }],
         addTable: ["word_add_table", { rows: 1, cols: 1 }],
+        setTableCell: ["word_set_table_cell", { tableIndex: 1, row: 1, column: 1, text: "a" }],
+        formatTable: ["word_format_table", { tableIndex: 1, styleName: "Bordered" }],
+        editTable: ["word_edit_table", { tableIndex: 1, action: "addRow" }],
+        setPageLayout: ["word_set_page_layout", { pageSize: "A4" }],
+        setHeaderFooter: ["word_set_header_footer", { kind: "footer", pageNumber: true }],
         setDocumentText: ["word_set_document_text", { text: "a" }],
       },
     },
@@ -279,6 +560,34 @@ test("reusing a completed requestId returns the cached response without applying
   assert.equal(harness.executedToolCalls.length, 1);
 });
 
+test("persisting a new storage version reloads the page after returning the tool result", async () => {
+  const harness = createHarness({
+    serviceResponse(path) {
+      if (path === "/copilot-api/forcesave") {
+        return {
+          persisted: true,
+          promoted: true,
+          beforeMtime: 100,
+          afterMtime: 101,
+        };
+      }
+      return { persisted: true, path };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  const result = await harness.hostWindow.aiBridge.word.replaceText(
+    { search: "old", replace: "new" },
+    { timeoutMs: 1000, requestId: "persist-and-rebind-1" },
+  );
+
+  assert.equal(result.persisted, true);
+  assert.equal(result.forceSave.promoted, true);
+  assert.equal(harness.reloadCount, 0);
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(harness.reloadCount, 1);
+});
+
 test("cross-origin client SDK connects through an explicit relay allow-list", async () => {
   const harness = createHarness({ clientOrigins: ["https://copilot.test"] });
   await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
@@ -321,6 +630,23 @@ test("cross-origin client SDK connects through an explicit relay allow-list", as
   assert.equal(state.context.documentKey, "doc-key-v1");
   assert.equal(state.context.callbackUrl, undefined);
   assert.equal(office.editorType, "word");
+  assert.deepEqual(
+    Object.keys(office.word).sort(),
+    [
+      "addBookmark", "addComment", "addHyperlink", "addTable", "appendParagraph",
+      "deleteMatches", "deleteParagraphs", "editTable", "formatDocument",
+      "formatMatches", "formatParagraphs", "formatSelection", "formatTable",
+      "insertPageBreak", "insertParagraph", "inspect", "navigate", "replaceText",
+      "scaleFont", "scroll", "setDocumentText", "setHeaderFooter", "setList",
+      "setPageLayout", "setParagraphText", "setTableCell",
+    ].sort(),
+  );
+  assert.equal(
+    Object.keys(office.word).length +
+    Object.keys(office.slides).length +
+    Object.keys(office.sheets).length,
+    44,
+  );
 
   const result = await office.word.replaceText(
     { search: "old", replace: "new" },
@@ -334,6 +660,13 @@ test("cross-origin client SDK connects through an explicit relay allow-list", as
   );
   assert.equal(retry.results[0].name, "word_replace_text");
   assert.equal(harness.executedToolCalls.filter(call => call.name === "word_replace_text").length, 1);
+  const scroll = await office.word.scroll(
+    { direction: "down", pages: 1 },
+    { timeoutMs: 1000, requestId: "external:scroll:1" },
+  );
+  assert.equal(scroll.results[0].name, "word_scroll");
+  assert.equal(scroll.changed, 0);
+  assert.equal(scroll.persisted, false);
   office.destroy();
 });
 
@@ -368,4 +701,174 @@ test("cross-origin client SDK times out when its origin is not allow-listed", as
     return true;
   });
   office.destroy();
+});
+
+test("word bridge replaces text through the compatible plugin method", async () => {
+  const harness = createWordBridgeHarness({ text: "主任委员：姜涛\n记录人：姜涛" });
+  assert.equal(typeof harness.document.SearchAndReplace, "undefined");
+
+  const result = await harness.bridge.execute([{
+    name: "word_replace_text",
+    arguments: { search: "姜涛", replace: "张三", matchCase: false },
+  }]);
+
+  assert.equal(harness.text, "主任委员：张三\n记录人：张三");
+  assert.equal(result.changed, 2);
+  assert.equal(result.needsSave, true);
+  assert.equal(result.results[0].replacedCount, 2);
+  assert.deepEqual(harness.executeMethodCalls, [{
+    name: "SearchAndReplace",
+    args: [{ searchString: "姜涛", replaceString: "张三", matchCase: false }],
+  }]);
+});
+
+test("word bridge skips SearchAndReplace when the source text is absent", async () => {
+  const harness = createWordBridgeHarness({ text: "主任委员：李四" });
+
+  const result = await harness.bridge.execute([{
+    name: "word_replace_text",
+    arguments: { search: "姜涛", replace: "张三", matchCase: false },
+  }]);
+
+  assert.equal(result.changed, 0);
+  assert.equal(result.needsSave, false);
+  assert.equal(result.results[0].replaced, false);
+  assert.equal(harness.executeMethodCalls.length, 0);
+});
+
+test("word bridge formats only matching text ranges", async () => {
+  const harness = createWordBridgeHarness({ text: "主任委员：匿名\n副主任委员：匿名、匿名、匿名" });
+
+  const result = await harness.bridge.execute([{
+    name: "word_format_matches",
+    arguments: { search: "匿名", bold: true, italic: true, matchCase: false },
+  }]);
+
+  assert.equal(result.changed, 4);
+  assert.equal(result.needsSave, true);
+  assert.equal(result.results[0].matches, 4);
+  assert.equal(result.results[0].formattedMatches, 4);
+  assert.equal(harness.formattedRanges.length, 4);
+  assert.ok(harness.formattedRanges.every(range => range.bold === true && range.italic === true));
+});
+
+test("word bridge rejects mutating format calls that contain no actual change", async () => {
+  const harness = createWordBridgeHarness({ text: "主任委员：匿名" });
+
+  await assert.rejects(
+    harness.bridge.execute([{ name: "word_format_document", arguments: {} }]),
+    /至少需要一个格式属性/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{ name: "word_format_matches", arguments: { search: "匿名" } }]),
+    /至少需要一个格式属性/,
+  );
+});
+
+test("word bridge requires an explicit occurrence for a bookmark", async () => {
+  const harness = createWordBridgeHarness({ text: "唯一目标" });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_add_bookmark",
+      arguments: { search: "目标", name: "target" },
+    }]),
+    /occurrence 不能为空/,
+  );
+});
+
+test("word bridge navigates to the document end without marking content dirty", async () => {
+  const harness = createWordBridgeHarness({ text: "demo", pageCount: 7 });
+
+  const result = await harness.bridge.execute([{
+    name: "word_navigate",
+    arguments: { target: "end" },
+  }]);
+
+  assert.equal(result.changed, 0);
+  assert.equal(result.needsSave, false);
+  assert.deepEqual(harness.navigatedPages, [6]);
+  assert.equal(result.results[0].page, 7);
+  assert.equal(result.results[0].pageCount, 7);
+});
+
+test("word bridge scrolls by relative pages without marking content dirty", async () => {
+  const harness = createWordBridgeHarness({ text: "demo", pageCount: 10, currentPage: 4 });
+
+  const down = await harness.bridge.execute([{
+    name: "word_scroll",
+    arguments: { direction: "down", pages: 3 },
+  }]);
+  const up = await harness.bridge.execute([{
+    name: "word_scroll",
+    arguments: { direction: "up", pages: 2 },
+  }]);
+
+  assert.equal(down.needsSave, false);
+  assert.equal(up.needsSave, false);
+  assert.deepEqual(harness.navigatedPages, [7, 5]);
+  assert.equal(down.results[0].page, 8);
+  assert.equal(up.results[0].page, 6);
+});
+
+test("word bridge selects a searched occurrence and reports its page", async () => {
+  const harness = createWordBridgeHarness({ text: "甲乙甲乙", pageCount: 8, currentPage: 0, searchPage: 3 });
+
+  const result = await harness.bridge.execute([{
+    name: "word_navigate",
+    arguments: { target: "search", search: "乙", occurrence: 2 },
+  }]);
+
+  assert.equal(result.needsSave, false);
+  assert.equal(result.results[0].matches, 2);
+  assert.equal(result.results[0].page, 4);
+  assert.deepEqual(harness.rangeActions, [{ action: "select", start: 3 }]);
+});
+
+test("word bridge supports exact-range deletion, links, comments, and bookmarks", async () => {
+  const harness = createWordBridgeHarness({ text: "目标 目标" });
+
+  const result = await harness.bridge.execute([
+    { name: "word_delete_matches", arguments: { search: "目标", occurrence: 1 } },
+    { name: "word_add_hyperlink", arguments: { search: "目标", occurrence: 2, url: "https://example.test", screenTip: "示例" } },
+    { name: "word_add_comment", arguments: { search: "目标", occurrence: 2, text: "请复核", author: "AI" } },
+    { name: "word_add_bookmark", arguments: { search: "目标", occurrence: 2, name: "target_2" } },
+  ]);
+
+  assert.equal(result.changed, 4);
+  assert.equal(result.needsSave, true);
+  assert.deepEqual(harness.rangeActions, [
+    { action: "delete", start: 0, end: 2 },
+    { action: "hyperlink", start: 3, url: "https://example.test", screenTip: "示例", bookmarkName: "" },
+    { action: "comment", start: 3, text: "请复核", author: "AI", userId: undefined },
+    { action: "bookmark", start: 3, name: "target_2" },
+  ]);
+});
+
+test("word bridge preserves replacement order in a batch", async () => {
+  const harness = createWordBridgeHarness({ text: "A" });
+
+  const result = await harness.bridge.execute([
+    { name: "word_replace_text", arguments: { search: "A", replace: "B", matchCase: true } },
+    { name: "word_replace_text", arguments: { search: "B", replace: "C", matchCase: true } },
+  ]);
+
+  assert.equal(harness.text, "C");
+  assert.equal(result.changed, 2);
+  assert.deepEqual(Array.from(result.results, entry => entry.search), ["A", "B"]);
+});
+
+test("word bridge rejects when ONLYOFFICE refuses SearchAndReplace", async () => {
+  const harness = createWordBridgeHarness({
+    text: "主任委员：姜涛",
+    executeMethodAccepted: false,
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_replace_text",
+      arguments: { search: "姜涛", replace: "张三", matchCase: false },
+    }]),
+    /ONLYOFFICE 拒绝执行 SearchAndReplace/,
+  );
 });

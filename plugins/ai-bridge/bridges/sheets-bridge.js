@@ -117,7 +117,11 @@
                   var sheet = getSheet(args.sheet);
                   var formula = String(args.formula);
                   if (formula.charAt(0) !== "=") formula = "=" + formula;
-                  var accepted = getRange(sheet, args.range).SetFormula(formula);
+                  var formulaRange = getRange(sheet, args.range);
+                  if (!formulaRange) throw new Error("无效单元格区域：" + args.range);
+                  var accepted = typeof formulaRange.SetFormula === "function"
+                    ? formulaRange.SetFormula(formula)
+                    : formulaRange.SetValue(formula);
                   changed += 1;
                   results.push({ name: call.name, sheet: sheet.GetName(), range: String(args.range), accepted: Boolean(accepted) });
                   break;
