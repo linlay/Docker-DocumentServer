@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "ai-bridge",
+  "version": "0.1.0",
+  "protocolVersion": 1,
+  "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
+  "transport": {
+    "direct": "window.aiBridge",
+    "relay": {
+      "kind": "postMessage",
+      "clientSource": "ai-bridge-client",
+      "hostSource": "ai-bridge-relay",
+      "methods": ["execute", "executeTool", "executeBatch", "save", "history", "undo", "redo", "getState"],
+      "requiresExplicitClientOrigins": true,
+      "wildcardOriginAllowed": false
+    },
+    "broadcastChannel": false
+  },
+  "limits": {
+    "maxToolCalls": 20,
+    "maxArgumentsJsonChars": 250000,
+    "maxRequestIdChars": 200,
+    "maxTimeoutMs": 300000
+  },
+  "controls": ["save", "history", "undo", "redo"],
+  "errors": [
+    "NOT_READY",
+    "CONNECTION_TIMEOUT",
+    "TIMEOUT",
+    "INVALID_TARGET_WINDOW",
+    "INVALID_TARGET_ORIGIN",
+    "INVALID_CLIENT_ID",
+    "INVALID_REQUEST_ID",
+    "REQUEST_IN_FLIGHT",
+    "INVALID_COMMAND",
+    "INVALID_TOOL_CALL",
+    "INVALID_ARGUMENTS",
+    "ARGUMENTS_TOO_LARGE",
+    "TOO_MANY_CALLS",
+    "TOOL_NOT_ALLOWED",
+    "CONTROL_NOT_ALLOWED",
+    "METHOD_NOT_ALLOWED",
+    "DOCUMENT_NOT_CONFIGURED",
+    "DOCUMENT_MISMATCH",
+    "EDITOR_MISMATCH",
+    "PERSISTENCE_FAILED",
+    "EXECUTION_FAILED",
+    "INVALID_LISTENER",
+    "CLIENT_DESTROYED"
+  ],
+  "$defs": {
+    "color": { "type": "string", "pattern": "^#?[0-9A-Fa-f]{6}$" },
+    "sheet": { "type": "string", "description": "工作表名称；省略时使用活动工作表" },
+    "range": { "type": "string", "description": "A1 表示法，例如 A1:D10；selection 表示当前选区" },
+    "textFormat": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "number" },
+        "fontFamily": { "type": "string" },
+        "bold": { "type": "boolean" },
+        "italic": { "type": "boolean" },
+        "underline": { "type": "boolean" },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    }
+  },
+  "tools": {
+    "word": {
+      "word_inspect": { "type": "object", "properties": { "maxChars": { "type": "number" } }, "additionalProperties": false },
+      "word_replace_text": { "type": "object", "required": ["search", "replace"], "properties": { "search": { "type": "string" }, "replace": { "type": "string" }, "matchCase": { "type": "boolean" } }, "additionalProperties": false },
+      "word_append_paragraph": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "align": { "enum": ["left", "center", "right", "both"] }, "spacingBefore": { "type": "number" }, "spacingAfter": { "type": "number" } }, "additionalProperties": false },
+      "word_insert_paragraph": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" }, "inline": { "type": "boolean" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "align": { "type": "string" } }, "additionalProperties": false },
+      "word_format_document": { "type": "object", "properties": { "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "strikeout": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "align": { "enum": ["left", "center", "right", "both"] }, "spacingBefore": { "type": "number" }, "spacingAfter": { "type": "number" } }, "additionalProperties": false },
+      "word_format_selection": { "type": "object", "properties": { "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "strikeout": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+      "word_scale_font": { "type": "object", "required": ["scale"], "properties": { "scale": { "type": "number", "exclusiveMinimum": 0, "maximum": 3 } }, "additionalProperties": false },
+      "word_add_table": { "type": "object", "required": ["rows", "cols"], "properties": { "rows": { "type": "integer", "minimum": 1 }, "cols": { "type": "integer", "minimum": 1 }, "data": { "type": "array", "items": { "type": "array" } }, "widthPercent": { "type": "number" } }, "additionalProperties": false },
+      "word_set_document_text": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } }, "additionalProperties": false }
+    },
+    "slide": {
+      "slides_inspect": { "type": "object", "properties": { "maxChars": { "type": "number" } }, "additionalProperties": false },
+      "slides_replace_text": { "type": "object", "required": ["search", "replace"], "properties": { "search": { "type": "string" }, "replace": { "type": "string" }, "matchCase": { "type": "boolean" }, "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+      "slides_scale_font": { "type": "object", "required": ["scale"], "properties": { "scale": { "type": "number", "exclusiveMinimum": 0, "maximum": 3 }, "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+      "slides_format_text": { "type": "object", "properties": { "slide": { "type": "integer", "minimum": 1 }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+      "slides_format_selection": { "type": "object", "properties": { "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+      "slides_add_slide": { "type": "object", "properties": { "index": { "type": "integer", "minimum": 1 }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "backgroundColor": { "$ref": "#/$defs/color" } }, "additionalProperties": false },
+      "slides_duplicate_slide": { "type": "object", "required": ["slide"], "properties": { "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+      "slides_delete_slide": { "type": "object", "required": ["slide"], "properties": { "slide": { "type": "integer", "minimum": 1 } }, "additionalProperties": false },
+      "slides_add_textbox": { "type": "object", "required": ["slide", "text"], "properties": { "slide": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "xMm": { "type": "number" }, "yMm": { "type": "number" }, "widthMm": { "type": "number" }, "heightMm": { "type": "number" }, "fontSize": { "type": "number" }, "fontFamily": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "color": { "$ref": "#/$defs/color" }, "fillColor": { "$ref": "#/$defs/color" }, "align": { "type": "string" } }, "additionalProperties": false }
+    },
+    "cell": {
+      "sheets_inspect": { "type": "object", "properties": { "maxCells": { "type": "number" } }, "additionalProperties": false },
+      "sheets_set_values": { "type": "object", "required": ["range", "values"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "values": {} }, "additionalProperties": false },
+      "sheets_set_formula": { "type": "object", "required": ["range", "formula"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "formula": { "type": "string" } }, "additionalProperties": false },
+      "sheets_replace_text": { "type": "object", "required": ["search", "replace"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "search": { "type": "string" }, "replace": { "type": "string" } }, "additionalProperties": false },
+      "sheets_format_range": { "type": "object", "required": ["range"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "fontSize": { "type": "number" }, "fontName": { "type": "string" }, "bold": { "type": "boolean" }, "italic": { "type": "boolean" }, "underline": { "type": "boolean" }, "fontColor": { "$ref": "#/$defs/color" }, "fillColor": { "$ref": "#/$defs/color" }, "horizontalAlign": { "type": "string" }, "verticalAlign": { "type": "string" }, "numberFormat": { "type": "string" }, "wrap": { "type": "boolean" }, "columnWidth": { "type": "number" }, "rowHeight": { "type": "number" } }, "additionalProperties": false },
+      "sheets_add_sheet": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } }, "additionalProperties": false },
+      "sheets_rename_sheet": { "type": "object", "required": ["newName"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "newName": { "type": "string" } }, "additionalProperties": false },
+      "sheets_delete_sheet": { "type": "object", "required": ["sheet"], "properties": { "sheet": { "$ref": "#/$defs/sheet" } }, "additionalProperties": false },
+      "sheets_add_chart": { "type": "object", "required": ["range"], "properties": { "sheet": { "$ref": "#/$defs/sheet" }, "range": { "$ref": "#/$defs/range" }, "type": { "type": "string" }, "title": { "type": "string" }, "titleFontSize": { "type": "number" }, "inRows": { "type": "boolean" }, "style": { "type": "number" }, "widthMm": { "type": "number" }, "heightMm": { "type": "number" }, "fromColumn": { "type": "number" }, "fromRow": { "type": "number" } }, "additionalProperties": false }
+    }
+  }
+}

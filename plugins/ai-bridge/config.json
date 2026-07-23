@@ -1,0 +1,29 @@
+{
+  "name": "ai-bridge",
+  "nameLocale": {
+    "zh": "ai-bridge"
+  },
+  "guid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
+  "version": "0.1.0",
+  "variations": [
+    {
+      "description": "Headless execution bridge for an external AI copilot.",
+      "descriptionLocale": {
+        "zh": "供外部 Copilot 调用的无界面文档执行桥。"
+      },
+      "url": "index.html?v=0.1.0-rev4",
+      "icons": [
+        "resources/icon.svg"
+      ],
+      "isVisual": false,
+      "isViewer": false,
+      "EditorsSupport": [
+        "word",
+        "slide",
+        "cell"
+      ],
+      "initDataType": "none",
+      "buttons": []
+    }
+  ]
+}

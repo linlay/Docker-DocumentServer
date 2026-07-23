@@ -1,0 +1,42 @@
+services:
+  onlyoffice-documentserver:
+    image: onlyoffice/documentserver:latest
+    container_name: onlyoffice-documentserver
+    restart: always
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >-
+        cp /opt/onlyoffice-copilot/nginx-ds-example.conf
+        /etc/onlyoffice/documentserver-example/nginx/includes/ds-example.conf &&
+        cp /opt/onlyoffice-copilot/nginx-copilot-loopback.conf
+        /etc/nginx/conf.d/copilot-loopback.conf &&
+        exec /app/ds/run-document-server.sh
+    ports:
+      - "8088:80"
+      - "8443:443"
+    environment:
+      EXAMPLE_ENABLED: "true"
+      PLUGINS_ENABLED: "${ONLYOFFICE_DEFAULT_PLUGINS_ENABLED:-false}"
+      JWT_ENABLED: "true"
+      JWT_SECRET: "${ONLYOFFICE_JWT_SECRET:-onlyoffice-copilot-local}"
+      JWT_IN_BODY: "true"
+      COPILOT_API_BASE: "${COPILOT_API_BASE:-https://api.openai.com/v1}"
+      COPILOT_API_KEY: "${COPILOT_API_KEY:-}"
+      COPILOT_MODEL: "${COPILOT_MODEL:-}"
+    volumes:
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_logs:/var/log/onlyoffice
+      - onlyoffice_lib:/var/lib/onlyoffice
+      - onlyoffice_fonts:/usr/share/fonts/truetype/custom
+      - "./plugins/ai-bridge:/var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}:ro"
+      - "./plugins/ai-bridge/nginx-ds-example.conf:/opt/onlyoffice-copilot/nginx-ds-example.conf:ro"
+      - "./plugins/ai-bridge/nginx-copilot-loopback.conf:/opt/onlyoffice-copilot/nginx-copilot-loopback.conf:ro"
+      - "./plugins/ai-bridge/copilot_server.py:/opt/onlyoffice-copilot/copilot_server.py:ro"
+      - "./plugins/ai-bridge/supervisor-ds-copilot.conf:/etc/supervisor/conf.d/ds-copilot.conf:ro"
+
+volumes:
+  onlyoffice_data:
+  onlyoffice_logs:
+  onlyoffice_lib:
+  onlyoffice_fonts:

@@ -1,0 +1,283 @@
+(function () {
+  "use strict";
+
+  const VERSION = "0.1.0";
+  const PROTOCOL_VERSION = 1;
+  const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+  const CLIENT_SOURCE = "ai-bridge-client";
+  const RELAY_SOURCE = "ai-bridge-relay";
+  let sequence = 0;
+
+  class AiBridgeError extends Error {
+    constructor(code, message, options) {
+      super(message || "ai-bridge 调用失败");
+      this.name = "AiBridgeError";
+      this.code = code || "AI_BRIDGE_ERROR";
+      this.requestId = options && options.requestId || null;
+      this.details = options && options.details;
+    }
+  }
+
+  function createId(prefix) {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return `${prefix}:${window.crypto.randomUUID()}`;
+    }
+    sequence += 1;
+    return `${prefix}:${Date.now()}:${sequence}`;
+  }
+
+  function timeoutValue(value, fallback) {
+    const timeout = Number(value === undefined ? fallback : value);
+    if (!Number.isFinite(timeout)) return fallback;
+    return Math.min(300000, Math.max(100, timeout));
+  }
+
+  function fromWireError(value, requestId) {
+    if (value && typeof value === "object") {
+      return new AiBridgeError(value.code, value.message, {
+        requestId: value.requestId || requestId,
+        details: value.details,
+      });
+    }
+    return new AiBridgeError("AI_BRIDGE_ERROR", String(value || "ai-bridge 调用失败"), { requestId });
+  }
+
+  class AiBridgeClient {
+    constructor(options) {
+      const settings = options || {};
+      if (!settings.targetWindow || typeof settings.targetWindow.postMessage !== "function") {
+        throw new AiBridgeError("INVALID_TARGET_WINDOW", "targetWindow 必须是包含 ai-bridge 的父窗口或 opener");
+      }
+      if (typeof settings.targetOrigin !== "string" || !settings.targetOrigin || settings.targetOrigin === "*") {
+        throw new AiBridgeError("INVALID_TARGET_ORIGIN", "targetOrigin 必须是明确的源，不能使用 *");
+      }
+
+      let parsedUrl;
+      try { parsedUrl = new URL(settings.targetOrigin); } catch (error) {
+        throw new AiBridgeError("INVALID_TARGET_ORIGIN", "targetOrigin 不是有效 URL 源");
+      }
+      if (!/^https?:$/.test(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password ||
+          (parsedUrl.pathname && parsedUrl.pathname !== "/") || parsedUrl.search || parsedUrl.hash) {
+        throw new AiBridgeError("INVALID_TARGET_ORIGIN", "targetOrigin 只能包含协议、主机和端口");
+      }
+      const parsedOrigin = parsedUrl.origin;
+
+      this.targetWindow = settings.targetWindow;
+      this.targetOrigin = parsedOrigin;
+      this.timeoutMs = timeoutValue(settings.timeoutMs, 90000);
+      this.clientId = settings.clientId || createId("client");
+      if (!REQUEST_ID_PATTERN.test(this.clientId)) {
+        throw new AiBridgeError("INVALID_CLIENT_ID", "clientId 格式不合法");
+      }
+
+      this.version = VERSION;
+      this.protocolVersion = PROTOCOL_VERSION;
+      this.state = null;
+      this.pending = new Map();
+      this.listeners = new Map();
+      this.connectPromise = null;
+      this.destroyed = false;
+      this.handleMessage = this.handleMessage.bind(this);
+      window.addEventListener("message", this.handleMessage);
+
+      this.word = this.createToolGroup({
+        inspect: "word_inspect",
+        replaceText: "word_replace_text",
+        appendParagraph: "word_append_paragraph",
+        insertParagraph: "word_insert_paragraph",
+        formatDocument: "word_format_document",
+        formatSelection: "word_format_selection",
+        scaleFont: "word_scale_font",
+        addTable: "word_add_table",
+        setDocumentText: "word_set_document_text",
+      });
+      this.slides = this.createToolGroup({
+        inspect: "slides_inspect",
+        replaceText: "slides_replace_text",
+        scaleFont: "slides_scale_font",
+        formatText: "slides_format_text",
+        formatSelection: "slides_format_selection",
+        addSlide: "slides_add_slide",
+        duplicateSlide: "slides_duplicate_slide",
+        deleteSlide: "slides_delete_slide",
+        addTextBox: "slides_add_textbox",
+      });
+      this.sheets = this.createToolGroup({
+        inspect: "sheets_inspect",
+        setValues: "sheets_set_values",
+        setFormula: "sheets_set_formula",
+        replaceText: "sheets_replace_text",
+        formatRange: "sheets_format_range",
+        addSheet: "sheets_add_sheet",
+        renameSheet: "sheets_rename_sheet",
+        deleteSheet: "sheets_delete_sheet",
+        addChart: "sheets_add_chart",
+      });
+    }
+
+    get isReady() { return Boolean(this.state && this.state.ready); }
+    get editorType() { return this.state && this.state.editorType || null; }
+    get context() { return this.state && this.state.context || null; }
+    get capabilities() { return this.state && this.state.capabilities || null; }
+    get pluginGuid() { return this.state && this.state.pluginGuid || null; }
+
+    basePayload(message) {
+      return {
+        source: CLIENT_SOURCE,
+        protocolVersion: PROTOCOL_VERSION,
+        clientId: this.clientId,
+        ...message,
+      };
+    }
+
+    post(message) {
+      if (this.destroyed) throw new AiBridgeError("CLIENT_DESTROYED", "AiBridgeClient 已销毁");
+      this.targetWindow.postMessage(this.basePayload(message), this.targetOrigin);
+    }
+
+    connect(options) {
+      if (this.isReady) return Promise.resolve(this.state);
+      if (this.connectPromise) return this.connectPromise;
+      const timeoutMs = timeoutValue(options && options.timeoutMs, 30000);
+
+      this.connectPromise = new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          this.pending.delete("__connect__");
+          this.connectPromise = null;
+          reject(new AiBridgeError("CONNECTION_TIMEOUT", "连接 ai-bridge Relay 超时；请检查 clientOrigins 和 targetOrigin"));
+        }, timeoutMs);
+        this.pending.set("__connect__", { resolve, reject, timeout });
+        this.post({ type: "connect", timeoutMs });
+      });
+      return this.connectPromise;
+    }
+
+    ready(options) { return this.connect(options); }
+
+    handleMessage(event) {
+      if (event.source !== this.targetWindow || event.origin !== this.targetOrigin) return;
+      const message = event.data;
+      if (!message || message.source !== RELAY_SOURCE || message.protocolVersion !== PROTOCOL_VERSION) return;
+      if (message.clientId !== this.clientId) return;
+
+      if (message.type === "connected" || message.type === "connection-error") {
+        const connection = this.pending.get("__connect__");
+        if (!connection) return;
+        this.pending.delete("__connect__");
+        window.clearTimeout(connection.timeout);
+        if (message.error) {
+          this.connectPromise = null;
+          connection.reject(fromWireError(message.error));
+        } else {
+          this.state = message.state;
+          connection.resolve(this.state);
+          this.emit("ready", this.state);
+        }
+        return;
+      }
+
+      if (message.type === "event") {
+        this.emit(message.event, message.detail);
+        return;
+      }
+      if (message.type !== "result" || !message.requestId) return;
+
+      const request = this.pending.get(message.requestId);
+      if (!request) return;
+      this.pending.delete(message.requestId);
+      window.clearTimeout(request.timeout);
+      if (message.error) {
+        const error = fromWireError(message.error, message.requestId);
+        this.emit("error", { error, requestId: message.requestId });
+        request.reject(error);
+      } else {
+        if (request.method === "getState") this.state = message.result;
+        request.resolve(message.result);
+      }
+    }
+
+    async request(method, params, options) {
+      const settings = options || {};
+      await this.connect({ timeoutMs: settings.timeoutMs });
+      const requestId = settings.requestId || createId("command");
+      if (typeof requestId !== "string" || !REQUEST_ID_PATTERN.test(requestId)) {
+        throw new AiBridgeError("INVALID_REQUEST_ID", "requestId 格式不合法");
+      }
+      if (this.pending.has(requestId)) {
+        throw new AiBridgeError("REQUEST_IN_FLIGHT", `requestId 正在执行：${requestId}`, { requestId });
+      }
+      const timeoutMs = timeoutValue(settings.timeoutMs, this.timeoutMs);
+
+      return new Promise((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          this.pending.delete(requestId);
+          const error = new AiBridgeError("TIMEOUT", "ai-bridge Relay 命令执行超时", { requestId });
+          this.emit("error", { error, requestId });
+          reject(error);
+        }, timeoutMs);
+        this.pending.set(requestId, { resolve, reject, timeout, method });
+        this.post({
+          type: "request",
+          requestId,
+          method,
+          params: { ...(params || {}), options: { timeoutMs } },
+        });
+      });
+    }
+
+    execute(command, options) { return this.request("execute", { command }, options); }
+    executeTool(name, args, options) { return this.request("executeTool", { name, arguments: args || {} }, options); }
+    executeBatch(toolCalls, options) { return this.request("executeBatch", { toolCalls }, options); }
+    save(options) { return this.request("save", {}, options); }
+    history(options) { return this.request("history", {}, options); }
+    undo(options) { return this.request("undo", {}, options); }
+    redo(options) { return this.request("redo", {}, options); }
+    refreshState(options) { return this.request("getState", {}, options); }
+
+    createToolGroup(mapping) {
+      const group = {};
+      for (const method of Object.keys(mapping)) {
+        group[method] = (args, options) => this.executeTool(mapping[method], args, options);
+      }
+      return Object.freeze(group);
+    }
+
+    on(name, listener) {
+      if (typeof listener !== "function") throw new AiBridgeError("INVALID_LISTENER", "listener 必须是函数");
+      const entries = this.listeners.get(name) || new Set();
+      entries.add(listener);
+      this.listeners.set(name, entries);
+      return () => entries.delete(listener);
+    }
+
+    off(name, listener) {
+      const entries = this.listeners.get(name);
+      if (entries) entries.delete(listener);
+    }
+
+    emit(name, detail) {
+      for (const listener of this.listeners.get(name) || []) {
+        try { listener(detail); } catch (error) { window.setTimeout(function () { throw error; }, 0); }
+      }
+    }
+
+    destroy() {
+      if (this.destroyed) return;
+      try { this.post({ type: "disconnect" }); } catch (error) {}
+      this.destroyed = true;
+      window.removeEventListener("message", this.handleMessage);
+      for (const [requestId, request] of this.pending) {
+        window.clearTimeout(request.timeout);
+        request.reject(new AiBridgeError("CLIENT_DESTROYED", "AiBridgeClient 已销毁", {
+          requestId: requestId === "__connect__" ? null : requestId,
+        }));
+      }
+      this.pending.clear();
+      this.listeners.clear();
+      this.connectPromise = null;
+    }
+  }
+
+  window.AiBridgeClient = AiBridgeClient;
+  window.AiBridgeError = window.AiBridgeError || AiBridgeError;
+})();
