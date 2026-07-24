@@ -1,5 +1,9 @@
+import base64
+import io
 import json
 import os
+import socket
+import struct
 import tempfile
 import threading
 import time
@@ -26,6 +30,35 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertEqual(config.count(compact_toolbar), 1)
         self.assertLess(config.index(compact_toolbar), config.rindex("config.events = {"))
 
+    def test_example_proxy_defaults_interface_locale_to_simplified_chinese(self):
+        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
+        with open(config_path, encoding="utf-8") as stream:
+            config = stream.read()
+
+        self.assertIn(
+            """sub_filter '<option value="zh">zh</option>' '<option value="zh" selected>zh</option>';""",
+            config,
+        )
+        self.assertIn('if (!requestedLanguage) config.editorConfig.lang = "zh";', config)
+        self.assertIn('config.editorConfig.region = config.editorConfig.lang === "zh" ? "zh-CN"', config)
+
+    def test_static_asset_cache_revision_is_consistent(self):
+        base_dir = os.path.dirname(__file__)
+        revision = "0.4.0-rev26"
+        paths = [
+            "config.json",
+            "index.html",
+            "nginx-ds-example.conf",
+            "README.md",
+            "INTEGRATION.zh-CN.md",
+        ]
+        for relative_path in paths:
+            with self.subTest(path=relative_path):
+                with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
+                    contents = stream.read()
+                self.assertIn(revision, contents)
+                self.assertNotIn("0.4.0-rev25", contents)
+
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
         with open(contract_path, encoding="utf-8") as stream:
@@ -38,11 +71,263 @@ class ContractAlignmentTests(unittest.TestCase):
         ]
 
         self.assertEqual(model_names, contract_names)
-        self.assertEqual(len(model_names), 26)
+        self.assertIn("word_add_image", model_names)
         for entry in copilot_server.WORD_TOOLS:
             function = entry["function"]
             self.assertTrue(function["description"])
             self.assertNotIn("$ref", json.dumps(function["parameters"]))
+
+
+class ImageImportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "COPILOT_IMAGE_DIR": self.temp_dir.name,
+                "JWT_SECRET": "image-test-secret",
+            },
+        )
+        self.environment.start()
+        self.png = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + struct.pack(">II", 2, 1)
+            + b"\x08\x06\x00\x00\x00"
+        )
+        self.claims = {
+            "documentKey": "document-key-v1",
+            "fileName": "demo.docx",
+            "fileType": "docx",
+            "editorType": "word",
+            "userId": "uid-1",
+        }
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temp_dir.cleanup()
+
+    def data_source(self, mime_type="image/png", data=None):
+        encoded = base64.b64encode(self.png if data is None else data).decode()
+        return {
+            "type": "dataUrl",
+            "dataUrl": f"data:{mime_type};base64,{encoded}",
+        }
+
+    def test_data_url_import_is_content_addressed_and_signed(self):
+        first = copilot_server.import_image(self.data_source(), self.claims, now=1000)
+        second = copilot_server.import_image(self.data_source(), self.claims, now=1001)
+
+        self.assertEqual(first["asset"]["assetId"], second["asset"]["assetId"])
+        self.assertEqual(first["asset"]["mimeType"], "image/png")
+        self.assertEqual(first["asset"]["widthPx"], 2)
+        self.assertEqual(first["asset"]["heightPx"], 1)
+        parsed = copilot_server.urllib.parse.urlsplit(first["asset"]["path"])
+        token = copilot_server.urllib.parse.parse_qs(parsed.query)["token"][0]
+        asset_id = parsed.path.rsplit("/", 1)[1]
+        path, mime_type = copilot_server.verify_image_asset(asset_id, token, now=1001)
+        self.assertEqual(mime_type, "image/png")
+        with open(path, "rb") as stream:
+            self.assertEqual(stream.read(), self.png)
+
+    def test_signed_asset_expires(self):
+        imported = copilot_server.import_image(self.data_source(), self.claims, now=1000)
+        parsed = copilot_server.urllib.parse.urlsplit(imported["asset"]["path"])
+        token = copilot_server.urllib.parse.parse_qs(parsed.query)["token"][0]
+        asset_id = parsed.path.rsplit("/", 1)[1]
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.verify_image_asset(asset_id, token, now=2000)
+
+        self.assertEqual(raised.exception.code, "IMAGE_ASSET_EXPIRED")
+
+    def test_data_url_mime_must_match_magic_bytes(self):
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.import_image(
+                self.data_source("image/jpeg"),
+                self.claims,
+            )
+
+        self.assertEqual(raised.exception.code, "UNSUPPORTED_IMAGE_FORMAT")
+
+    def test_svg_is_sanitized_imported_and_served(self):
+        svg = (
+            b'<svg xmlns="http://www.w3.org/2000/svg" width="25.4mm" height="12.7mm" '
+            b'viewBox="0 0 96 48"><defs><linearGradient id="g">'
+            b'<stop offset="0" stop-color="#fff"/></linearGradient></defs>'
+            b'<rect width="96" height="48" fill="url(#g)"/></svg>'
+        )
+        imported = copilot_server.import_image(
+            self.data_source("image/svg+xml", svg),
+            self.claims,
+            now=1000,
+        )
+
+        self.assertEqual(imported["asset"]["mimeType"], "image/svg+xml")
+        self.assertEqual(imported["asset"]["widthPx"], 96)
+        self.assertEqual(imported["asset"]["heightPx"], 48)
+        self.assertTrue(imported["asset"]["assetId"].endswith(".svg"))
+        parsed = copilot_server.urllib.parse.urlsplit(imported["asset"]["path"])
+        token = copilot_server.urllib.parse.parse_qs(parsed.query)["token"][0]
+        path, mime_type = copilot_server.verify_image_asset(
+            imported["asset"]["assetId"],
+            token,
+            now=1001,
+        )
+        self.assertEqual(mime_type, "image/svg+xml")
+        with open(path, "rb") as stream:
+            sanitized = stream.read()
+        self.assertIn(b"<rect", sanitized)
+        self.assertNotIn(b"DOCTYPE", sanitized)
+
+    def test_svg_rejects_scripts_events_and_external_resources(self):
+        samples = [
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><rect onclick="alert(1)"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://evil.test/a.png"/></svg>',
+            b'<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg>&xxe;</svg>',
+        ]
+        for svg in samples:
+            with self.subTest(svg=svg[:50]):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.import_image(
+                        self.data_source("image/svg+xml", svg),
+                        self.claims,
+                    )
+                self.assertEqual(raised.exception.code, "UNSUPPORTED_IMAGE_FORMAT")
+
+    def test_malformed_base64_is_rejected_without_echoing_input(self):
+        sensitive = "not-valid-base64!"
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.import_image(
+                {
+                    "type": "dataUrl",
+                    "dataUrl": f"data:image/png;base64,{sensitive}",
+                },
+                self.claims,
+            )
+
+        self.assertEqual(raised.exception.code, "INVALID_IMAGE_SOURCE")
+        self.assertNotIn(sensitive, raised.exception.message)
+
+    def test_raw_byte_limit_is_enforced_before_image_parsing(self):
+        with mock.patch.object(copilot_server, "IMAGE_MAX_BYTES", 8):
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                copilot_server.import_image(self.data_source(), self.claims)
+
+        self.assertEqual(raised.exception.code, "IMAGE_TOO_LARGE")
+
+    def test_pixel_limits_are_enforced(self):
+        oversized = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + struct.pack(">II", copilot_server.IMAGE_MAX_EDGE_PX + 1, 1)
+            + b"\x08\x06\x00\x00\x00"
+        )
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.import_image(self.data_source(data=oversized), self.claims)
+
+        self.assertEqual(raised.exception.code, "IMAGE_TOO_LARGE")
+
+    def test_private_remote_address_is_blocked(self):
+        with mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))],
+        ):
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                copilot_server.validate_image_url("https://example.test/image.png")
+
+        self.assertEqual(raised.exception.code, "IMAGE_FETCH_BLOCKED")
+
+    def test_loopback_ipv6_address_is_blocked(self):
+        with mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0))],
+        ):
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                copilot_server.validate_image_url("https://example.test/image.png")
+
+        self.assertEqual(raised.exception.code, "IMAGE_FETCH_BLOCKED")
+
+    def test_hostname_allow_list_accepts_subdomains_and_blocks_others(self):
+        with mock.patch.dict(
+            os.environ,
+            {"COPILOT_IMAGE_ALLOWED_HOSTS": "images.example.com"},
+        ), mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        ):
+            accepted = copilot_server.validate_image_url(
+                "https://cdn.images.example.com/image.png"
+            )
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                copilot_server.validate_image_url("https://example.net/image.png")
+
+        self.assertEqual(accepted, "https://cdn.images.example.com/image.png")
+        self.assertEqual(raised.exception.code, "IMAGE_FETCH_BLOCKED")
+
+    def test_redirect_to_private_address_is_blocked(self):
+        handler = copilot_server.SafeImageRedirectHandler()
+        request = copilot_server.urllib.request.Request(
+            "https://public.example/image.png"
+        )
+        with mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.8", 443))],
+        ):
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                handler.redirect_request(
+                    request,
+                    None,
+                    302,
+                    "Found",
+                    {},
+                    "https://private.example/image.png",
+                )
+
+        self.assertEqual(raised.exception.code, "IMAGE_FETCH_BLOCKED")
+
+    def test_public_https_image_is_downloaded_with_type_validation(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.headers.get_content_type.return_value = "image/png"
+        response.headers.get.return_value = str(len(self.png))
+        response.read.return_value = self.png
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        ), mock.patch.object(copilot_server.urllib.request, "build_opener", return_value=opener):
+            data, content_type = copilot_server.decode_image_source({
+                "type": "url",
+                "url": "https://example.test/image.png",
+            })
+
+        self.assertEqual(data, self.png)
+        self.assertEqual(content_type, "image/png")
+
+    def test_remote_timeout_returns_safe_fetch_error(self):
+        opener = mock.Mock()
+        opener.open.side_effect = socket.timeout("remote response body")
+        with mock.patch.object(
+            copilot_server.socket,
+            "getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        ), mock.patch.object(copilot_server.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaises(copilot_server.BridgeError) as raised:
+                copilot_server.decode_image_source({
+                    "type": "url",
+                    "url": "https://example.test/image.png",
+                })
+
+        self.assertEqual(raised.exception.code, "IMAGE_FETCH_FAILED")
+        self.assertNotIn("remote response body", raised.exception.message)
 
 
 class HttpRelayTests(unittest.TestCase):
@@ -180,6 +465,41 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "EDITOR_TOKEN_REQUIRED")
         self.assertNotIn("bind_current_word", raised.exception.message)
+
+    def test_http_relay_only_allows_large_arguments_for_image_tools(self):
+        large_data_url = "data:image/png;base64," + ("A" * 300000)
+        session = {
+            "state": {
+                "capabilities": {
+                    "tools": ["word_add_image", "word_replace_text"],
+                },
+            },
+        }
+        image_command = copilot_server.bridge_build_command(
+            {
+                "method": "executeTool",
+                "requestId": "large-image",
+                "name": "word_add_image",
+                "arguments": {
+                    "source": {"type": "dataUrl", "dataUrl": large_data_url},
+                },
+            },
+            session,
+        )
+        self.assertEqual(image_command["params"]["name"], "word_add_image")
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_build_command(
+                {
+                    "method": "executeTool",
+                    "requestId": "large-text",
+                    "name": "word_replace_text",
+                    "arguments": {"search": "a", "replace": "A" * 300000},
+                },
+                session,
+            )
+
+        self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
 
     def test_resume_token_restores_a_cleaned_session_without_editor_token(self):
         registration = self.register()
@@ -398,6 +718,74 @@ class HttpRelayTests(unittest.TestCase):
         cached_after_handoff = copilot_server.bridge_execute(request, binding_claims)
         self.assertTrue(cached_after_handoff["cached"])
         self.assertEqual(cached_after_handoff["result"]["text"], "current document")
+
+
+class BridgeLoggingTests(unittest.TestCase):
+    def test_bridge_error_log_includes_only_validated_correlation_fields(self):
+        handler = object.__new__(copilot_server.Handler)
+        handler.path = "/bridge/execute?debug=true"
+        handler.client_address = ("127.0.0.1", 12345)
+        error = copilot_server.BridgeError(
+            409,
+            "EXECUTION_FAILED",
+            "包含敏感正文的错误消息",
+            {"phase": "word-command", "secret": "敏感正文"},
+        )
+
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            handler.log_bridge_error(
+                error,
+                {
+                    "requestId": "turn-3-set-text",
+                    "sessionId": "http-session:test",
+                    "arguments": {"text": "敏感正文"},
+                },
+            )
+
+        prefix, encoded = output.getvalue().strip().split(" ", 1)
+        event = json.loads(encoded)
+        self.assertEqual(prefix, "[bridge-error]")
+        self.assertEqual(
+            event,
+            {
+                "path": "/bridge/execute",
+                "status": 409,
+                "code": "EXECUTION_FAILED",
+                "client": "127.0.0.1",
+                "sessionId": "http-session:test",
+                "requestId": "turn-3-set-text",
+                "phase": "word-command",
+            },
+        )
+        self.assertNotIn("敏感正文", output.getvalue())
+
+    def test_bridge_error_log_omits_untrusted_ids_and_phases(self):
+        handler = object.__new__(copilot_server.Handler)
+        handler.path = "/bridge/execute"
+        handler.client_address = ("127.0.0.1", 12345)
+        error = copilot_server.BridgeError(
+            409,
+            "EXECUTION_FAILED",
+            "failed",
+            {"phase": "untrusted-phase"},
+        )
+
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            handler.log_bridge_error(
+                error,
+                {
+                    "requestId": "invalid request id",
+                    "sessionId": "invalid session id",
+                },
+            )
+
+        _, encoded = output.getvalue().strip().split(" ", 1)
+        event = json.loads(encoded)
+        self.assertNotIn("requestId", event)
+        self.assertNotIn("sessionId", event)
+        self.assertNotIn("phase", event)
 
 
 class VersionHistoryTests(unittest.TestCase):

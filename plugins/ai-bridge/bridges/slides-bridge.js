@@ -5,11 +5,15 @@
 
   function parseResult(rawResult) {
     const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
-    if (!value || !value.ok) throw new Error((value && value.error) || "Slides Bridge 执行失败");
+    if (!value || !value.ok) {
+      const error = new Error((value && value.error) || "Slides Bridge 执行失败");
+      if (value && value.code) error.code = value.code;
+      throw error;
+    }
     return value;
   }
 
-  function execute(toolCalls) {
+  function executeOfficeCommands(toolCalls) {
     return new Promise(function (resolve, reject) {
       Asc.scope.copilotSlideCalls = toolCalls;
       Asc.plugin.info.recalculate = true;
@@ -24,6 +28,7 @@
             var mutating = false;
             var EMU_PER_MM = 36000;
             var EMU_PER_POINT = 12700;
+            var TWIPS_PER_MM = 1440 / 25.4;
             var mutatingNames = {
               slides_replace_text: true,
               slides_scale_font: true,
@@ -32,7 +37,41 @@
               slides_add_slide: true,
               slides_duplicate_slide: true,
               slides_delete_slide: true,
+              slides_move_slide: true,
+              slides_set_visibility: true,
+              slides_set_size: true,
+              slides_apply_layout: true,
+              slides_set_show_settings: true,
+              slides_apply_theme: true,
+              slides_set_theme: true,
+              slides_create_layout: true,
+              slides_add_template_shape: true,
+              slides_manage_template_object: true,
+              slides_set_template_background: true,
+              slides_set_text_content: true,
+              slides_format_paragraphs: true,
+              slides_update_object: true,
+              slides_set_hyperlink: true,
+              slides_set_notes: true,
+              slides_add_comment: true,
+              slides_set_transition: true,
+              slides_add_table: true,
+              slides_set_table_cell: true,
+              slides_edit_table: true,
+              slides_format_table: true,
+              slides_align_objects: true,
+              slides_group_objects: true,
+              slides_reorder_object: true,
+              slides_add_connector: true,
+              slides_add_freeform: true,
+              slides_add_word_art: true,
+              slides_add_math: true,
+              slides_add_ole_object: true,
+              slides_add_image_shape: true,
+              slides_manage_animation: true,
+              slides_manage_comment: true,
               slides_add_textbox: true,
+              slides_add_image: true,
               slides_set_background: true,
               slides_add_shape: true,
               slides_update_shape: true,
@@ -57,6 +96,47 @@
             function asFinite(value, fallback) {
               var number = Number(value);
               return isFinite(number) ? number : fallback;
+            }
+
+            function commandError(code, message) {
+              var error = new Error(message);
+              error.code = code;
+              throw error;
+            }
+
+            function resolveImageSize(args, maxWidthMm, maxHeightMm) {
+              var metadata = args._image;
+              if (!metadata || !isFinite(Number(metadata.widthPx)) || !isFinite(Number(metadata.heightPx))) {
+                commandError("INVALID_IMAGE_SOURCE", "内部图片资源缺少有效尺寸");
+              }
+              var ratio = Number(metadata.widthPx) / Number(metadata.heightPx);
+              if (!isFinite(ratio) || ratio <= 0) commandError("INVALID_IMAGE_SOURCE", "内部图片宽高比无效");
+              var hasWidth = hasOwn(args, "widthMm");
+              var hasHeight = hasOwn(args, "heightMm");
+              var width = hasWidth ? Number(args.widthMm) : null;
+              var height = hasHeight ? Number(args.heightMm) : null;
+              if ((hasWidth && (!isFinite(width) || width <= 0)) || (hasHeight && (!isFinite(height) || height <= 0))) {
+                throw new Error("图片宽高必须是大于 0 的有限数字");
+              }
+              if (!hasWidth && !hasHeight) {
+                width = maxWidthMm;
+                height = width / ratio;
+                if (height > maxHeightMm) {
+                  height = maxHeightMm;
+                  width = height * ratio;
+                }
+              } else if (hasWidth && !hasHeight) {
+                height = width / ratio;
+              } else if (!hasWidth && hasHeight) {
+                width = height * ratio;
+              } else if (args.preserveAspectRatio !== false) {
+                var containedWidth = Math.min(width, height * ratio);
+                var containedHeight = containedWidth / ratio;
+                width = containedWidth;
+                height = containedHeight;
+              }
+              if (width > 1000 || height > 1000) throw new Error("图片宽高不能超过 1000 mm");
+              return { widthMm: width, heightMm: height };
             }
 
             function clamp(value, minimum, maximum) {
@@ -93,6 +173,14 @@
                 : null;
             }
 
+            function mmToTwips(value) {
+              return Math.round(asFinite(value, 0) * TWIPS_PER_MM);
+            }
+
+            function pointsToTwips(value) {
+              return Math.round(asFinite(value, 0) * 20);
+            }
+
             function safeCall(value, method) {
               if (!value || typeof value[method] !== "function") return null;
               try {
@@ -123,10 +211,40 @@
               return presentation.GetAllSlides().length;
             }
 
+            function masterCount() {
+              if (typeof presentation.GetMastersCount === "function") return presentation.GetMastersCount();
+              if (typeof presentation.GetAllSlideMasters === "function") return presentation.GetAllSlideMasters().length;
+              return 0;
+            }
+
+            function getMaster(oneBasedIndex) {
+              var count = masterCount();
+              var index = Number(oneBasedIndex);
+              if (!Number.isInteger(index) || index < 1 || index > count) {
+                throw new Error("幻灯片母版序号超出范围，当前共 " + count + " 个母版");
+              }
+              return presentation.GetMaster(index - 1);
+            }
+
+            function layoutCount(master) {
+              if (master && typeof master.GetLayoutsCount === "function") return master.GetLayoutsCount();
+              if (master && typeof master.GetAllLayouts === "function") return master.GetAllLayouts().length;
+              return 0;
+            }
+
+            function getLayout(master, oneBasedIndex) {
+              var count = layoutCount(master);
+              var index = Number(oneBasedIndex);
+              if (!Number.isInteger(index) || index < 1 || index > count) {
+                throw new Error("幻灯片版式序号超出范围，当前母版共 " + count + " 个版式");
+              }
+              return master.GetLayout(index - 1);
+            }
+
             function getSlide(oneBasedIndex) {
               var index = Number(oneBasedIndex);
               if (!Number.isInteger(index) || index < 1 || index > slideCount()) {
-                throw new Error("幻灯片页码超出范围，当前共 " + slideCount() + " 页");
+                throw new Error("幻灯片序号无效：页码超出范围，当前共 " + slideCount() + " 页");
               }
               return presentation.GetSlideByIndex(index - 1);
             }
@@ -137,6 +255,10 @@
 
             function slideCharts(slide) {
               return typeof slide.GetAllCharts === "function" ? slide.GetAllCharts() : [];
+            }
+
+            function slideTables(slide) {
+              return typeof slide.GetAllTables === "function" ? slide.GetAllTables() : [];
             }
 
             function pushUnique(target, values) {
@@ -171,6 +293,82 @@
               return content && typeof content.GetText === "function" ? String(content.GetText() || "") : "";
             }
 
+            function describeLayout(layout, masterIndex, layoutIndex, includeRaw, includeObjects) {
+              if (!layout) return null;
+              var layoutDrawings = safeCall(layout, "GetAllDrawings") || [];
+              var result = {
+                masterIndex: masterIndex,
+                layoutIndex: layoutIndex,
+                name: safeCall(layout, "GetName"),
+                layoutType: safeCall(layout, "GetLayoutType"),
+                objects: typeof layout.GetAllDrawings === "function" ? layoutDrawings.length : null,
+                drawings: includeObjects ? layoutDrawings.map(function (drawing, index) {
+                  return describeDrawing(drawing, index, includeRaw);
+                }) : undefined,
+              };
+              if (includeRaw) result.raw = serialized(layout);
+              return result;
+            }
+
+            function locateLayout(layout, includeRaw) {
+              if (!layout) return null;
+              for (var masterIndex = 0; masterIndex < masterCount(); masterIndex += 1) {
+                var master = presentation.GetMaster(masterIndex);
+                for (var layoutIndex = 0; layoutIndex < layoutCount(master); layoutIndex += 1) {
+                  var candidate = master.GetLayout(layoutIndex);
+                  if (candidate === layout) {
+                    return describeLayout(candidate, masterIndex + 1, layoutIndex + 1, includeRaw);
+                  }
+                }
+              }
+              return describeLayout(layout, null, null, includeRaw);
+            }
+
+            function describeTheme(theme, includeRaw) {
+              if (!theme) return null;
+              var colorScheme = safeCall(theme, "GetColorScheme");
+              var fontScheme = safeCall(theme, "GetFontScheme");
+              var formatScheme = safeCall(theme, "GetFormatScheme");
+              return {
+                colorScheme: serialized(colorScheme),
+                fontScheme: serialized(fontScheme),
+                formatScheme: serialized(formatScheme),
+                raw: includeRaw ? serialized(theme) : undefined,
+              };
+            }
+
+            function getTemplateContainer(args) {
+              var masterIndex = Number(args.masterIndex || 1);
+              var master = getMaster(masterIndex);
+              var scope = String(args.scope || "master");
+              if (scope === "master") {
+                return { scope: scope, master: master, container: master, masterIndex: masterIndex, layoutIndex: null };
+              }
+              if (scope === "layout") {
+                var layoutIndex = Number(args.layoutIndex);
+                return {
+                  scope: scope,
+                  master: master,
+                  container: getLayout(master, layoutIndex),
+                  masterIndex: masterIndex,
+                  layoutIndex: layoutIndex,
+                };
+              }
+              throw new Error("模板作用域必须是 master 或 layout");
+            }
+
+            function resolveTemplateDrawing(args) {
+              var target = getTemplateContainer(args);
+              var drawings = safeCall(target.container, "GetAllDrawings") || [];
+              for (var index = 0; index < drawings.length; index += 1) {
+                if (!drawingMatches(drawings[index], args, index)) continue;
+                target.drawing = drawings[index];
+                target.index = index;
+                return target;
+              }
+              throw new Error("找不到母版或版式对象；请提供有效的 objectId、name 或对象序号");
+            }
+
             function getRunsFromShape(shape) {
               var runs = [];
               var content;
@@ -193,6 +391,11 @@
               return runs;
             }
 
+            function getParagraphsFromShape(shape) {
+              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
+              return content && typeof content.GetAllParagraphs === "function" ? content.GetAllParagraphs() : [];
+            }
+
             function applyRunFormat(run, format) {
               if (format.fontSize !== undefined) run.SetFontSize(Math.max(2, Math.round(Number(format.fontSize) * 2)));
               if (format.fontFamily) run.SetFontFamily(String(format.fontFamily));
@@ -200,6 +403,168 @@
               if (format.italic !== undefined) run.SetItalic(Boolean(format.italic));
               if (format.underline !== undefined) run.SetUnderline(Boolean(format.underline));
               if (format.color) run.SetColor(Api.Color(String(format.color)));
+            }
+
+            function paragraphProperties(paragraph) {
+              var paraPr = safeCall(paragraph, "GetParaPr");
+              return paraPr || paragraph;
+            }
+
+            function setParagraphBullet(paragraph, spec) {
+              if (!hasOwn(spec, "listType")) return;
+              var target = paragraphProperties(paragraph);
+              if (!target || typeof target.SetBullet !== "function") {
+                throw new Error("当前 ONLYOFFICE 版本不支持设置项目符号或编号");
+              }
+              var listType = String(spec.listType || "none");
+              if (listType === "none") {
+                target.SetBullet(null);
+                return;
+              }
+              var bullet;
+              if (listType === "bullet") {
+                if (typeof Api.CreateBullet !== "function") throw new Error("当前 ONLYOFFICE 版本不支持项目符号");
+                bullet = Api.CreateBullet(String(spec.bulletSymbol || "•"));
+              } else if (listType === "number") {
+                if (typeof Api.CreateNumbering !== "function") throw new Error("当前 ONLYOFFICE 版本不支持编号列表");
+                bullet = Api.CreateNumbering(
+                  String(spec.numberingType || "ArabicPeriod"),
+                  Math.max(1, Math.round(asFinite(spec.startAt, 1)))
+                );
+              } else {
+                throw new Error("不支持的列表类型：" + listType);
+              }
+              target.SetBullet(bullet);
+            }
+
+            function applyParagraphFormat(paragraph, spec) {
+              var target = paragraphProperties(paragraph);
+              if (hasOwn(spec, "align") && typeof target.SetJc === "function") target.SetJc(String(spec.align));
+              if (hasOwn(spec, "firstLineIndentMm") && typeof target.SetIndFirstLine === "function") {
+                target.SetIndFirstLine(mmToTwips(spec.firstLineIndentMm));
+              }
+              if (hasOwn(spec, "leftIndentMm") && typeof target.SetIndLeft === "function") {
+                target.SetIndLeft(mmToTwips(spec.leftIndentMm));
+              }
+              if (hasOwn(spec, "rightIndentMm") && typeof target.SetIndRight === "function") {
+                target.SetIndRight(mmToTwips(spec.rightIndentMm));
+              }
+              if (hasOwn(spec, "spacingBeforePt") && typeof target.SetSpacingBefore === "function") {
+                target.SetSpacingBefore(pointsToTwips(spec.spacingBeforePt), false);
+              }
+              if (hasOwn(spec, "spacingAfterPt") && typeof target.SetSpacingAfter === "function") {
+                target.SetSpacingAfter(pointsToTwips(spec.spacingAfterPt), false);
+              }
+              if (hasOwn(spec, "lineSpacing") && typeof target.SetSpacingLine === "function") {
+                var lineRule = String(spec.lineRule || "auto");
+                var lineValue = lineRule === "auto"
+                  ? Math.round(asFinite(spec.lineSpacing, 1) * 240)
+                  : pointsToTwips(spec.lineSpacing);
+                target.SetSpacingLine(lineValue, lineRule);
+              }
+              if (hasOwn(spec, "level") && typeof target.SetOutlineLvl === "function") {
+                target.SetOutlineLvl(clamp(Math.round(asFinite(spec.level, 0)), 0, 8));
+              }
+              setParagraphBullet(paragraph, spec);
+              var runCount = typeof paragraph.GetElementsCount === "function" ? paragraph.GetElementsCount() : 0;
+              for (var runIndex = 0; runIndex < runCount; runIndex += 1) {
+                var run = paragraph.GetElement(runIndex);
+                if (run && safeCall(run, "GetClassType") === "run") applyRunFormat(run, spec);
+              }
+            }
+
+            function replaceShapeParagraphs(shape, paragraphSpecs) {
+              if (!Array.isArray(paragraphSpecs) || !paragraphSpecs.length) {
+                throw new Error("paragraphs 必须是非空数组");
+              }
+              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
+              if (!content || typeof content.Push !== "function") throw new Error("目标图形不支持文本内容");
+              if (typeof content.RemoveAllElements === "function") content.RemoveAllElements();
+              for (var index = 0; index < paragraphSpecs.length; index += 1) {
+                var spec = paragraphSpecs[index] || {};
+                var paragraph = Api.CreateParagraph();
+                var run = paragraph.AddText(String(spec.text || ""));
+                applyRunFormat(run, spec);
+                applyParagraphFormat(paragraph, spec);
+                content.Push(paragraph);
+              }
+            }
+
+            function describeTransition(transition) {
+              if (!transition) return null;
+              return {
+                effect: safeCall(transition, "GetEntryEffect"),
+                speed: safeCall(transition, "GetSpeed"),
+                durationMs: safeCall(transition, "GetDuration"),
+                advanceOnClick: safeCall(transition, "GetAdvanceOnClick"),
+                advanceOnTime: safeCall(transition, "GetAdvanceOnTime"),
+                advanceTimeMs: safeCall(transition, "GetAdvanceTime"),
+              };
+            }
+
+            function describeAnimationEffect(effect, index) {
+              var shape = safeCall(effect, "GetShape");
+              return {
+                effectIndex: index,
+                effectType: safeCall(effect, "GetEffectType"),
+                trigger: safeCall(effect, "GetTriggerType"),
+                durationMs: safeCall(effect, "GetDuration"),
+                delayMs: safeCall(effect, "GetDelay"),
+                repeatCount: safeCall(effect, "GetRepeatCount"),
+                objectId: safeCall(shape, "GetInternalId"),
+                objectName: safeCall(shape, "GetName"),
+                objectKind: drawingKind(shape),
+              };
+            }
+
+            function describeComment(comment, index) {
+              var replies = [];
+              var repliesCount = Math.max(0, Number(safeCall(comment, "GetRepliesCount")) || 0);
+              for (var replyIndex = 0; replyIndex < repliesCount; replyIndex += 1) {
+                var reply = safeCall(comment, "GetReply", replyIndex);
+                if (reply) replies.push(describeComment(reply, replyIndex));
+              }
+              return {
+                commentIndex: index,
+                commentId: safeCall(comment, "GetId"),
+                text: safeCall(comment, "GetText"),
+                author: safeCall(comment, "GetAuthorName") || safeCall(comment, "GetAutorName"),
+                userId: safeCall(comment, "GetUserId"),
+                position: safeCall(comment, "GetPosition"),
+                time: safeCall(comment, "GetTime"),
+                timeUtc: safeCall(comment, "GetTimeUTC"),
+                solved: safeCall(comment, "IsSolved"),
+                replies: replies,
+              };
+            }
+
+            function resolveComment(args) {
+              var comments = safeCall(presentation, "GetAllComments") || [];
+              for (var commentIndex = 0; commentIndex < comments.length; commentIndex += 1) {
+                if (hasOwn(args, "commentIndex") && Number(args.commentIndex) !== commentIndex) continue;
+                if (hasOwn(args, "commentId") && String(safeCall(comments[commentIndex], "GetId")) !== String(args.commentId)) continue;
+                if (hasOwn(args, "commentIndex") || hasOwn(args, "commentId")) {
+                  return { comment: comments[commentIndex], index: commentIndex };
+                }
+              }
+              throw new Error("找不到目标批注；请提供有效的 commentId 或 commentIndex");
+            }
+
+            function createWordArtTextPr(args) {
+              if (typeof Api.CreateTextPr !== "function") throw new Error("当前 ONLYOFFICE 版本不支持艺术字文本属性");
+              var textPr = Api.CreateTextPr();
+              if (hasOwn(args, "fontSize") && typeof textPr.SetFontSize === "function") {
+                textPr.SetFontSize(Math.max(2, Math.round(asFinite(args.fontSize, 36) * 2)));
+              }
+              if (hasOwn(args, "fontFamily") && typeof textPr.SetFontFamily === "function") textPr.SetFontFamily(String(args.fontFamily));
+              if (hasOwn(args, "bold") && typeof textPr.SetBold === "function") textPr.SetBold(Boolean(args.bold));
+              if (hasOwn(args, "italic") && typeof textPr.SetItalic === "function") textPr.SetItalic(Boolean(args.italic));
+              if (hasOwn(args, "underline") && typeof textPr.SetUnderline === "function") textPr.SetUnderline(Boolean(args.underline));
+              if (hasOwn(args, "caps") && typeof textPr.SetCaps === "function") textPr.SetCaps(Boolean(args.caps));
+              if ((hasOwn(args, "fontColor") || hasOwn(args, "color")) && typeof textPr.SetColor === "function") {
+                textPr.SetColor(apiColor(hasOwn(args, "fontColor") ? args.fontColor : args.color));
+              }
+              return textPr;
             }
 
             function replaceShapeText(shape, args) {
@@ -446,8 +811,127 @@
                   };
                 }) : [];
               }
+              if (kind === "table") {
+                var tableInfo = describeTable(drawing);
+                info.rows = tableInfo.rows;
+                info.columns = tableInfo.columns;
+                info.data = tableInfo.data;
+                info.columnWidthsMm = tableInfo.columnWidthsMm;
+              }
+              if (kind === "oleObject") {
+                info.applicationId = safeCall(drawing, "GetApplicationId");
+                var oleData = safeCall(drawing, "GetData");
+                info.dataLength = typeof oleData === "string" ? oleData.length : null;
+                if (includeRaw) info.data = oleData;
+              }
               if (includeRaw) info.raw = serialized(drawing);
               return info;
+            }
+
+            function tableDimensions(table) {
+              var rows = 0;
+              var columns = 0;
+              for (var rowIndex = 0; rowIndex < 1000; rowIndex += 1) {
+                var row = safeCall(table, "GetRow", rowIndex);
+                if (!row) break;
+                rows += 1;
+                var count = safeCall(row, "GetCellsCount");
+                if (typeof count === "number") columns = Math.max(columns, count);
+                else {
+                  var detected = 0;
+                  for (var columnIndex = 0; columnIndex < 1000; columnIndex += 1) {
+                    if (!safeCall(row, "GetCell", columnIndex)) break;
+                    detected += 1;
+                  }
+                  columns = Math.max(columns, detected);
+                }
+              }
+              return { rows: rows, columns: columns };
+            }
+
+            function getTableCell(table, oneBasedRow, oneBasedColumn) {
+              var rowIndex = Number(oneBasedRow);
+              var columnIndex = Number(oneBasedColumn);
+              if (!Number.isInteger(rowIndex) || rowIndex < 1 || !Number.isInteger(columnIndex) || columnIndex < 1) {
+                throw new Error("表格行列序号必须是从 1 开始的整数");
+              }
+              var row = safeCall(table, "GetRow", rowIndex - 1);
+              var cell = row ? safeCall(row, "GetCell", columnIndex - 1) : null;
+              if (!cell) throw new Error("表格单元格超出范围");
+              return cell;
+            }
+
+            function describeTable(table) {
+              var dimensions = tableDimensions(table);
+              var data = [];
+              for (var rowIndex = 0; rowIndex < dimensions.rows; rowIndex += 1) {
+                var row = table.GetRow(rowIndex);
+                var values = [];
+                var cells = safeCall(row, "GetCellsCount");
+                var cellCount = typeof cells === "number" ? cells : dimensions.columns;
+                for (var columnIndex = 0; columnIndex < cellCount; columnIndex += 1) {
+                  var cell = safeCall(row, "GetCell", columnIndex);
+                  values.push(cell ? String(safeCall(cell, "GetText") || "") : null);
+                }
+                data.push(values);
+              }
+              var columnWidths = [];
+              for (var widthIndex = 0; widthIndex < dimensions.columns; widthIndex += 1) {
+                columnWidths.push(emuToMm(safeCall(table, "GetColumnWidth", widthIndex)));
+              }
+              return {
+                rows: dimensions.rows,
+                columns: dimensions.columns,
+                data: data,
+                columnWidthsMm: columnWidths,
+              };
+            }
+
+            function applyTableCellFormat(cell, args) {
+              if (hasOwn(args, "text")) {
+                if (typeof cell.SetText === "function") cell.SetText(String(args.text));
+                else {
+                  var cellContent = safeCall(cell, "GetContent");
+                  if (!cellContent || typeof cellContent.Push !== "function") throw new Error("目标单元格不支持文本");
+                  if (typeof cellContent.RemoveAllElements === "function") cellContent.RemoveAllElements();
+                  var cellParagraph = Api.CreateParagraph();
+                  cellParagraph.AddText(String(args.text));
+                  cellContent.Push(cellParagraph);
+                }
+              }
+              if (hasOwn(args, "fill") || hasOwn(args, "backgroundColor")) {
+                if (typeof cell.SetShd !== "function") throw new Error("当前 ONLYOFFICE 版本不支持单元格填充");
+                cell.SetShd(createFill(args.fill, args.backgroundColor));
+              }
+              if (hasOwn(args, "verticalAlign") && typeof cell.SetVerticalAlign === "function") {
+                cell.SetVerticalAlign(String(args.verticalAlign));
+              }
+              var cellTextContent = safeCall(cell, "GetContent");
+              var cellParagraphs = cellTextContent && typeof cellTextContent.GetAllParagraphs === "function"
+                ? cellTextContent.GetAllParagraphs()
+                : [];
+              for (var paragraphIndex = 0; paragraphIndex < cellParagraphs.length; paragraphIndex += 1) {
+                applyParagraphFormat(cellParagraphs[paragraphIndex], args);
+              }
+              if (isObject(args.border)) {
+                var borderFill = createFill(args.border.fill, args.border.color);
+                var borderWidth = Math.max(0, asFinite(args.border.widthMm, 0.25));
+                var sides = Array.isArray(args.border.sides)
+                  ? args.border.sides.map(String)
+                  : ["top", "right", "bottom", "left"];
+                var borderMethods = {
+                  top: "SetCellBorderTop",
+                  right: "SetCellBorderRight",
+                  bottom: "SetCellBorderBottom",
+                  left: "SetCellBorderLeft",
+                };
+                for (var sideIndex = 0; sideIndex < sides.length; sideIndex += 1) {
+                  var borderMethod = borderMethods[sides[sideIndex]];
+                  if (borderMethod && typeof cell[borderMethod] === "function") {
+                    cell[borderMethod](borderWidth, borderFill);
+                  }
+                }
+              }
             }
 
             function drawingMatches(drawing, args, objectIndex) {
@@ -473,6 +957,24 @@
                 return { slide: slide, drawing: drawings[index], index: index };
               }
               throw new Error("找不到目标对象；请提供有效的 objectId、name 或对象序号");
+            }
+
+            function resolveDrawingTargets(slideNumber, targets) {
+              if (!Array.isArray(targets) || !targets.length) throw new Error("targets 必须是非空对象选择器数组");
+              var resolved = [];
+              for (var index = 0; index < targets.length; index += 1) {
+                var selector = targets[index] || {};
+                var targetArgs = { slide: slideNumber };
+                if (hasOwn(selector, "objectId")) targetArgs.objectId = selector.objectId;
+                if (hasOwn(selector, "objectIndex")) targetArgs.objectIndex = selector.objectIndex;
+                if (hasOwn(selector, "name")) targetArgs.name = selector.name;
+                var item = resolveDrawing(targetArgs);
+                if (resolved.some(function (existing) { return existing.drawing === item.drawing; })) {
+                  throw new Error("targets 包含重复对象");
+                }
+                resolved.push(item);
+              }
+              return resolved;
             }
 
             function applyChartAxis(chart, axis, horizontal) {
@@ -692,12 +1194,17 @@
                     }
                     var text = pieces.join("\n");
                     var remaining = Math.max(0, maxChars - totalChars);
+                    var inspectedNotesPage = safeCall(inspectedSlide, "GetNotesPage");
                     slides.push({
                       slide: slideIndex + 1,
                       text: text.slice(0, remaining),
                       shapes: shapes.length,
                       charts: slideCharts(inspectedSlide).length,
                       objects: slideDrawings(inspectedSlide).length,
+                      visible: safeCall(inspectedSlide, "GetVisible"),
+                      layout: locateLayout(safeCall(inspectedSlide, "GetLayout"), false),
+                      notes: inspectedNotesPage ? safeCall(inspectedNotesPage, "GetBodyShapeText") : null,
+                      transition: describeTransition(safeCall(inspectedSlide, "GetSlideShowTransition")),
                     });
                     totalChars += Math.min(text.length, remaining);
                     if (totalChars >= maxChars) break;
@@ -706,8 +1213,81 @@
                     name: call.name,
                     slideCount: slideCount(),
                     currentSlide: presentation.GetCurSlideIndex() + 1,
+                    widthMm: emuToMm(safeCall(presentation, "GetWidth")),
+                    heightMm: emuToMm(safeCall(presentation, "GetHeight")),
+                    masterCount: masterCount(),
+                    loopUntilStopped: safeCall(presentation, "GetLoopUntilStopped"),
+                    commentCount: (safeCall(presentation, "GetAllComments") || []).length,
                     slides: slides,
                     truncated: totalChars >= maxChars,
+                  });
+                  break;
+                }
+
+                case "slides_inspect_layouts": {
+                  var inspectMasterStart = args.masterIndex ? Number(args.masterIndex) - 1 : 0;
+                  var inspectMasterEnd = args.masterIndex ? inspectMasterStart + 1 : masterCount();
+                  if (inspectMasterStart < 0 || inspectMasterEnd > masterCount()) {
+                    throw new Error("幻灯片母版序号超出范围");
+                  }
+                  var inspectedMasters = [];
+                  for (var inspectedMasterIndex = inspectMasterStart; inspectedMasterIndex < inspectMasterEnd; inspectedMasterIndex += 1) {
+                    var inspectedMaster = presentation.GetMaster(inspectedMasterIndex);
+                    var inspectedLayouts = [];
+                    for (var inspectedLayoutIndex = 0; inspectedLayoutIndex < layoutCount(inspectedMaster); inspectedLayoutIndex += 1) {
+                      inspectedLayouts.push(describeLayout(
+                        inspectedMaster.GetLayout(inspectedLayoutIndex),
+                        inspectedMasterIndex + 1,
+                        inspectedLayoutIndex + 1,
+                        Boolean(args.includeRaw),
+                        Boolean(args.includeObjects)
+                      ));
+                    }
+                    var inspectedMasterDrawings = safeCall(inspectedMaster, "GetAllDrawings") || [];
+                    inspectedMasters.push({
+                      masterIndex: inspectedMasterIndex + 1,
+                      objectCount: inspectedMasterDrawings.length,
+                      drawings: args.includeObjects ? inspectedMasterDrawings.map(function (drawing, index) {
+                        return describeDrawing(drawing, index, Boolean(args.includeRaw));
+                      }) : undefined,
+                      layouts: inspectedLayouts,
+                      raw: args.includeRaw ? serialized(inspectedMaster) : undefined,
+                    });
+                  }
+                  results.push({
+                    name: call.name,
+                    masterCount: masterCount(),
+                    masters: inspectedMasters,
+                  });
+                  break;
+                }
+
+                case "slides_inspect_themes": {
+                  var themeMasters = [];
+                  var firstThemeMaster = hasOwn(args, "masterIndex") ? Number(args.masterIndex) - 1 : 0;
+                  var lastThemeMaster = hasOwn(args, "masterIndex") ? firstThemeMaster + 1 : masterCount();
+                  if (firstThemeMaster < 0 || lastThemeMaster > masterCount()) {
+                    throw new Error("幻灯片母版序号超出范围，当前共 " + masterCount() + " 个母版");
+                  }
+                  for (var themeMasterIndex = firstThemeMaster; themeMasterIndex < lastThemeMaster; themeMasterIndex += 1) {
+                    var themeMaster = presentation.GetMaster(themeMasterIndex);
+                    themeMasters.push({
+                      masterIndex: themeMasterIndex + 1,
+                      theme: describeTheme(safeCall(themeMaster, "GetTheme"), Boolean(args.includeRaw)),
+                    });
+                  }
+                  results.push({
+                    name: call.name,
+                    masters: themeMasters,
+                    currentSlideTheme: describeTheme(
+                      safeCall(
+                        hasOwn(args, "slide")
+                          ? getSlide(args.slide)
+                          : presentation.GetSlideByIndex(presentation.GetCurSlideIndex()),
+                        "GetTheme"
+                      ),
+                      Boolean(args.includeRaw)
+                    ),
                   });
                   break;
                 }
@@ -743,6 +1323,43 @@
                     slides: objectSlides,
                     objectCount: objectTotal,
                     truncated: objectTotal >= maxObjects,
+                  });
+                  break;
+                }
+
+                case "slides_inspect_animations": {
+                  var firstAnimationSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
+                  var lastAnimationSlide = hasOwn(args, "slide") ? firstAnimationSlide + 1 : slideCount();
+                  if (firstAnimationSlide < 0 || lastAnimationSlide > slideCount()) throw new Error("幻灯片页码超出范围");
+                  var animationSlides = [];
+                  for (var animationSlideIndex = firstAnimationSlide; animationSlideIndex < lastAnimationSlide; animationSlideIndex += 1) {
+                    var animationSlide = presentation.GetSlideByIndex(animationSlideIndex);
+                    var timeline = safeCall(animationSlide, "GetTimeLine");
+                    var effects = timeline ? (safeCall(timeline, "GetAllEffects") || []) : [];
+                    var mainSequence = timeline ? safeCall(timeline, "GetMainSequence") : null;
+                    var interactiveSequences = timeline ? (safeCall(timeline, "GetInteractiveSequences") || []) : [];
+                    animationSlides.push({
+                      slide: animationSlideIndex + 1,
+                      mainSequenceCount: mainSequence ? safeCall(mainSequence, "GetCount") : 0,
+                      interactiveSequenceCounts: interactiveSequences.map(function (sequence) {
+                        return safeCall(sequence, "GetCount") || 0;
+                      }),
+                      effects: effects.map(function (effect, index) {
+                        return describeAnimationEffect(effect, index);
+                      }),
+                    });
+                  }
+                  results.push({ name: call.name, slides: animationSlides });
+                  break;
+                }
+
+                case "slides_inspect_comments": {
+                  var inspectedComments = safeCall(presentation, "GetAllComments") || [];
+                  results.push({
+                    name: call.name,
+                    comments: inspectedComments.map(function (comment, index) {
+                      return describeComment(comment, index);
+                    }),
                   });
                   break;
                 }
@@ -859,6 +1476,1146 @@
                   break;
                 }
 
+                case "slides_move_slide": {
+                  var movedSlide = getSlide(args.slide);
+                  var moveDestination = Number(args.toIndex);
+                  if (!Number.isInteger(moveDestination) || moveDestination < 1 || moveDestination > slideCount()) {
+                    throw new Error("目标页码超出范围，当前共 " + slideCount() + " 页");
+                  }
+                  if (typeof movedSlide.MoveTo !== "function") throw new Error("当前 ONLYOFFICE 版本不支持移动幻灯片");
+                  if (movedSlide.MoveTo(moveDestination - 1) === false) throw new Error("移动幻灯片失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    fromSlide: Number(args.slide),
+                    toIndex: moveDestination,
+                    slideCount: slideCount(),
+                  });
+                  break;
+                }
+
+                case "slides_set_visibility": {
+                  var visibilitySlide = getSlide(args.slide);
+                  if (typeof visibilitySlide.SetVisible !== "function") throw new Error("当前 ONLYOFFICE 版本不支持隐藏幻灯片");
+                  if (visibilitySlide.SetVisible(Boolean(args.visible)) === false) throw new Error("设置幻灯片可见性失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    visible: safeCall(visibilitySlide, "GetVisible"),
+                  });
+                  break;
+                }
+
+                case "slides_set_size": {
+                  if (typeof presentation.SetSizes !== "function") throw new Error("当前 ONLYOFFICE 版本不支持修改幻灯片尺寸");
+                  var sizePreset = String(args.preset || "custom");
+                  var sizeWidthMm = Number(args.widthMm);
+                  var sizeHeightMm = Number(args.heightMm);
+                  if (sizePreset === "wide") {
+                    sizeWidthMm = 338.667;
+                    sizeHeightMm = 190.5;
+                  } else if (sizePreset === "standard") {
+                    sizeWidthMm = 254;
+                    sizeHeightMm = 190.5;
+                  } else if (sizePreset !== "custom") {
+                    throw new Error("不支持的幻灯片尺寸预设：" + sizePreset);
+                  }
+                  if (!isFinite(sizeWidthMm) || sizeWidthMm <= 0 || !isFinite(sizeHeightMm) || sizeHeightMm <= 0) {
+                    throw new Error("自定义幻灯片尺寸需要有效的 widthMm 和 heightMm");
+                  }
+                  if (String(args.orientation || "landscape") === "portrait" && sizeWidthMm > sizeHeightMm) {
+                    var portraitSwap = sizeWidthMm;
+                    sizeWidthMm = sizeHeightMm;
+                    sizeHeightMm = portraitSwap;
+                  } else if (String(args.orientation || "landscape") === "landscape" && sizeHeightMm > sizeWidthMm) {
+                    var landscapeSwap = sizeWidthMm;
+                    sizeWidthMm = sizeHeightMm;
+                    sizeHeightMm = landscapeSwap;
+                  }
+                  if (presentation.SetSizes(mmToEmu(sizeWidthMm), mmToEmu(sizeHeightMm)) === false) {
+                    throw new Error("修改幻灯片尺寸失败");
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    widthMm: emuToMm(safeCall(presentation, "GetWidth")),
+                    heightMm: emuToMm(safeCall(presentation, "GetHeight")),
+                  });
+                  break;
+                }
+
+                case "slides_apply_layout": {
+                  var layoutSlide = getSlide(args.slide);
+                  var selectedMaster = getMaster(args.masterIndex || 1);
+                  var selectedLayout = getLayout(selectedMaster, args.layoutIndex);
+                  if (typeof layoutSlide.ApplyLayout !== "function") throw new Error("当前 ONLYOFFICE 版本不支持应用幻灯片版式");
+                  if (layoutSlide.ApplyLayout(selectedLayout) === false) throw new Error("应用幻灯片版式失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    layout: locateLayout(selectedLayout, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_set_show_settings": {
+                  if (!hasOwn(args, "loop")) throw new Error("slides_set_show_settings 至少需要 loop");
+                  if (typeof presentation.SetLoopUntilStopped !== "function") {
+                    throw new Error("当前 ONLYOFFICE 版本不支持设置循环放映");
+                  }
+                  if (presentation.SetLoopUntilStopped(Boolean(args.loop)) === false) throw new Error("设置循环放映失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    loop: safeCall(presentation, "GetLoopUntilStopped"),
+                  });
+                  break;
+                }
+
+                case "slides_apply_theme": {
+                  var themeSource;
+                  if (hasOwn(args, "sourceSlide")) themeSource = safeCall(getSlide(args.sourceSlide), "GetTheme");
+                  else themeSource = safeCall(getMaster(args.sourceMasterIndex || 1), "GetTheme");
+                  if (!themeSource) throw new Error("找不到可应用的主题");
+                  if (hasOwn(args, "targetSlide")) {
+                    var themeTargetSlide = getSlide(args.targetSlide);
+                    if (typeof themeTargetSlide.ApplyTheme !== "function") throw new Error("当前 ONLYOFFICE 版本不支持向单页应用主题");
+                    if (themeTargetSlide.ApplyTheme(themeSource) === false) throw new Error("应用幻灯片主题失败");
+                  } else {
+                    if (typeof presentation.ApplyTheme !== "function") throw new Error("当前 ONLYOFFICE 版本不支持应用演示文稿主题");
+                    if (presentation.ApplyTheme(themeSource) === false) throw new Error("应用演示文稿主题失败");
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    targetSlide: hasOwn(args, "targetSlide") ? Number(args.targetSlide) : "all",
+                    theme: describeTheme(themeSource, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_set_theme": {
+                  var editableTheme;
+                  if (hasOwn(args, "slide")) editableTheme = safeCall(getSlide(args.slide), "GetTheme");
+                  else editableTheme = safeCall(getMaster(args.masterIndex || 1), "GetTheme");
+                  if (!editableTheme) throw new Error("找不到需要修改的主题");
+                  if (Array.isArray(args.colors)) {
+                    if (args.colors.length !== 12) throw new Error("主题颜色必须按 2 深色、2 浅色、6 强调色、超链接和已访问超链接提供 12 个颜色");
+                    if (typeof Api.CreateThemeColorScheme !== "function") throw new Error("当前 ONLYOFFICE 版本不支持自定义主题颜色");
+                    var customColorScheme = Api.CreateThemeColorScheme(
+                      args.colors.map(apiColor),
+                      String(args.colorSchemeName || "AI Bridge colors")
+                    );
+                    if (editableTheme.SetColorScheme(customColorScheme) === false) throw new Error("设置主题颜色失败");
+                  }
+                  if (isObject(args.fonts)) {
+                    if (typeof Api.CreateThemeFontScheme !== "function") throw new Error("当前 ONLYOFFICE 版本不支持自定义主题字体");
+                    var majorLatin = String(args.fonts.majorLatin || "");
+                    var minorLatin = String(args.fonts.minorLatin || "");
+                    if (!majorLatin || !minorLatin) throw new Error("自定义主题字体需要 majorLatin 和 minorLatin");
+                    var customFontScheme = Api.CreateThemeFontScheme(
+                      majorLatin,
+                      String(args.fonts.majorEastAsian || majorLatin),
+                      String(args.fonts.majorComplex || majorLatin),
+                      minorLatin,
+                      String(args.fonts.minorEastAsian || minorLatin),
+                      String(args.fonts.minorComplex || minorLatin),
+                      String(args.fonts.name || "AI Bridge fonts")
+                    );
+                    if (editableTheme.SetFontScheme(customFontScheme) === false) throw new Error("设置主题字体失败");
+                  }
+                  if (!Array.isArray(args.colors) && !isObject(args.fonts)) {
+                    throw new Error("slides_set_theme 需要 colors 或 fonts");
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    theme: describeTheme(editableTheme, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_create_layout": {
+                  if (typeof Api.CreateLayout !== "function") throw new Error("当前 ONLYOFFICE 版本不支持创建自定义版式");
+                  var layoutMasterIndex = Number(args.masterIndex || 1);
+                  var layoutMaster = getMaster(layoutMasterIndex);
+                  var createdLayout = Api.CreateLayout(layoutMaster);
+                  if (!createdLayout) throw new Error("创建自定义版式失败");
+                  if (hasOwn(args, "name") && typeof createdLayout.SetName === "function") createdLayout.SetName(String(args.name));
+                  if (hasOwn(args, "fill")) createdLayout.SetBackground(createFill(args.fill));
+                  else if (args.followMasterBackground && typeof createdLayout.FollowMasterBackground === "function") {
+                    createdLayout.FollowMasterBackground();
+                  }
+                  var placeholderSpecs = Array.isArray(args.placeholders) ? args.placeholders : [];
+                  for (var placeholderIndex = 0; placeholderIndex < placeholderSpecs.length; placeholderIndex += 1) {
+                    var placeholderSpec = placeholderSpecs[placeholderIndex] || {};
+                    var placeholderShape = Api.CreateShape(
+                      String(placeholderSpec.shapeType || "rect"),
+                      mmToEmu(asFinite(placeholderSpec.widthMm, 100)),
+                      mmToEmu(asFinite(placeholderSpec.heightMm, 30)),
+                      createFill(placeholderSpec.fill),
+                      createStroke(placeholderSpec.line)
+                    );
+                    applyDrawingFrame(placeholderShape, {
+                      xMm: asFinite(placeholderSpec.xMm, 15),
+                      yMm: asFinite(placeholderSpec.yMm, 15),
+                    });
+                    if (hasOwn(placeholderSpec, "text")) replaceShapeText(placeholderShape, placeholderSpec);
+                    if (typeof Api.CreatePlaceholder !== "function" || typeof placeholderShape.SetPlaceholder !== "function") {
+                      throw new Error("当前 ONLYOFFICE 版本不支持版式占位符");
+                    }
+                    placeholderShape.SetPlaceholder(Api.CreatePlaceholder(String(placeholderSpec.type || "body")));
+                    createdLayout.AddObject(placeholderShape);
+                  }
+                  if (Array.isArray(args.applyToSlides)) {
+                    for (var applyLayoutIndex = 0; applyLayoutIndex < args.applyToSlides.length; applyLayoutIndex += 1) {
+                      getSlide(args.applyToSlides[applyLayoutIndex]).ApplyLayout(createdLayout);
+                    }
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    layout: locateLayout(createdLayout, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_add_template_shape": {
+                  var templateTarget = getTemplateContainer(args);
+                  var templateShape = Api.CreateShape(
+                    String(args.shapeType || "rect"),
+                    mmToEmu(asFinite(args.widthMm, 100)),
+                    mmToEmu(asFinite(args.heightMm, 50)),
+                    createFill(args.fill, args.fillColor),
+                    createStroke(args.line, args.lineColor, args.lineWidthPt)
+                  );
+                  applyShapeOptions(templateShape, args);
+                  applyDrawingFrame(templateShape, {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 15,
+                  });
+                  if (hasOwn(args, "placeholderType")) {
+                    if (typeof Api.CreatePlaceholder !== "function" || typeof templateShape.SetPlaceholder !== "function") {
+                      throw new Error("当前 ONLYOFFICE 版本不支持占位符");
+                    }
+                    templateShape.SetPlaceholder(Api.CreatePlaceholder(String(args.placeholderType)));
+                  }
+                  if (templateTarget.container.AddObject(templateShape) === false) throw new Error("向母版或版式添加对象失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    scope: templateTarget.scope,
+                    masterIndex: templateTarget.masterIndex,
+                    layoutIndex: templateTarget.layoutIndex,
+                    object: describeDrawing(
+                      templateShape,
+                      (safeCall(templateTarget.container, "GetAllDrawings") || []).indexOf(templateShape),
+                      Boolean(args.includeRaw)
+                    ),
+                  });
+                  break;
+                }
+
+                case "slides_manage_template_object": {
+                  var managedTemplateObject = resolveTemplateDrawing(args);
+                  var templateObjectAction = String(args.action || "update");
+                  if (templateObjectAction === "delete") {
+                    var removedTemplateObject = false;
+                    if (typeof managedTemplateObject.container.RemoveObject === "function") {
+                      removedTemplateObject = managedTemplateObject.container.RemoveObject(managedTemplateObject.drawing);
+                    } else if (typeof managedTemplateObject.drawing.Delete === "function") {
+                      removedTemplateObject = managedTemplateObject.drawing.Delete();
+                    }
+                    if (removedTemplateObject === false) throw new Error("删除母版或版式对象失败");
+                  } else if (templateObjectAction === "update") {
+                    if (drawingKind(managedTemplateObject.drawing) === "shape") {
+                      applyShapeOptions(managedTemplateObject.drawing, args);
+                    } else {
+                      applyDrawingFrame(managedTemplateObject.drawing, args);
+                      if (hasOwn(args, "line") || hasOwn(args, "lineColor") || hasOwn(args, "lineWidthPt")) {
+                        if (typeof managedTemplateObject.drawing.SetOutLine !== "function") {
+                          throw new Error("目标模板对象不支持边框");
+                        }
+                        managedTemplateObject.drawing.SetOutLine(createStroke(args.line, args.lineColor, args.lineWidthPt));
+                      }
+                    }
+                    if (hasOwn(args, "newName") && typeof managedTemplateObject.drawing.SetName === "function") {
+                      managedTemplateObject.drawing.SetName(String(args.newName));
+                    }
+                  } else {
+                    throw new Error("不支持的模板对象动作：" + templateObjectAction);
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    action: templateObjectAction,
+                    scope: managedTemplateObject.scope,
+                    masterIndex: managedTemplateObject.masterIndex,
+                    layoutIndex: managedTemplateObject.layoutIndex,
+                    object: templateObjectAction === "delete"
+                      ? null
+                      : describeDrawing(
+                        managedTemplateObject.drawing,
+                        managedTemplateObject.index,
+                        Boolean(args.includeRaw)
+                      ),
+                  });
+                  break;
+                }
+
+                case "slides_set_template_background": {
+                  var backgroundTarget = getTemplateContainer(args);
+                  var templateBackgroundMode = String(args.mode || "custom");
+                  if (templateBackgroundMode === "clear") {
+                    if (typeof backgroundTarget.container.ClearBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持清除模板背景");
+                    backgroundTarget.container.ClearBackground();
+                  } else if (templateBackgroundMode === "master" && backgroundTarget.scope === "layout") {
+                    if (typeof backgroundTarget.container.FollowMasterBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持跟随母版背景");
+                    backgroundTarget.container.FollowMasterBackground();
+                  } else if (templateBackgroundMode === "custom") {
+                    if (!hasOwn(args, "fill")) throw new Error("自定义模板背景需要 fill");
+                    backgroundTarget.container.SetBackground(createFill(args.fill));
+                  } else {
+                    throw new Error("不支持的模板背景模式：" + templateBackgroundMode);
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    scope: backgroundTarget.scope,
+                    masterIndex: backgroundTarget.masterIndex,
+                    layoutIndex: backgroundTarget.layoutIndex,
+                    mode: templateBackgroundMode,
+                  });
+                  break;
+                }
+
+                case "slides_set_text_content": {
+                  var textContentShape = resolveDrawing(args, "shape");
+                  replaceShapeParagraphs(textContentShape.drawing, args.paragraphs);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    paragraphs: getParagraphsFromShape(textContentShape.drawing).length,
+                    object: describeDrawing(textContentShape.drawing, textContentShape.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_format_paragraphs": {
+                  var paragraphShape = resolveDrawing(args, "shape");
+                  var targetParagraphs = getParagraphsFromShape(paragraphShape.drawing);
+                  var requestedParagraphs = Array.isArray(args.paragraphIndexes)
+                    ? args.paragraphIndexes.map(Number)
+                    : null;
+                  var formattedParagraphs = 0;
+                  for (var targetParagraphIndex = 0; targetParagraphIndex < targetParagraphs.length; targetParagraphIndex += 1) {
+                    if (requestedParagraphs && requestedParagraphs.indexOf(targetParagraphIndex + 1) === -1) continue;
+                    applyParagraphFormat(targetParagraphs[targetParagraphIndex], args);
+                    formattedParagraphs += 1;
+                  }
+                  if (!formattedParagraphs) throw new Error("找不到需要格式化的段落");
+                  changed += formattedParagraphs;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    formattedParagraphs: formattedParagraphs,
+                    object: describeDrawing(paragraphShape.drawing, paragraphShape.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_update_object": {
+                  var updatedObject = resolveDrawing(args);
+                  applyDrawingFrame(updatedObject.drawing, args);
+                  if (hasOwn(args, "line") || hasOwn(args, "lineColor") || hasOwn(args, "lineWidthPt")) {
+                    if (typeof updatedObject.drawing.SetOutLine !== "function") {
+                      throw new Error("目标对象不支持边框");
+                    }
+                    updatedObject.drawing.SetOutLine(createStroke(args.line, args.lineColor, args.lineWidthPt));
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    object: describeDrawing(updatedObject.drawing, updatedObject.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_set_hyperlink": {
+                  var hyperlinkObject = resolveDrawing(args);
+                  if (typeof hyperlinkObject.drawing.SetHyperlink !== "function") {
+                    throw new Error("目标对象不支持超链接");
+                  }
+                  var hyperlinkAction = String(args.action || "external");
+                  var hyperlink = null;
+                  var hyperlinkAddress = null;
+                  if (hyperlinkAction !== "remove") {
+                    if (typeof Api.CreateHyperlink !== "function") throw new Error("当前 ONLYOFFICE 版本不支持创建超链接");
+                    if (hyperlinkAction === "external") {
+                      hyperlinkAddress = String(args.url || "");
+                      if (!/^(?:https?|mailto|ftp):/i.test(hyperlinkAddress)) {
+                        throw new Error("外部超链接只允许 http、https、mailto 或 ftp 协议");
+                      }
+                    } else if (hyperlinkAction === "firstSlide") {
+                      hyperlinkAddress = "ppaction://hlinkshowjump?jump=firstslide";
+                    } else if (hyperlinkAction === "lastSlide") {
+                      hyperlinkAddress = "ppaction://hlinkshowjump?jump=lastslide";
+                    } else if (hyperlinkAction === "nextSlide") {
+                      hyperlinkAddress = "ppaction://hlinkshowjump?jump=nextslide";
+                    } else if (hyperlinkAction === "previousSlide") {
+                      hyperlinkAddress = "ppaction://hlinkshowjump?jump=previousslide";
+                    } else if (hyperlinkAction === "slide") {
+                      var hyperlinkSlide = Number(args.targetSlide);
+                      if (!Number.isInteger(hyperlinkSlide) || hyperlinkSlide < 1 || hyperlinkSlide > slideCount()) {
+                        throw new Error("超链接目标幻灯片页码超出范围");
+                      }
+                      hyperlinkAddress = "ppaction://hlinksldjumpslide" + (hyperlinkSlide - 1);
+                    } else {
+                      throw new Error("不支持的超链接动作：" + hyperlinkAction);
+                    }
+                    hyperlink = Api.CreateHyperlink(hyperlinkAddress, String(args.tooltip || ""));
+                  }
+                  if (hyperlinkObject.drawing.SetHyperlink(hyperlink) === false) throw new Error("设置对象超链接失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    action: hyperlinkAction,
+                    link: hyperlinkAddress,
+                    object: describeDrawing(hyperlinkObject.drawing, hyperlinkObject.index, false),
+                  });
+                  break;
+                }
+
+                case "slides_set_notes": {
+                  var notesSlide = getSlide(args.slide);
+                  var notesText = String(args.text || "");
+                  var notesSucceeded = false;
+                  if (args.append) {
+                    if (typeof notesSlide.AddNotesText !== "function") throw new Error("当前 ONLYOFFICE 版本不支持演讲者备注");
+                    notesSucceeded = notesSlide.AddNotesText(notesText);
+                  } else {
+                    var notesPage = safeCall(notesSlide, "GetNotesPage");
+                    var notesBody = notesPage ? safeCall(notesPage, "GetBodyShape") : null;
+                    var notesContent = notesBody && (safeCall(notesBody, "GetContent") || safeCall(notesBody, "GetDocContent"));
+                    if (notesContent && typeof notesContent.Push === "function") {
+                      if (typeof notesContent.RemoveAllElements === "function") notesContent.RemoveAllElements();
+                      var notesParagraph = Api.CreateParagraph();
+                      notesParagraph.AddText(notesText);
+                      notesContent.Push(notesParagraph);
+                      notesSucceeded = true;
+                    } else if (typeof notesSlide.AddNotesText === "function") {
+                      notesSucceeded = notesSlide.AddNotesText(notesText);
+                    }
+                  }
+                  if (notesSucceeded === false) throw new Error("设置演讲者备注失败");
+                  changed += 1;
+                  var updatedNotesPage = safeCall(notesSlide, "GetNotesPage");
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    notes: updatedNotesPage ? safeCall(updatedNotesPage, "GetBodyShapeText") : notesText,
+                  });
+                  break;
+                }
+
+                case "slides_add_comment": {
+                  var commentSlide = getSlide(args.slide);
+                  if (!args.text) throw new Error("批注内容不能为空");
+                  if (typeof commentSlide.AddComment !== "function") throw new Error("当前 ONLYOFFICE 版本不支持幻灯片批注");
+                  var commentAdded = commentSlide.AddComment(
+                    mmToEmu(hasOwn(args, "xMm") ? args.xMm : 0),
+                    mmToEmu(hasOwn(args, "yMm") ? args.yMm : 0),
+                    String(args.text),
+                    hasOwn(args, "author") ? String(args.author) : undefined,
+                    hasOwn(args, "userId") ? String(args.userId) : undefined
+                  );
+                  if (commentAdded === false) throw new Error("添加幻灯片批注失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    commentCount: (safeCall(presentation, "GetAllComments") || []).length,
+                  });
+                  break;
+                }
+
+                case "slides_set_transition": {
+                  var transitionSlide = getSlide(args.slide);
+                  if (typeof transitionSlide.SetSlideShowTransition !== "function") {
+                    throw new Error("当前 ONLYOFFICE 版本不支持幻灯片切换");
+                  }
+                  var configuredTransition = null;
+                  if (!args.clear) {
+                    if (typeof Api.CreateSlideShowTransition !== "function") {
+                      throw new Error("当前 ONLYOFFICE 版本不支持创建幻灯片切换");
+                    }
+                    configuredTransition = Api.CreateSlideShowTransition();
+                    if (hasOwn(args, "effect")) configuredTransition.SetEntryEffect(String(args.effect));
+                    if (hasOwn(args, "speed")) configuredTransition.SetSpeed(String(args.speed));
+                    if (hasOwn(args, "durationMs") && typeof configuredTransition.SetDuration === "function") {
+                      configuredTransition.SetDuration(Math.max(0, Math.round(asFinite(args.durationMs, 0))));
+                    }
+                    if (hasOwn(args, "advanceOnClick")) configuredTransition.SetAdvanceOnClick(Boolean(args.advanceOnClick));
+                    if (hasOwn(args, "advanceOnTime")) configuredTransition.SetAdvanceOnTime(Boolean(args.advanceOnTime));
+                    if (hasOwn(args, "advanceTimeMs")) {
+                      configuredTransition.SetAdvanceTime(Math.max(0, Math.round(asFinite(args.advanceTimeMs, 0))));
+                    }
+                  }
+                  if (transitionSlide.SetSlideShowTransition(configuredTransition) === false) {
+                    throw new Error("设置幻灯片切换失败");
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    transition: describeTransition(safeCall(transitionSlide, "GetSlideShowTransition")),
+                  });
+                  break;
+                }
+
+                case "slides_manage_animation": {
+                  var managedAnimationSlide = getSlide(args.slide);
+                  var managedTimeline = safeCall(managedAnimationSlide, "GetTimeLine");
+                  if (!managedTimeline) throw new Error("当前 ONLYOFFICE 版本不支持对象动画");
+                  var animationAction = String(args.action || "add");
+                  var managedEffect = null;
+                  if (animationAction === "add") {
+                    var animationTarget = resolveDrawing(args, null).drawing;
+                    var sequenceKind = String(args.sequence || "main");
+                    var targetSequence;
+                    if (sequenceKind === "interactive") {
+                      if (!isObject(args.triggerObject)) throw new Error("交互动画需要 triggerObject");
+                      var triggerSelector = { slide: args.slide };
+                      if (hasOwn(args.triggerObject, "objectId")) triggerSelector.objectId = args.triggerObject.objectId;
+                      if (hasOwn(args.triggerObject, "objectIndex")) triggerSelector.objectIndex = args.triggerObject.objectIndex;
+                      if (hasOwn(args.triggerObject, "name")) triggerSelector.name = args.triggerObject.name;
+                      var triggerDrawing = resolveDrawing(triggerSelector).drawing;
+                      targetSequence = safeCall(managedTimeline, "AddInteractiveSequence", triggerDrawing);
+                    } else if (sequenceKind === "main") {
+                      targetSequence = safeCall(managedTimeline, "GetMainSequence");
+                    } else {
+                      throw new Error("animation.sequence 必须是 main 或 interactive");
+                    }
+                    if (!targetSequence || typeof targetSequence.AddEffect !== "function") {
+                      throw new Error("无法创建动画序列");
+                    }
+                    managedEffect = targetSequence.AddEffect(
+                      animationTarget,
+                      String(args.effectType || "entranceFade"),
+                      String(args.trigger || "onclick")
+                    );
+                    if (!managedEffect) throw new Error("添加动画失败：请检查 effectType");
+                  } else if (animationAction === "clear") {
+                    var clearSequenceKind = String(args.sequence || "main");
+                    var clearSequence;
+                    if (clearSequenceKind === "interactive") {
+                      if (!isObject(args.triggerObject)) throw new Error("清除交互动画需要 triggerObject");
+                      var clearTriggerSelector = { slide: args.slide };
+                      if (hasOwn(args.triggerObject, "objectId")) clearTriggerSelector.objectId = args.triggerObject.objectId;
+                      if (hasOwn(args.triggerObject, "objectIndex")) clearTriggerSelector.objectIndex = args.triggerObject.objectIndex;
+                      if (hasOwn(args.triggerObject, "name")) clearTriggerSelector.name = args.triggerObject.name;
+                      clearSequence = safeCall(
+                        managedTimeline,
+                        "AddInteractiveSequence",
+                        resolveDrawing(clearTriggerSelector).drawing
+                      );
+                    } else {
+                      clearSequence = safeCall(managedTimeline, "GetMainSequence");
+                    }
+                    if (!clearSequence || safeCall(clearSequence, "RemoveAllEffects") === false) throw new Error("清除动画序列失败");
+                  } else {
+                    var allManagedEffects = safeCall(managedTimeline, "GetAllEffects") || [];
+                    var managedEffectIndex = Number(args.effectIndex);
+                    if (!Number.isInteger(managedEffectIndex) || managedEffectIndex < 0 || managedEffectIndex >= allManagedEffects.length) {
+                      throw new Error("effectIndex 超出范围");
+                    }
+                    managedEffect = allManagedEffects[managedEffectIndex];
+                    if (animationAction === "delete") {
+                      if (safeCall(managedEffect, "Delete") === false) throw new Error("删除动画失败");
+                      managedEffect = null;
+                    } else if (animationAction !== "update") {
+                      throw new Error("不支持的动画动作：" + animationAction);
+                    }
+                  }
+                  if (managedEffect) {
+                    if (hasOwn(args, "trigger") && typeof managedEffect.SetTriggerType === "function") {
+                      if (managedEffect.SetTriggerType(String(args.trigger)) === false) throw new Error("设置动画触发方式失败");
+                    }
+                    if (hasOwn(args, "durationMs") && typeof managedEffect.SetDuration === "function") {
+                      if (managedEffect.SetDuration(Math.max(0, Math.round(asFinite(args.durationMs, 0)))) === false) {
+                        throw new Error("设置动画时长失败");
+                      }
+                    }
+                    if (hasOwn(args, "delayMs") && typeof managedEffect.SetDelay === "function") {
+                      if (managedEffect.SetDelay(Math.max(0, Math.round(asFinite(args.delayMs, 0)))) === false) {
+                        throw new Error("设置动画延迟失败");
+                      }
+                    }
+                    if (hasOwn(args, "repeatCount") && typeof managedEffect.SetRepeatCount === "function") {
+                      if (managedEffect.SetRepeatCount(Math.max(0, asFinite(args.repeatCount, 1))) === false) {
+                        throw new Error("设置动画重复次数失败");
+                      }
+                    }
+                    if (hasOwn(args, "toIndex") && typeof managedEffect.MoveTo === "function") {
+                      var animationDestination = Number(args.toIndex);
+                      if (!Number.isInteger(animationDestination) || animationDestination < 0) throw new Error("toIndex 必须是从 0 开始的整数");
+                      if (managedEffect.MoveTo(animationDestination) === false) throw new Error("移动动画顺序失败");
+                    }
+                  }
+                  changed += 1;
+                  var finalEffects = safeCall(managedTimeline, "GetAllEffects") || [];
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    action: animationAction,
+                    effects: finalEffects.map(function (effect, index) {
+                      return describeAnimationEffect(effect, index);
+                    }),
+                  });
+                  break;
+                }
+
+                case "slides_manage_comment": {
+                  var commentAction = String(args.action || "update");
+                  var resolvedComment = resolveComment(args);
+                  var targetComment = resolvedComment.comment;
+                  if (commentAction === "update") {
+                    if (hasOwn(args, "text")) safeCall(targetComment, "SetText", String(args.text));
+                    if (hasOwn(args, "author")) {
+                      if (typeof targetComment.SetAuthorName === "function") targetComment.SetAuthorName(String(args.author));
+                      else safeCall(targetComment, "SetAutorName", String(args.author));
+                    }
+                    if (hasOwn(args, "userId")) safeCall(targetComment, "SetUserId", String(args.userId));
+                    if (hasOwn(args, "solved")) safeCall(targetComment, "SetSolved", Boolean(args.solved));
+                    if (hasOwn(args, "xMm") || hasOwn(args, "yMm")) {
+                      safeCall(targetComment, "SetPosition", mmToEmu(asFinite(args.xMm, 0)), mmToEmu(asFinite(args.yMm, 0)));
+                    }
+                  } else if (commentAction === "addReply") {
+                    if (!hasOwn(args, "text")) throw new Error("添加批注回复需要 text");
+                    var reply = safeCall(targetComment, "AddReply", String(args.text), String(args.author || ""), String(args.userId || ""));
+                    if (reply === false || reply === null) throw new Error("添加批注回复失败");
+                  } else if (commentAction === "removeReplies") {
+                    if (safeCall(targetComment, "RemoveReplies", Math.max(0, Math.round(asFinite(args.start, 0))), Math.max(1, Math.round(asFinite(args.count, 1)))) === false) {
+                      throw new Error("删除批注回复失败");
+                    }
+                  } else if (commentAction === "delete") {
+                    if (safeCall(targetComment, "Delete") === false) throw new Error("删除批注失败");
+                  } else {
+                    throw new Error("不支持的批注动作：" + commentAction);
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    action: commentAction,
+                    comment: commentAction === "delete" ? null : describeComment(targetComment, resolvedComment.index),
+                  });
+                  break;
+                }
+
+                case "slides_add_table": {
+                  if (typeof Api.CreateTable !== "function") throw new Error("当前 ONLYOFFICE 版本不支持创建表格");
+                  var tableRows = Math.round(asFinite(args.rows, 0));
+                  var tableColumns = Math.round(asFinite(args.columns, 0));
+                  if (tableRows < 1 || tableRows > 200 || tableColumns < 1 || tableColumns > 50) {
+                    throw new Error("表格需要 1-200 行、1-50 列");
+                  }
+                  var tableSlide = getSlide(args.slide);
+                  var addedTable = Api.CreateTable(tableRows, tableColumns);
+                  if (!addedTable) throw new Error("创建 PPT 表格失败");
+                  var addedTableFrame = {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 35,
+                    widthMm: hasOwn(args, "widthMm") ? args.widthMm : 220,
+                    heightMm: hasOwn(args, "heightMm") ? args.heightMm : Math.max(20, tableRows * 12),
+                  };
+                  if (hasOwn(args, "name")) addedTableFrame.name = args.name;
+                  applyDrawingFrame(addedTable, addedTableFrame);
+                  if (Array.isArray(args.data)) {
+                    for (var addTableRow = 0; addTableRow < Math.min(tableRows, args.data.length); addTableRow += 1) {
+                      var addTableValues = Array.isArray(args.data[addTableRow]) ? args.data[addTableRow] : [args.data[addTableRow]];
+                      for (var addTableColumn = 0; addTableColumn < Math.min(tableColumns, addTableValues.length); addTableColumn += 1) {
+                        applyTableCellFormat(getTableCell(addedTable, addTableRow + 1, addTableColumn + 1), {
+                          text: addTableValues[addTableColumn] === null || addTableValues[addTableColumn] === undefined
+                            ? ""
+                            : String(addTableValues[addTableColumn]),
+                        });
+                      }
+                    }
+                  }
+                  if (isObject(args.header)) {
+                    for (var headerColumn = 1; headerColumn <= tableColumns; headerColumn += 1) {
+                      applyTableCellFormat(getTableCell(addedTable, 1, headerColumn), args.header);
+                    }
+                  }
+                  tableSlide.AddObject(addedTable);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    table: describeDrawing(addedTable, slideDrawings(tableSlide).indexOf(addedTable), Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_set_table_cell": {
+                  var cellTable = resolveDrawing(args, "table");
+                  var selectedCell = getTableCell(cellTable.drawing, args.row, args.column);
+                  applyTableCellFormat(selectedCell, args);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    row: Number(args.row),
+                    column: Number(args.column),
+                    text: String(safeCall(selectedCell, "GetText") || ""),
+                    table: describeDrawing(cellTable.drawing, cellTable.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_edit_table": {
+                  var editedTable = resolveDrawing(args, "table");
+                  var tableAction = String(args.action || "");
+                  var editCell = null;
+                  if (hasOwn(args, "row")) editCell = getTableCell(editedTable.drawing, args.row, hasOwn(args, "column") ? args.column : 1);
+                  if (tableAction === "addRow") {
+                    if (typeof editedTable.drawing.AddRow !== "function") throw new Error("当前 ONLYOFFICE 版本不支持添加表格行");
+                    editedTable.drawing.AddRow(editCell || undefined, String(args.position || "after") === "before");
+                  } else if (tableAction === "addColumn") {
+                    if (typeof editedTable.drawing.AddColumn !== "function") throw new Error("当前 ONLYOFFICE 版本不支持添加表格列");
+                    editedTable.drawing.AddColumn(editCell || undefined, String(args.position || "after") === "before");
+                  } else if (tableAction === "removeRow") {
+                    if (!editCell) throw new Error("删除表格行需要 row");
+                    if (editedTable.drawing.RemoveRow(editCell) === false) throw new Error("删除表格行失败");
+                  } else if (tableAction === "removeColumn") {
+                    if (!editCell) throw new Error("删除表格列需要 row 和 column");
+                    if (editedTable.drawing.RemoveColumn(editCell) === false) throw new Error("删除表格列失败");
+                  } else if (tableAction === "mergeCells") {
+                    var mergeCells = [];
+                    var mergeRowStart = Math.round(asFinite(args.rowStart, args.row));
+                    var mergeRowEnd = Math.round(asFinite(args.rowEnd, mergeRowStart));
+                    var mergeColumnStart = Math.round(asFinite(args.columnStart, args.column));
+                    var mergeColumnEnd = Math.round(asFinite(args.columnEnd, mergeColumnStart));
+                    if (mergeRowEnd < mergeRowStart || mergeColumnEnd < mergeColumnStart) {
+                      throw new Error("合并单元格范围无效");
+                    }
+                    for (var mergeRow = mergeRowStart; mergeRow <= mergeRowEnd; mergeRow += 1) {
+                      for (var mergeColumn = mergeColumnStart; mergeColumn <= mergeColumnEnd; mergeColumn += 1) {
+                        mergeCells.push(getTableCell(editedTable.drawing, mergeRow, mergeColumn));
+                      }
+                    }
+                    if (mergeCells.length < 2) throw new Error("至少选择两个单元格进行合并");
+                    if (!editedTable.drawing.MergeCells(mergeCells)) throw new Error("合并单元格失败");
+                  } else if (tableAction === "splitCell") {
+                    if (!editCell || !hasOwn(args, "column")) throw new Error("拆分单元格需要 row 和 column");
+                    if (typeof editCell.Split !== "function") throw new Error("当前 ONLYOFFICE 版本不支持拆分单元格");
+                    var splitRows = Math.max(1, Math.round(asFinite(args.rows, 1)));
+                    var splitColumns = Math.max(1, Math.round(asFinite(args.columns, 1)));
+                    if (splitRows > 20 || splitColumns > 20) throw new Error("单元格最多拆分为 20×20");
+                    if (editCell.Split(splitRows, splitColumns) === false) throw new Error("拆分单元格失败");
+                  } else {
+                    throw new Error("不支持的表格编辑动作：" + tableAction);
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    action: tableAction,
+                    table: describeDrawing(editedTable.drawing, editedTable.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_format_table": {
+                  var formattedTable = resolveDrawing(args, "table");
+                  applyDrawingFrame(formattedTable.drawing, args);
+                  if (typeof formattedTable.drawing.SetTableLook === "function" && isObject(args.tableLook)) {
+                    formattedTable.drawing.SetTableLook(
+                      Boolean(args.tableLook.firstColumn),
+                      Boolean(args.tableLook.firstRow),
+                      Boolean(args.tableLook.lastColumn),
+                      Boolean(args.tableLook.lastRow),
+                      Boolean(args.tableLook.horizontalBanding),
+                      Boolean(args.tableLook.verticalBanding)
+                    );
+                  }
+                  if (Array.isArray(args.columnWidthsMm) && typeof formattedTable.drawing.SetColumnWidth === "function") {
+                    for (var tableWidthIndex = 0; tableWidthIndex < args.columnWidthsMm.length; tableWidthIndex += 1) {
+                      formattedTable.drawing.SetColumnWidth(tableWidthIndex, mmToEmu(args.columnWidthsMm[tableWidthIndex]));
+                    }
+                  }
+                  var formattedDimensions = tableDimensions(formattedTable.drawing);
+                  if (Array.isArray(args.rowHeightsMm)) {
+                    for (var tableHeightIndex = 0; tableHeightIndex < Math.min(args.rowHeightsMm.length, formattedDimensions.rows); tableHeightIndex += 1) {
+                      var formattedRow = formattedTable.drawing.GetRow(tableHeightIndex);
+                      if (formattedRow && typeof formattedRow.SetHeight === "function") {
+                        formattedRow.SetHeight(mmToEmu(args.rowHeightsMm[tableHeightIndex]));
+                      }
+                    }
+                  }
+                  var formatRowStart = Math.max(1, Math.round(asFinite(args.rowStart, 1)));
+                  var formatRowEnd = Math.min(formattedDimensions.rows, Math.round(asFinite(args.rowEnd, formattedDimensions.rows)));
+                  var formatColumnStart = Math.max(1, Math.round(asFinite(args.columnStart, 1)));
+                  var formatColumnEnd = Math.min(formattedDimensions.columns, Math.round(asFinite(args.columnEnd, formattedDimensions.columns)));
+                  for (var formatTableRow = formatRowStart; formatTableRow <= formatRowEnd; formatTableRow += 1) {
+                    for (var formatTableColumn = formatColumnStart; formatTableColumn <= formatColumnEnd; formatTableColumn += 1) {
+                      applyTableCellFormat(getTableCell(formattedTable.drawing, formatTableRow, formatTableColumn), args);
+                    }
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    table: describeDrawing(formattedTable.drawing, formattedTable.index, Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_align_objects": {
+                  var alignedTargets = resolveDrawingTargets(args.slide, args.targets);
+                  var alignment = hasOwn(args, "align") ? String(args.align) : null;
+                  var distribution = hasOwn(args, "distribute") ? String(args.distribute) : null;
+                  if (!alignment && !distribution) throw new Error("slides_align_objects 需要 align 或 distribute");
+                  var alignSlide = getSlide(args.slide);
+                  var alignFrames = alignedTargets.map(function (item) {
+                    var frame = getDrawingFrame(item.drawing);
+                    return {
+                      item: item,
+                      x: asFinite(frame.x, 0),
+                      y: asFinite(frame.y, 0),
+                      width: Math.max(1, asFinite(frame.width, 1)),
+                      height: Math.max(1, asFinite(frame.height, 1)),
+                    };
+                  });
+                  var relativeToSlide = String(args.relativeTo || "selection") === "slide";
+                  var boundsLeft = relativeToSlide ? 0 : Math.min.apply(null, alignFrames.map(function (frame) { return frame.x; }));
+                  var boundsTop = relativeToSlide ? 0 : Math.min.apply(null, alignFrames.map(function (frame) { return frame.y; }));
+                  var boundsRight = relativeToSlide
+                    ? asFinite(safeCall(alignSlide, "GetWidth"), asFinite(safeCall(presentation, "GetWidth"), 0))
+                    : Math.max.apply(null, alignFrames.map(function (frame) { return frame.x + frame.width; }));
+                  var boundsBottom = relativeToSlide
+                    ? asFinite(safeCall(alignSlide, "GetHeight"), asFinite(safeCall(presentation, "GetHeight"), 0))
+                    : Math.max.apply(null, alignFrames.map(function (frame) { return frame.y + frame.height; }));
+                  for (var alignIndex = 0; alignIndex < alignFrames.length; alignIndex += 1) {
+                    var alignedFrame = alignFrames[alignIndex];
+                    if (alignment === "left") alignedFrame.x = boundsLeft;
+                    else if (alignment === "center") alignedFrame.x = boundsLeft + (boundsRight - boundsLeft - alignedFrame.width) / 2;
+                    else if (alignment === "right") alignedFrame.x = boundsRight - alignedFrame.width;
+                    else if (alignment === "top") alignedFrame.y = boundsTop;
+                    else if (alignment === "middle") alignedFrame.y = boundsTop + (boundsBottom - boundsTop - alignedFrame.height) / 2;
+                    else if (alignment === "bottom") alignedFrame.y = boundsBottom - alignedFrame.height;
+                    else if (alignment) throw new Error("不支持的对象对齐方式：" + alignment);
+                  }
+                  if (distribution) {
+                    if (alignFrames.length < 3) throw new Error("等间距分布至少需要三个对象");
+                    var horizontal = distribution === "horizontal";
+                    if (!horizontal && distribution !== "vertical") throw new Error("不支持的对象分布方式：" + distribution);
+                    alignFrames.sort(function (left, right) {
+                      return horizontal ? left.x - right.x : left.y - right.y;
+                    });
+                    var totalSize = alignFrames.reduce(function (sum, frame) {
+                      return sum + (horizontal ? frame.width : frame.height);
+                    }, 0);
+                    var distributionStart = horizontal ? boundsLeft : boundsTop;
+                    var distributionEnd = horizontal ? boundsRight : boundsBottom;
+                    var distributionGap = (distributionEnd - distributionStart - totalSize) / (alignFrames.length - 1);
+                    var cursor = distributionStart;
+                    for (var distributeIndex = 0; distributeIndex < alignFrames.length; distributeIndex += 1) {
+                      if (horizontal) alignFrames[distributeIndex].x = cursor;
+                      else alignFrames[distributeIndex].y = cursor;
+                      cursor += (horizontal ? alignFrames[distributeIndex].width : alignFrames[distributeIndex].height) + distributionGap;
+                    }
+                  }
+                  for (var setAlignedIndex = 0; setAlignedIndex < alignFrames.length; setAlignedIndex += 1) {
+                    alignFrames[setAlignedIndex].item.drawing.SetPosition(
+                      Math.round(alignFrames[setAlignedIndex].x),
+                      Math.round(alignFrames[setAlignedIndex].y)
+                    );
+                  }
+                  changed += alignedTargets.length;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    alignedObjects: alignedTargets.length,
+                    align: alignment,
+                    distribute: distribution,
+                  });
+                  break;
+                }
+
+                case "slides_group_objects": {
+                  var groupAction = String(args.action || "group");
+                  var groupingSlide = getSlide(args.slide);
+                  if (groupAction === "group") {
+                    var groupTargets = resolveDrawingTargets(args.slide, args.targets);
+                    if (groupTargets.length < 2) throw new Error("组合至少需要两个对象");
+                    if (typeof groupingSlide.GroupDrawings !== "function") throw new Error("当前 ONLYOFFICE 版本不支持组合对象");
+                    var createdGroup = groupingSlide.GroupDrawings(groupTargets.map(function (item) { return item.drawing; }));
+                    if (!createdGroup) throw new Error("组合对象失败");
+                    if (hasOwn(args, "name") && typeof createdGroup.SetName === "function") createdGroup.SetName(String(args.name));
+                    changed += 1;
+                    results.push({
+                      name: call.name,
+                      slide: Number(args.slide),
+                      action: groupAction,
+                      group: describeDrawing(createdGroup, slideDrawings(groupingSlide).indexOf(createdGroup), Boolean(args.includeRaw)),
+                    });
+                  } else if (groupAction === "ungroup") {
+                    var ungrouped = resolveDrawing(args, "group");
+                    if (typeof ungrouped.drawing.Ungroup !== "function") throw new Error("当前 ONLYOFFICE 版本不支持取消组合");
+                    if (ungrouped.drawing.Ungroup() === false) throw new Error("取消组合失败");
+                    changed += 1;
+                    results.push({
+                      name: call.name,
+                      slide: Number(args.slide),
+                      action: groupAction,
+                      objectCount: slideDrawings(groupingSlide).length,
+                    });
+                  } else {
+                    throw new Error("不支持的组合动作：" + groupAction);
+                  }
+                  break;
+                }
+
+                case "slides_reorder_object": {
+                  var reordered = resolveDrawing(args);
+                  var reorderAction = String(args.action || "");
+                  var reorderDrawings = slideDrawings(reordered.slide).slice();
+                  var reorderIndex = reorderDrawings.indexOf(reordered.drawing);
+                  if (reorderIndex < 0) throw new Error("找不到需要调整层级的对象");
+                  reorderDrawings.splice(reorderIndex, 1);
+                  var reorderedIndex;
+                  if (reorderAction === "front") reorderedIndex = reorderDrawings.length;
+                  else if (reorderAction === "back") reorderedIndex = 0;
+                  else if (reorderAction === "forward") reorderedIndex = Math.min(reorderDrawings.length, reorderIndex + 1);
+                  else if (reorderAction === "backward") reorderedIndex = Math.max(0, reorderIndex - 1);
+                  else throw new Error("不支持的对象层级动作：" + reorderAction);
+                  reorderDrawings.splice(reorderedIndex, 0, reordered.drawing);
+                  for (var detachIndex = 0; detachIndex < reorderDrawings.length; detachIndex += 1) {
+                    if (reordered.slide.RemoveObject(reorderDrawings[detachIndex]) === false) {
+                      throw new Error("调整对象层级时无法移除对象");
+                    }
+                  }
+                  for (var attachIndex = 0; attachIndex < reorderDrawings.length; attachIndex += 1) {
+                    if (reordered.slide.AddObject(reorderDrawings[attachIndex]) === false) {
+                      throw new Error("调整对象层级时无法重新添加对象");
+                    }
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    action: reorderAction,
+                    objectIndex: slideDrawings(reordered.slide).indexOf(reordered.drawing),
+                  });
+                  break;
+                }
+
+                case "slides_add_connector": {
+                  var connectorSlide = getSlide(args.slide);
+                  var startX = asFinite(args.startXmm, 0);
+                  var startY = asFinite(args.startYmm, 0);
+                  var endX = asFinite(args.endXmm, startX + 30);
+                  var endY = asFinite(args.endYmm, startY);
+                  var connectorLeft = Math.min(startX, endX);
+                  var connectorTop = Math.min(startY, endY);
+                  var connectorWidth = Math.max(0.1, Math.abs(endX - startX));
+                  var connectorHeight = Math.max(0.1, Math.abs(endY - startY));
+                  var connectorType = String(args.connectorType || "straightConnector1");
+                  var connector = Api.CreateShape(
+                    connectorType,
+                    mmToEmu(connectorWidth),
+                    mmToEmu(connectorHeight),
+                    Api.CreateNoFill(),
+                    createStroke(args.line, args.lineColor, args.lineWidthPt)
+                  );
+                  connector.SetPosition(mmToEmu(connectorLeft), mmToEmu(connectorTop));
+                  if ((endX < startX) !== (endY < startY) && typeof connector.SetFlipV === "function") connector.SetFlipV(true);
+                  if (hasOwn(args, "name") && typeof connector.SetName === "function") connector.SetName(String(args.name));
+                  connectorSlide.AddObject(connector);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    object: describeDrawing(connector, slideDrawings(connectorSlide).indexOf(connector), Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_add_freeform": {
+                  if (typeof Api.CreateCustomGeometry !== "function") throw new Error("当前 ONLYOFFICE 版本不支持自由形状");
+                  if (!Array.isArray(args.paths) || !args.paths.length) throw new Error("自由形状至少需要一条路径");
+                  var freeformSlide = getSlide(args.slide);
+                  var freeformWidth = Math.max(0.1, asFinite(args.widthMm, 100));
+                  var freeformHeight = Math.max(0.1, asFinite(args.heightMm, 60));
+                  var customGeometry = Api.CreateCustomGeometry();
+                  for (var pathIndex = 0; pathIndex < args.paths.length; pathIndex += 1) {
+                    var pathSpec = args.paths[pathIndex] || {};
+                    var customPath = customGeometry.AddPath();
+                    if (!customPath) throw new Error("创建自由形状路径失败");
+                    customPath.SetWidth(mmToEmu(freeformWidth));
+                    customPath.SetHeight(mmToEmu(freeformHeight));
+                    customPath.SetStroke(pathSpec.stroke !== false);
+                    customPath.SetFill(String(pathSpec.fill || "norm"));
+                    var commands = Array.isArray(pathSpec.commands) ? pathSpec.commands : [];
+                    for (var commandIndex = 0; commandIndex < commands.length; commandIndex += 1) {
+                      var pathCommand = commands[commandIndex] || {};
+                      var commandType = String(pathCommand.type || "");
+                      if (commandType === "moveTo") customPath.MoveTo(mmToEmu(pathCommand.xMm), mmToEmu(pathCommand.yMm));
+                      else if (commandType === "lineTo") customPath.LineTo(mmToEmu(pathCommand.xMm), mmToEmu(pathCommand.yMm));
+                      else if (commandType === "quadBezTo") {
+                        customPath.QuadBezTo(
+                          mmToEmu(pathCommand.controlXmm),
+                          mmToEmu(pathCommand.controlYmm),
+                          mmToEmu(pathCommand.xMm),
+                          mmToEmu(pathCommand.yMm)
+                        );
+                      } else if (commandType === "cubicBezTo") {
+                        customPath.CubicBezTo(
+                          mmToEmu(pathCommand.control1Xmm),
+                          mmToEmu(pathCommand.control1Ymm),
+                          mmToEmu(pathCommand.control2Xmm),
+                          mmToEmu(pathCommand.control2Ymm),
+                          mmToEmu(pathCommand.xMm),
+                          mmToEmu(pathCommand.yMm)
+                        );
+                      } else if (commandType === "arcTo") {
+                        customPath.ArcTo(
+                          mmToEmu(pathCommand.widthRadiusMm),
+                          mmToEmu(pathCommand.heightRadiusMm),
+                          Math.round(asFinite(pathCommand.startAngleDeg, 0) * 60000),
+                          Math.round(asFinite(pathCommand.sweepAngleDeg, 0) * 60000)
+                        );
+                      } else if (commandType === "close") customPath.Close();
+                      else throw new Error("不支持的自由形状路径命令：" + commandType);
+                    }
+                  }
+                  var freeform = Api.CreateShape(
+                    "rect",
+                    mmToEmu(freeformWidth),
+                    mmToEmu(freeformHeight),
+                    createFill(args.fill, args.fillColor),
+                    createStroke(args.line, args.lineColor, args.lineWidthPt)
+                  );
+                  if (!freeform || typeof freeform.SetGeometry !== "function") throw new Error("创建自由形状失败");
+                  freeform.SetGeometry(customGeometry);
+                  applyDrawingFrame(freeform, {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 15,
+                    widthMm: freeformWidth,
+                    heightMm: freeformHeight,
+                  });
+                  if (hasOwn(args, "name") && typeof freeform.SetName === "function") freeform.SetName(String(args.name));
+                  freeformSlide.AddObject(freeform);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    object: describeDrawing(freeform, slideDrawings(freeformSlide).indexOf(freeform), Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_add_word_art": {
+                  if (typeof Api.CreateWordArt !== "function") throw new Error("当前 ONLYOFFICE 版本不支持艺术字");
+                  var wordArtSlide = getSlide(args.slide);
+                  var wordArt = Api.CreateWordArt(
+                    createWordArtTextPr(args),
+                    String(args.text || ""),
+                    String(args.transform || "textNoShape"),
+                    createFill(args.fill, args.fillColor),
+                    createStroke(args.line, args.lineColor, args.lineWidthPt),
+                    asFinite(args.rotationDeg, 0),
+                    mmToEmu(asFinite(args.widthMm, 100)),
+                    mmToEmu(asFinite(args.heightMm, 30))
+                  );
+                  if (!wordArt) throw new Error("创建艺术字失败");
+                  var wordArtFrame = {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 15,
+                    widthMm: hasOwn(args, "widthMm") ? args.widthMm : 100,
+                    heightMm: hasOwn(args, "heightMm") ? args.heightMm : 30,
+                    rotationDeg: hasOwn(args, "rotationDeg") ? args.rotationDeg : 0,
+                  };
+                  if (hasOwn(args, "name")) wordArtFrame.name = args.name;
+                  applyDrawingFrame(wordArt, wordArtFrame);
+                  if (wordArtSlide.AddObject(wordArt) === false) throw new Error("向幻灯片添加艺术字失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    object: describeDrawing(wordArt, slideDrawings(wordArtSlide).indexOf(wordArt), Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
+                case "slides_add_math": {
+                  if (typeof presentation.AddMathEquation !== "function") throw new Error("当前 ONLYOFFICE 版本不支持数学公式");
+                  var mathSlide = getSlide(args.slide);
+                  var drawingsBeforeMath = slideDrawings(mathSlide).slice();
+                  if (typeof mathSlide.Select === "function") mathSlide.Select();
+                  if (presentation.AddMathEquation(String(args.text || ""), String(args.format || "latex")) === false) {
+                    throw new Error("插入数学公式失败");
+                  }
+                  var drawingsAfterMath = slideDrawings(mathSlide);
+                  var mathDrawing = null;
+                  for (var mathDrawingIndex = 0; mathDrawingIndex < drawingsAfterMath.length; mathDrawingIndex += 1) {
+                    if (drawingsBeforeMath.indexOf(drawingsAfterMath[mathDrawingIndex]) === -1) {
+                      mathDrawing = drawingsAfterMath[mathDrawingIndex];
+                      break;
+                    }
+                  }
+                  if (mathDrawing) applyDrawingFrame(mathDrawing, args);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    format: String(args.format || "latex"),
+                    object: mathDrawing
+                      ? describeDrawing(mathDrawing, drawingsAfterMath.indexOf(mathDrawing), Boolean(args.includeRaw))
+                      : null,
+                  });
+                  break;
+                }
+
+                case "slides_add_ole_object": {
+                  if (typeof Api.CreateOleObject !== "function") throw new Error("当前 ONLYOFFICE 版本不支持 OLE 对象");
+                  if (!args._image || typeof args._image.url !== "string") throw new Error("OLE 对象缺少安全导入的预览图片");
+                  var oleSlide = getSlide(args.slide);
+                  var oleWidthMm = asFinite(args.widthMm, 130);
+                  var oleHeightMm = asFinite(args.heightMm, 90);
+                  var oleObject = Api.CreateOleObject(
+                    args._image.url,
+                    mmToEmu(oleWidthMm),
+                    mmToEmu(oleHeightMm),
+                    String(args.data || ""),
+                    String(args.appId || "")
+                  );
+                  if (!oleObject) throw new Error("创建 OLE 对象失败");
+                  var oleFrame = {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 15,
+                    widthMm: oleWidthMm,
+                    heightMm: oleHeightMm,
+                  };
+                  if (hasOwn(args, "rotationDeg")) oleFrame.rotationDeg = args.rotationDeg;
+                  if (hasOwn(args, "name")) oleFrame.name = args.name;
+                  applyDrawingFrame(oleObject, oleFrame);
+                  if (oleSlide.AddObject(oleObject) === false) throw new Error("向幻灯片添加 OLE 对象失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    object: describeDrawing(oleObject, slideDrawings(oleSlide).indexOf(oleObject), Boolean(args.includeRaw)),
+                  });
+                  break;
+                }
+
                 case "slides_add_textbox": {
                   var textboxSlideNumber = Number(args.slide || presentation.GetCurSlideIndex() + 1);
                   var textboxSlide = getSlide(textboxSlideNumber);
@@ -868,6 +2625,106 @@
                     name: call.name,
                     slide: textboxSlideNumber,
                     object: describeDrawing(textbox, slideDrawings(textboxSlide).indexOf(textbox), false),
+                  });
+                  break;
+                }
+
+                case "slides_add_image": {
+                  if (!args._image || !args._image.url) {
+                    commandError("INVALID_IMAGE_SOURCE", "图片资源尚未安全导入");
+                  }
+                  if (typeof Api.CreateImage !== "function") {
+                    commandError("IMAGE_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持 Api.CreateImage");
+                  }
+                  var imageSlideNumber = Number(args.slide);
+                  var imageSlide = getSlide(imageSlideNumber);
+                  var imageSize = resolveImageSize(args, 160, 90);
+                  var imageDrawing = Api.CreateImage(
+                    String(args._image.url),
+                    mmToEmu(imageSize.widthMm),
+                    mmToEmu(imageSize.heightMm)
+                  );
+                  if (!imageDrawing) commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 无法创建图片对象");
+                  var slideWidthMm = emuToMm(safeCall(imageSlide, "GetWidth"));
+                  var slideHeightMm = emuToMm(safeCall(imageSlide, "GetHeight"));
+                  if (!(slideWidthMm > 0)) slideWidthMm = 254;
+                  if (!(slideHeightMm > 0)) slideHeightMm = 142.875;
+                  var imageFrame = {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : Math.max(0, (slideWidthMm - imageSize.widthMm) / 2),
+                    yMm: hasOwn(args, "yMm") ? args.yMm : Math.max(0, (slideHeightMm - imageSize.heightMm) / 2),
+                    widthMm: imageSize.widthMm,
+                    heightMm: imageSize.heightMm,
+                  };
+                  if (hasOwn(args, "rotationDeg")) imageFrame.rotationDeg = args.rotationDeg;
+                  if (hasOwn(args, "flipH")) imageFrame.flipH = args.flipH;
+                  if (hasOwn(args, "flipV")) imageFrame.flipV = args.flipV;
+                  if (hasOwn(args, "name")) imageFrame.name = args.name;
+                  applyDrawingFrame(imageDrawing, imageFrame);
+                  if (imageSlide.AddObject(imageDrawing) === false) throw new Error("ONLYOFFICE 拒绝向幻灯片添加图片");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: imageSlideNumber,
+                    assetId: String(args._image.assetId || ""),
+                    object: describeDrawing(
+                      imageDrawing,
+                      slideDrawings(imageSlide).indexOf(imageDrawing),
+                      false
+                    ),
+                  });
+                  break;
+                }
+
+                case "slides_add_image_shape": {
+                  if (!args._image || !args._image.url) {
+                    commandError("INVALID_IMAGE_SOURCE", "图片资源尚未安全导入");
+                  }
+                  if (typeof Api.CreateBlipFill !== "function" || typeof Api.CreateShape !== "function") {
+                    commandError("IMAGE_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持图片形状填充");
+                  }
+                  var imageShapeSlide = getSlide(args.slide);
+                  var imageShapeSize = resolveImageSize(args, 80, 80);
+                  var imageShapeFill = Api.CreateBlipFill(
+                    String(args._image.url),
+                    String(args.fillMode || "stretch")
+                  );
+                  if (!imageShapeFill) commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 无法创建图片填充");
+                  var imageShape = Api.CreateShape(
+                    String(args.shapeType || "ellipse"),
+                    mmToEmu(imageShapeSize.widthMm),
+                    mmToEmu(imageShapeSize.heightMm),
+                    imageShapeFill,
+                    createStroke(args.line, args.lineColor, args.lineWidthPt)
+                  );
+                  if (!imageShape) commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 无法创建图片形状");
+                  var imageShapeFrame = {
+                    xMm: hasOwn(args, "xMm") ? args.xMm : 15,
+                    yMm: hasOwn(args, "yMm") ? args.yMm : 15,
+                    widthMm: imageShapeSize.widthMm,
+                    heightMm: imageShapeSize.heightMm,
+                  };
+                  if (hasOwn(args, "rotationDeg")) imageShapeFrame.rotationDeg = args.rotationDeg;
+                  if (hasOwn(args, "flipH")) imageShapeFrame.flipH = args.flipH;
+                  if (hasOwn(args, "flipV")) imageShapeFrame.flipV = args.flipV;
+                  if (hasOwn(args, "name")) imageShapeFrame.name = args.name;
+                  applyDrawingFrame(imageShape, imageShapeFrame);
+                  if (imageShapeSlide.AddObject(imageShape) === false) {
+                    commandError("IMAGE_FETCH_FAILED", "向幻灯片添加图片形状失败");
+                  }
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    source: {
+                      assetId: args._image.assetId || null,
+                      widthPx: Number(args._image.widthPx),
+                      heightPx: Number(args._image.heightPx),
+                    },
+                    object: describeDrawing(
+                      imageShape,
+                      slideDrawings(imageShapeSlide).indexOf(imageShape),
+                      Boolean(args.includeRaw)
+                    ),
                   });
                   break;
                 }
@@ -1048,7 +2905,11 @@
               results: results,
             });
           } catch (error) {
-            return JSON.stringify({ ok: false, error: error && error.message ? error.message : String(error) });
+            return JSON.stringify({
+              ok: false,
+              code: error && error.code ? error.code : undefined,
+              error: error && error.message ? error.message : String(error),
+            });
           }
         },
         false,
@@ -1062,6 +2923,115 @@
         },
       );
     });
+  }
+
+  function executePluginTool(toolCalls) {
+    return new Promise(function (resolve, reject) {
+      if (toolCalls.length !== 1) {
+        reject(new Error("主题库、宏和放映控制工具必须单独调用"));
+        return;
+      }
+      if (!window.Asc || !Asc.plugin || typeof Asc.plugin.executeMethod !== "function") {
+        reject(new Error("当前 ONLYOFFICE 版本不支持所需的插件方法"));
+        return;
+      }
+      var call = toolCalls[0] || {};
+      var args = call.arguments || call.args || {};
+      var method;
+      var params = null;
+      var needsSave = false;
+      var resultKind = null;
+      if (call.name === "slides_inspect_builtin_themes") {
+        method = "GetEditorThemes";
+        resultKind = "themes";
+      } else if (call.name === "slides_apply_builtin_theme") {
+        method = "ApplyTheme";
+        params = [args.theme];
+        needsSave = true;
+        resultKind = "theme";
+      } else if (call.name === "slides_inspect_macros") {
+        method = args.kind === "vba" ? "GetVBAMacros" : "GetMacros";
+        resultKind = method === "GetVBAMacros" ? "vba" : "onlyoffice";
+      } else if (call.name === "slides_set_macros") {
+        if (!args.content || typeof args.content !== "object" || Array.isArray(args.content)) {
+          reject(new Error("slides_set_macros.content 必须是宏配置对象"));
+          return;
+        }
+        method = "SetMacros";
+        params = [JSON.stringify(args.content)];
+        needsSave = true;
+        resultKind = "onlyoffice";
+      } else if (call.name === "slides_control_slideshow") {
+        var slideshowMethods = {
+          start: "StartSlideShow",
+          end: "EndSlideShow",
+          pause: "PauseSlideShow",
+          resume: "ResumeSlideShow",
+          next: "GoToNextSlideInSlideShow",
+          previous: "GoToPreviousSlideInSlideShow",
+          goto: "GoToSlideInSlideShow",
+        };
+        method = slideshowMethods[String(args.action || "")];
+        if (!method) {
+          reject(new Error("不支持的放映控制动作：" + String(args.action || "")));
+          return;
+        }
+        if (args.action === "goto") {
+          var slideIndex = Number(args.slide);
+          if (!Number.isInteger(slideIndex) || slideIndex < 1) {
+            reject(new Error("goto 需要从 1 开始的 slide"));
+            return;
+          }
+          params = [slideIndex - 1];
+        }
+        resultKind = "slideshow";
+      } else {
+        reject(new Error("未知插件工具：" + call.name));
+        return;
+      }
+
+      Asc.plugin.executeMethod(method, params, function (data) {
+        try {
+          var content = data;
+          if ((method === "GetMacros" || method === "GetEditorThemes") && typeof data === "string") {
+            try {
+              content = JSON.parse(data);
+            } catch (error) {
+              content = { raw: data };
+            }
+          }
+          resolve({
+            ok: true,
+            editorType: "slide",
+            changed: needsSave ? 1 : 0,
+            needsSave: needsSave,
+            results: [{
+              name: call.name,
+              kind: resultKind,
+              action: call.name === "slides_control_slideshow" ? args.action : undefined,
+              content: content,
+            }],
+          });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  function isPluginTool(call) {
+    return Boolean(call) && (
+      call.name === "slides_inspect_builtin_themes"
+      || call.name === "slides_apply_builtin_theme"
+      || call.name === "slides_inspect_macros"
+      || call.name === "slides_set_macros"
+      || call.name === "slides_control_slideshow"
+    );
+  }
+
+  function execute(toolCalls) {
+    if (toolCalls.some(isPluginTool)) return executePluginTool(toolCalls);
+    return executeOfficeCommands(toolCalls);
   }
 
   window.AICopilotBridges.slide = {

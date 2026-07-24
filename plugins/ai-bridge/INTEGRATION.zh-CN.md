@@ -1,4 +1,4 @@
-# ai-bridge 0.2.0 外部工程接入说明
+# ai-bridge 0.4.0 外部工程接入说明
 
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev26"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       },
@@ -40,7 +40,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
 ```
 
 `customization.compactToolbar: true` 启用 ONLYOFFICE 原生紧凑功能区：首次进入时
@@ -85,13 +85,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.2.0-rev19"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev26"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -191,7 +191,11 @@ const result = await window.aiBridge.executeBatch(toolCalls, {
 console.log(result.changed, result.persisted, result.results);
 ```
 
-一批最多 20 个工具，参数 JSON 最大 250000 字符，超时上限 300000 ms。修改类调用会串行执行：创建 checkpoint、调用 Office API、`Api.Save()`、force-save。`inspect` 只读调用不会写存储。
+一批最多 20 个工具，普通参数 JSON 最大 250000 字符，超时上限 300000 ms。图片导入和 HTTP Relay execute 路径单独允许 12 MiB 请求体；其他聊天、保存和控制接口仍使用原有限制。修改类调用会串行执行：创建 checkpoint、调用 Office API、`Api.Save()`、force-save。`inspect` 只读调用不会写存储。
+
+force-save 成功后不会刷新编辑器页面。当前 WebSocket 会话已经包含刚保存的版本，
+继续使用现有会话可以完整保留当前页、页内滚动位置和选区。只有 `undo` / `redo`
+这类用历史文件替换当前存储版本的操作才会 reload。
 
 ## 完整 JavaScript API
 
@@ -212,13 +216,22 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-所有 56 个快捷方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.4.0 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
 word.insertParagraph         word.formatDocument       word.formatSelection
 word.formatMatches           word.deleteMatches        word.addHyperlink
-word.addComment              word.addBookmark          word.formatParagraphs
+word.addComment              word.addBookmark          word.addImage
+word.inspectAdvanced         word.setDocumentProperties
+word.manageSection           word.manageStyle          word.setTabs
+word.setNumbering            word.formatTableAdvanced  word.addNestedTable
+word.manageDrawing           word.addShape             word.addChart
+word.addMath                 word.addOleObject          word.manageFields
+word.manageLongDocument      word.manageComments       word.manageRevisions
+word.setProtection           word.manageContentControl word.manageCustomXml
+word.inspectMacros           word.setMacros             word.setWatermark
+word.formatParagraphs
 word.setParagraphText        word.deleteParagraphs     word.setList
 word.insertPageBreak         word.navigate             word.scroll
 word.scaleFont               word.addTable             word.setTableCell
@@ -228,17 +241,30 @@ word.setHeaderFooter         word.setDocumentText
 slides.inspect               slides.inspectObjects     slides.replaceText
 slides.scaleFont             slides.formatText         slides.formatSelection
 slides.addSlide              slides.duplicateSlide     slides.deleteSlide
-slides.addTextBox            slides.setBackground      slides.addShape
+slides.addTextBox            slides.addImage           slides.setBackground
+slides.addShape
 slides.updateShape           slides.deleteObject       slides.inspectCharts
 slides.addChart              slides.updateChart        slides.deleteChart
 
 sheets.inspect               sheets.setValues          sheets.setFormula
-sheets.replaceText           sheets.formatRange        sheets.addSheet
-sheets.renameSheet           sheets.deleteSheet        sheets.addChart
-sheets.inspectCharts         sheets.updateChart        sheets.deleteChart
+sheets.inspectRange          sheets.setArrayFormula    sheets.replaceText
+sheets.formatRange           sheets.manageRange        sheets.setRichText
+sheets.addSheet              sheets.renameSheet        sheets.deleteSheet
+sheets.manageSheet           sheets.inspectNames       sheets.manageNames
+sheets.recalculate           sheets.sort               sheets.filter
+sheets.inspectTables         sheets.manageTable
+sheets.manageConditionalFormat
+sheets.manageValidation      sheets.inspectPivots      sheets.managePivot
+sheets.addChart              sheets.inspectCharts      sheets.updateChart
+sheets.deleteChart           sheets.inspectDrawings    sheets.manageDrawing
+sheets.manageHyperlink       sheets.inspectComments    sheets.manageComments
+sheets.inspectFreezePanes    sheets.manageFreezePanes  sheets.inspectProperties
+sheets.manageProperties      sheets.inspectProtectedRanges
+sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
+sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.2.0`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.4.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -247,7 +273,81 @@ sheets.inspectCharts         sheets.updateChart        sheets.deleteChart
 - 段落操作支持标题/命名样式、字体、对齐、段前段后、行距、缩进、同页/孤行控制、分页符和项目符号/编号。
 - 表格操作支持创建填充、样式、单元格格式、增删行列、合并/拆分、清空和删除。
 - 页面操作支持纸张大小、横竖向、页边距、页眉页脚及动态页码。
+- 高级操作覆盖分节/分栏、字符与段落样式、自定义编号、重复表头和嵌套表格、图形/图表/公式/OLE、目录/题注/交叉引用/脚注尾注、修订、保护、内容控件、自定义 XML、宏和水印。完整边界见 `DOCX-CAPABILITIES.zh-CN.md`。
 - `word_scroll` 是稳定的按页上滚/下滚；`word_navigate` 还支持首页、末页、指定页、上一页、下一页、相对页和搜索定位。ONLYOFFICE Office API 没有跨版本稳定的像素级鼠标滚轮契约，因此 Bridge 不注入浏览器鼠标事件，也不会把按页导航误报成像素滚动。
+
+### DOCX / PPTX / XLSX 外部图片
+
+图片来源类型：
+
+```ts
+type AiBridgeImageSource =
+  | { type: "url"; url: string }
+  | { type: "dataUrl"; dataUrl: string };
+```
+
+在 Word 当前光标插图，或通过一基段落序号/文本命中定位：
+
+```js
+await window.aiBridge.word.addImage({
+  source: { type: "url", url: "https://cdn.example.com/architecture.png" },
+  widthMm: 120,
+  search: "系统架构",
+  occurrence: 1,
+  wrapping: "square",
+  name: "系统架构图",
+});
+```
+
+`current`、`paragraphIndex`、`search` 最多指定一种；未指定时使用当前光标。
+`wrapping` 默认为 `inline`，还可使用 `square`、`tight`、`through`、
+`topAndBottom`、`behind`、`inFront`。只给宽或高时会按原始比例推导另一边；
+同时给出宽高且 `preserveAspectRatio` 未关闭时，会在该边界框内 contain。
+
+向指定 PPT 页插入从剪贴板 Blob 转出的 Data URL：
+
+```js
+await window.aiBridge.slides.addImage({
+  slide: 2,
+  source: { type: "dataUrl", dataUrl: clipboardImageDataUrl },
+  widthMm: 150,
+  rotationDeg: 2,
+  flipH: false,
+  name: "产品截图",
+});
+
+await window.aiBridge.slides.addImageShape({
+  slide: 2,
+  source: { type: "url", url: "https://cdn.example.com/avatar.svg" },
+  shapeType: "ellipse",
+  widthMm: 45,
+  heightMm: 45,
+  preserveAspectRatio: false,
+  line: { widthPt: 1.5, color: "#336699" },
+  name: "圆形头像",
+});
+```
+
+PPT 未给尺寸时按原比例放进 `160 × 90 mm` 边界框；未给坐标时在页面居中。
+返回值是标准 drawing 描述，后续可用 `slides.inspectObjects()` 定位，并用
+`slides.deleteObject()` 删除。
+
+Host 在发送编辑命令前，会把批次中所有 URL/Data URL 一次性预导入
+`POST /copilot-api/images/import`。全部成功后才创建 checkpoint 并调用插件；
+任一图片失败时整个批次不会修改文档。插件仅接受 Host 从服务端签名资源解析出的
+内部图片来源，外部调用者不能直接传 `_image`。正常部署把签名同源 URL 交给
+编辑器；localhost demo 为保持 ONLYOFFICE 的私网请求过滤器开启，会由可信 Host
+通过签名 URL 读取资源后转换成内部 Data URL。相同内容按 SHA-256 去重；相同
+`requestId` 的重试不会重复插图。
+
+导入服务仅接受 PNG、JPEG、GIF、WebP、SVG，原图最大 8 MiB、最大边长 12,000 px、
+最大 40 MP。SVG 会先解析并规范化，拒绝脚本、事件处理器、外部资源、DTD 和实体。
+外部 URL 必须为 HTTPS，不能包含用户名密码，最多跟随 3 次重定向，
+每次解析都拒绝回环、私网、链路本地、保留、多播和未指定地址，总超时 20 秒。
+可用 `COPILOT_IMAGE_ALLOWED_HOSTS=cdn.example.com,images.example.com`
+进一步限制域名。下载签名绑定资源、文档身份和过期时间，默认 15 分钟有效；临时
+文件 24 小时后清理。图片写入 DOCX/PPTX 后由 ONLYOFFICE 内嵌到文件包，不依赖
+临时 URL。
 
 ### PPTX 图形、渐变和图表完整边界
 
@@ -392,7 +492,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.2.0",
+    "version": "0.4.0",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -444,6 +544,11 @@ try {
 - `EDITOR_MISMATCH`：把 Word 命令发给了 PPT/表格实例。
 - `TOOL_NOT_ALLOWED`：当前编辑器不允许该工具。
 - `INVALID_ARGUMENTS` / `INVALID_COMMAND`：模型结构化输出不符合契约。
+- `INVALID_IMAGE_SOURCE`：图片来源类型、Data URL 或内部资源不合法。
+- `IMAGE_FETCH_BLOCKED` / `IMAGE_FETCH_FAILED`：URL 被网络策略拦截或下载失败。
+- `IMAGE_TOO_LARGE` / `UNSUPPORTED_IMAGE_FORMAT`：图片字节、像素或格式不符合限制。
+- `IMAGE_ASSET_EXPIRED`：签名下载地址已过期。
+- `IMAGE_API_UNSUPPORTED`：当前 ONLYOFFICE 运行时缺少必需图片 API。
 - `PERSISTENCE_FAILED`：Office API 已执行，但示例持久化服务保存失败，应提示用户并核对 callback/force-save。
 - `TIMEOUT` / `CONNECTION_TIMEOUT`：调用或 Relay 握手超时。
 
@@ -467,9 +572,11 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 - 模型只能输出 `public-api.json` 中的工具调用，不能把任意 JavaScript 交给插件执行。
 - 在业务后端验证当前用户对 `documentKey` 的读写权限；浏览器源校验不能代替用户授权。
 - 写操作建议记录 `requestId`、用户、文档键、工具名、参数摘要和结果，敏感正文不要直接写入日志。
+- 图片错误不得记录或回显 Base64、签名 URL、远程响应正文；生产反向代理仅对
+  `/images/import` 和 `/bridge/execute` 放宽到 12 MiB。
 
 ## 版本兼容
 
-当前插件版本为 `0.2.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.2.0-rev19`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.4.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.4.0-rev26`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

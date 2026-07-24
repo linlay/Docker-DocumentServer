@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const PLUGIN_VERSION = "0.2.0";
+  const PLUGIN_VERSION = "0.4.0";
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const MAX_CALLS = 20;
@@ -9,13 +9,33 @@
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const READ_ONLY_TOOLS = new Set([
     "word_inspect",
+    "word_inspect_advanced",
+    "word_inspect_macros",
     "word_navigate",
     "word_scroll",
     "slides_inspect",
+    "slides_inspect_layouts",
+    "slides_inspect_themes",
+    "slides_inspect_builtin_themes",
     "slides_inspect_objects",
     "slides_inspect_charts",
+    "slides_inspect_animations",
+    "slides_inspect_comments",
+    "slides_inspect_macros",
+    "slides_control_slideshow",
     "sheets_inspect",
     "sheets_inspect_charts",
+    "sheets_inspect_range",
+    "sheets_inspect_names",
+    "sheets_inspect_tables",
+    "sheets_inspect_pivots",
+    "sheets_inspect_drawings",
+    "sheets_inspect_comments",
+    "sheets_inspect_freeze_panes",
+    "sheets_inspect_properties",
+    "sheets_inspect_protected_ranges",
+    "sheets_inspect_page_layout",
+    "sheets_inspect_macros",
   ]);
 
   const ALLOWED_TOOLS = {
@@ -31,6 +51,30 @@
       "word_add_hyperlink",
       "word_add_comment",
       "word_add_bookmark",
+      "word_add_image",
+      "word_inspect_advanced",
+      "word_set_document_properties",
+      "word_manage_section",
+      "word_manage_style",
+      "word_set_tabs",
+      "word_set_numbering",
+      "word_format_table_advanced",
+      "word_add_nested_table",
+      "word_manage_drawing",
+      "word_add_shape",
+      "word_add_chart",
+      "word_add_math",
+      "word_add_ole_object",
+      "word_manage_fields",
+      "word_manage_long_document",
+      "word_manage_comments",
+      "word_manage_revisions",
+      "word_set_protection",
+      "word_manage_content_control",
+      "word_manage_custom_xml",
+      "word_inspect_macros",
+      "word_set_macros",
+      "word_set_watermark",
       "word_format_paragraphs",
       "word_set_paragraph_text",
       "word_delete_paragraphs",
@@ -49,6 +93,9 @@
     ]),
     slide: new Set([
       "slides_inspect",
+      "slides_inspect_layouts",
+      "slides_inspect_themes",
+      "slides_inspect_builtin_themes",
       "slides_replace_text",
       "slides_scale_font",
       "slides_format_text",
@@ -56,7 +103,44 @@
       "slides_add_slide",
       "slides_duplicate_slide",
       "slides_delete_slide",
+      "slides_move_slide",
+      "slides_set_visibility",
+      "slides_set_size",
+      "slides_apply_layout",
+      "slides_set_show_settings",
+      "slides_apply_theme",
+      "slides_apply_builtin_theme",
+      "slides_set_theme",
+      "slides_create_layout",
+      "slides_add_template_shape",
+      "slides_manage_template_object",
+      "slides_set_template_background",
+      "slides_set_text_content",
+      "slides_format_paragraphs",
+      "slides_update_object",
+      "slides_set_hyperlink",
+      "slides_set_notes",
+      "slides_add_comment",
+      "slides_inspect_comments",
+      "slides_manage_comment",
+      "slides_set_transition",
+      "slides_inspect_animations",
+      "slides_manage_animation",
+      "slides_add_table",
+      "slides_set_table_cell",
+      "slides_edit_table",
+      "slides_format_table",
+      "slides_align_objects",
+      "slides_group_objects",
+      "slides_reorder_object",
+      "slides_add_connector",
+      "slides_add_freeform",
       "slides_add_textbox",
+      "slides_add_word_art",
+      "slides_add_math",
+      "slides_add_image",
+      "slides_add_image_shape",
+      "slides_add_ole_object",
       "slides_inspect_objects",
       "slides_set_background",
       "slides_add_shape",
@@ -66,6 +150,9 @@
       "slides_add_chart",
       "slides_update_chart",
       "slides_delete_chart",
+      "slides_inspect_macros",
+      "slides_set_macros",
+      "slides_control_slideshow",
     ]),
     cell: new Set([
       "sheets_inspect",
@@ -80,6 +167,37 @@
       "sheets_inspect_charts",
       "sheets_update_chart",
       "sheets_delete_chart",
+      "sheets_inspect_range",
+      "sheets_set_array_formula",
+      "sheets_manage_sheet",
+      "sheets_manage_range",
+      "sheets_set_rich_text",
+      "sheets_inspect_names",
+      "sheets_manage_names",
+      "sheets_recalculate",
+      "sheets_sort",
+      "sheets_filter",
+      "sheets_inspect_tables",
+      "sheets_manage_table",
+      "sheets_manage_conditional_format",
+      "sheets_manage_validation",
+      "sheets_inspect_pivots",
+      "sheets_manage_pivot",
+      "sheets_inspect_drawings",
+      "sheets_manage_drawing",
+      "sheets_manage_hyperlink",
+      "sheets_inspect_comments",
+      "sheets_manage_comments",
+      "sheets_inspect_freeze_panes",
+      "sheets_manage_freeze_panes",
+      "sheets_inspect_properties",
+      "sheets_manage_properties",
+      "sheets_inspect_protected_ranges",
+      "sheets_manage_protected_ranges",
+      "sheets_inspect_page_layout",
+      "sheets_manage_page_layout",
+      "sheets_inspect_macros",
+      "sheets_set_macros",
     ]),
   };
 
@@ -96,6 +214,7 @@
     inFlight: new Set(),
     responseCache: new Map(),
     announceTimer: null,
+    defaultDocumentLanguageApplied: false,
   };
 
   function bridgeError(code, message, details) {
@@ -104,6 +223,16 @@
     error.code = code;
     error.details = details;
     return error;
+  }
+
+  function withErrorPhase(error, phase) {
+    const phasedError = error instanceof Error ? error : new Error(String(error));
+    const details = phasedError.details && typeof phasedError.details === "object"
+      ? { ...phasedError.details }
+      : {};
+    if (!details.phase) details.phase = phase;
+    phasedError.details = details;
+    return phasedError;
   }
 
   function errorPayload(error, requestId) {
@@ -163,7 +292,52 @@
       editorType: typeof config.editorType === "string" ? config.editorType : "",
       callbackUrl: typeof config.callbackUrl === "string" ? config.callbackUrl : "",
       userId: typeof config.userId === "string" ? config.userId : "",
+      interfaceLanguage: typeof config.interfaceLanguage === "string" ? config.interfaceLanguage : "",
+      region: typeof config.region === "string" ? config.region : "",
     };
+  }
+
+  function applyDefaultChineseDocumentLanguage() {
+    if (
+      state.editorType !== "word"
+      || !/^zh(?:-|$)/i.test(state.config.interfaceLanguage)
+      || state.defaultDocumentLanguageApplied
+    ) {
+      return;
+    }
+
+    state.defaultDocumentLanguageApplied = true;
+    try {
+      Asc.scope.aiBridgeDefaultDocumentLanguage = 0x0004;
+      Asc.plugin.callCommand(
+        function () {
+          try {
+            if (
+              typeof Asc === "undefined"
+              || !Asc.editor
+              || typeof Asc.editor.asc_setDefaultLanguage !== "function"
+            ) {
+              return JSON.stringify({
+                ok: false,
+                error: "ONLYOFFICE 默认文档语言 API 不可用",
+              });
+            }
+            Asc.editor.asc_setDefaultLanguage(Asc.scope.aiBridgeDefaultDocumentLanguage);
+            return JSON.stringify({ ok: true });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              error: error && error.message ? error.message : String(error),
+            });
+          }
+        },
+        false,
+        true,
+        function () {},
+      );
+    } catch (error) {
+      state.defaultDocumentLanguageApplied = false;
+    }
   }
 
   function capabilities() {
@@ -206,7 +380,57 @@
       if (!args || typeof args !== "object" || Array.isArray(args)) {
         throw bridgeError("INVALID_ARGUMENTS", `${name}.arguments 必须是对象`);
       }
-      if (JSON.stringify(args).length > 250000) throw bridgeError("ARGUMENTS_TOO_LARGE", `${name}.arguments 过大`);
+      if (
+        name === "word_add_image"
+        || name === "slides_add_image"
+        || name === "slides_add_image_shape"
+        || name === "word_add_ole_object"
+        || name === "slides_add_ole_object"
+        || (name === "sheets_manage_drawing" && args._image !== undefined)
+        || (name === "word_set_watermark" && args._image !== undefined)
+      ) {
+        if (args.source !== undefined) {
+          throw bridgeError("INVALID_IMAGE_SOURCE", "图片来源尚未经过宿主页安全导入");
+        }
+        const image = args._image;
+        let parsedImageUrl;
+        try {
+          parsedImageUrl = image && typeof image.url === "string" ? new URL(image.url) : null;
+        } catch (error) {
+          parsedImageUrl = null;
+        }
+        const signedSameOriginUrl = Boolean(
+          parsedImageUrl
+          && parsedImageUrl.origin !== "null"
+          && parsedImageUrl.origin === state.hostOrigin
+          && /^\/copilot-api\/images\/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)$/.test(parsedImageUrl.pathname)
+          && parsedImageUrl.searchParams.get("token")
+        );
+        const internalDataUrl = Boolean(
+          image
+          && image.transport === "dataUrl"
+          && typeof image.url === "string"
+          && /^data:(?:image\/(?:png|jpeg|gif|webp)|image\/svg\+xml);base64,[A-Za-z0-9+/]+={0,2}$/.test(image.url)
+          && /^[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)$/.test(String(image.assetId || ""))
+        );
+        if (
+          (!signedSameOriginUrl && !internalDataUrl)
+          || !Number.isFinite(Number(image.widthPx))
+          || !Number.isFinite(Number(image.heightPx))
+          || Number(image.widthPx) <= 0
+          || Number(image.heightPx) <= 0
+        ) {
+          throw bridgeError("INVALID_IMAGE_SOURCE", "内部图片资源无效或来源不受信任");
+        }
+      }
+      const argumentLimit = (
+        args._image && args._image.transport === "dataUrl"
+          ? 12000000
+          : 250000
+      );
+      if (JSON.stringify(args).length > argumentLimit) {
+        throw bridgeError("ARGUMENTS_TOO_LARGE", `${name}.arguments 过大`);
+      }
       return { id: rawCall.id || null, name, arguments: args };
     });
   }
@@ -255,6 +479,8 @@
           }
         },
       );
+    }).catch(function (error) {
+      throw withErrorPhase(error, "editor-save");
     });
   }
 
@@ -290,14 +516,6 @@
     });
   }
 
-  function storageVersionChanged(saved) {
-    if (!saved || !saved.persisted) return false;
-    if (saved.promoted === true) return true;
-    const before = Number(saved.beforeMtime);
-    const after = Number(saved.afterMtime);
-    return Number.isFinite(before) && Number.isFinite(after) && after > before + 0.0001;
-  }
-
   async function executeTools(toolCalls) {
     const mutating = toolCalls.some(function (call) { return !READ_ONLY_TOOLS.has(call.name); });
     if (mutating) await versionRequest("checkpoint");
@@ -313,7 +531,10 @@
     const saved = await forceSave();
     return {
       result: { ...result, forceSave: saved, persisted: Boolean(saved.persisted) },
-      reload: storageVersionChanged(saved),
+      // The live editor already contains this version. Force-save only persists
+      // it through CommandService/callback; reloading would discard the user's
+      // current page, selection, and scroll position.
+      reload: false,
     };
   }
 
@@ -329,7 +550,7 @@
       case "save": {
         await saveInsideEditor();
         const saved = await forceSave({ allowNoChanges: true });
-        return { result: saved, reload: storageVersionChanged(saved) };
+        return { result: saved, reload: false };
       }
       case "history":
         return { result: await versionRequest("history"), reload: false };
@@ -411,6 +632,7 @@
       window.clearInterval(state.announceTimer);
       state.announceTimer = null;
     }
+    applyDefaultChineseDocumentLanguage();
     publishReady();
   }
 

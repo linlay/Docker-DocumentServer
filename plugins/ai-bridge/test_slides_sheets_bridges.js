@@ -11,18 +11,26 @@ const slidesSource = fs.readFileSync(path.join(bridgeRoot, "bridges/slides-bridg
 const sheetsSource = fs.readFileSync(path.join(bridgeRoot, "bridges/sheets-bridge.js"), "utf8");
 
 function loadBridge(source, api) {
-  const sandbox = {
-    window: {},
-    Api: api,
-    Asc: {
-      scope: {},
-      plugin: {
-        info: {},
-        callCommand(command, _close, _calc, callback) {
-          callback(command());
-        },
+  const asc = {
+    scope: {},
+    plugin: {
+      info: {},
+      callCommand(command, _close, _calc, callback) {
+        callback(command());
+      },
+      executeMethod(method, params, callback) {
+        if (typeof api.__executeMethod === "function") {
+          api.__executeMethod(method, params, callback);
+          return;
+        }
+        callback(null);
       },
     },
+  };
+  const sandbox = {
+    window: { Asc: asc },
+    Api: api,
+    Asc: asc,
     console,
     JSON,
     Number,
@@ -62,6 +70,7 @@ class SlideParagraph {
     this.runs = text ? [new SlideRun(text)] : [];
     this.align = "left";
   }
+  GetParaPr() { return this; }
   GetElementsCount() { return this.runs.length; }
   GetElement(index) { return this.runs[index]; }
   AddText(text) {
@@ -70,6 +79,14 @@ class SlideParagraph {
     return run;
   }
   SetJc(value) { this.align = value; }
+  SetIndFirstLine(value) { this.firstLineIndent = value; }
+  SetIndLeft(value) { this.leftIndent = value; }
+  SetIndRight(value) { this.rightIndent = value; }
+  SetSpacingBefore(value, auto) { this.spacingBefore = [value, auto]; }
+  SetSpacingAfter(value, auto) { this.spacingAfter = [value, auto]; }
+  SetSpacingLine(value, rule) { this.spacingLine = [value, rule]; }
+  SetOutlineLvl(value) { this.outlineLevel = value; }
+  SetBullet(value) { this.bullet = value; }
 }
 
 class SlideContent {
@@ -130,6 +147,7 @@ class SlideShape {
     this.line = mockStroke(0, mockFill("none"));
     this.geometry = { preset: "rect", GetPreset() { return this.preset; } };
     this.parent = null;
+    this.hyperlink = null;
   }
   GetClassType() { return "shape"; }
   GetInternalId() { return this.internalId; }
@@ -158,6 +176,9 @@ class SlideShape {
   GetGeometry() { return this.geometry; }
   SetVerticalTextAlign(value) { this.verticalAlign = value; }
   SetPaddings(left, top, right, bottom) { this.paddings = [left, top, right, bottom]; }
+  SetPlaceholder(value) { this.placeholder = value; return true; }
+  SetHyperlink(value) { this.hyperlink = value; return true; }
+  GetHyperlink() { return this.hyperlink; }
   Delete() {
     if (!this.parent) return false;
     return this.parent.RemoveObject(this);
@@ -170,6 +191,50 @@ class SlideShape {
       fill: JSON.parse(this.fill.ToJSON()),
       line: JSON.parse(this.line.ToJSON()),
       geometry: this.geometry.GetPreset(),
+    });
+  }
+}
+
+class SlideImage extends SlideShape {
+  constructor(url, width, height) {
+    super();
+    this.url = url;
+    this.size = [width, height];
+  }
+  GetClassType() { return "image"; }
+  ToJSON() {
+    return JSON.stringify({
+      kind: "image",
+      id: this.internalId,
+      name: this.name,
+      url: this.url,
+      position: this.position,
+      size: this.size,
+      rotation: this.rotation,
+      flipH: this.flipH,
+      flipV: this.flipV,
+    });
+  }
+}
+
+class MockOleObject extends SlideShape {
+  constructor(url, width, height, data, applicationId) {
+    super();
+    this.url = url;
+    this.size = [width, height];
+    this.data = data;
+    this.applicationId = applicationId;
+  }
+  GetClassType() { return "oleObject"; }
+  GetApplicationId() { return this.applicationId; }
+  GetData() { return this.data; }
+  ToJSON() {
+    return JSON.stringify({
+      kind: "oleObject",
+      id: this.internalId,
+      name: this.name,
+      applicationId: this.applicationId,
+      data: this.data,
     });
   }
 }
@@ -278,26 +343,460 @@ class SlideChart {
   }
 }
 
+class MockLayout {
+  constructor(name, layoutType, master = null) {
+    this.name = name;
+    this.layoutType = layoutType;
+    this.drawings = [];
+    this.master = master;
+    this.background = null;
+  }
+  GetName() { return this.name; }
+  SetName(value) { this.name = value; return true; }
+  GetLayoutType() { return this.layoutType; }
+  GetMaster() { return this.master; }
+  GetAllDrawings() { return this.drawings; }
+  AddObject(drawing) { drawing.parent = this; this.drawings.push(drawing); return true; }
+  RemoveObject(drawing) {
+    const index = this.drawings.indexOf(drawing);
+    if (index < 0) return false;
+    this.drawings.splice(index, 1);
+    drawing.parent = null;
+    return true;
+  }
+  SetBackground(fill) { this.background = fill; return true; }
+  ClearBackground() { this.background = null; return true; }
+  FollowMasterBackground() { this.background = "master"; return true; }
+  ToJSON() { return JSON.stringify({ name: this.name, layoutType: this.layoutType }); }
+}
+
+class MockTheme {
+  constructor(name = "Office") {
+    this.name = name;
+    this.colorScheme = { name: "Office colors", ToJSON() { return JSON.stringify({ name: this.name }); } };
+    this.fontScheme = { name: "Office fonts", ToJSON() { return JSON.stringify({ name: this.name }); } };
+    this.formatScheme = { name: "Office format", ToJSON() { return JSON.stringify({ name: this.name }); } };
+  }
+  GetColorScheme() { return this.colorScheme; }
+  GetFontScheme() { return this.fontScheme; }
+  GetFormatScheme() { return this.formatScheme; }
+  SetColorScheme(value) { this.colorScheme = value; return true; }
+  SetFontScheme(value) { this.fontScheme = value; return true; }
+  ToJSON() { return JSON.stringify({ name: this.name }); }
+}
+
+class MockMaster {
+  constructor(layouts) {
+    this.layouts = layouts;
+    this.layouts.forEach(layout => { layout.master = this; });
+    this.drawings = [];
+    this.background = null;
+    this.theme = new MockTheme();
+  }
+  GetLayoutsCount() { return this.layouts.length; }
+  GetAllLayouts() { return this.layouts; }
+  GetLayout(index) { return this.layouts[index] || null; }
+  GetTheme() { return this.theme; }
+  GetAllDrawings() { return this.drawings; }
+  AddObject(drawing) { drawing.parent = this; this.drawings.push(drawing); return true; }
+  RemoveObject(drawing) {
+    const index = this.drawings.indexOf(drawing);
+    if (index < 0) return false;
+    this.drawings.splice(index, 1);
+    drawing.parent = null;
+    return true;
+  }
+  SetBackground(fill) { this.background = fill; return true; }
+  ClearBackground() { this.background = null; return true; }
+  ToJSON() { return JSON.stringify({ layouts: this.layouts.map(layout => layout.name) }); }
+}
+
+class MockTableCell {
+  constructor(text = "") {
+    this.content = new SlideContent(text);
+    this.fill = null;
+    this.verticalAlign = null;
+    this.borders = {};
+    this.row = null;
+  }
+  GetClassType() { return "tableCell"; }
+  GetContent() { return this.content; }
+  GetText() { return this.content.GetText(); }
+  SetText(text) {
+    this.content.RemoveAllElements();
+    this.content.Push(new SlideParagraph(String(text)));
+    return new SlideRun(String(text));
+  }
+  SetShd(fill) { this.fill = fill; }
+  SetVerticalAlign(value) { this.verticalAlign = value; }
+  SetCellBorderTop(width, fill) { this.borders.top = [width, fill]; }
+  SetCellBorderRight(width, fill) { this.borders.right = [width, fill]; }
+  SetCellBorderBottom(width, fill) { this.borders.bottom = [width, fill]; }
+  SetCellBorderLeft(width, fill) { this.borders.left = [width, fill]; }
+  Split(rows, columns) { this.split = [rows, columns]; return true; }
+}
+
+class MockTableRow {
+  constructor(count) {
+    this.cells = Array.from({ length: count }, () => new MockTableCell());
+    this.cells.forEach(cell => { cell.row = this; });
+    this.height = null;
+    this.table = null;
+  }
+  GetCell(index) { return this.cells[index] || null; }
+  GetCellsCount() { return this.cells.length; }
+  SetHeight(value) { this.height = value; return value; }
+  GetHeight() { return this.height; }
+}
+
+class MockTable {
+  constructor(rows, columns) {
+    this.rows = Array.from({ length: rows }, () => new MockTableRow(columns));
+    this.rows.forEach(row => { row.table = this; });
+    this.columnWidths = Array.from({ length: columns }, () => 360000);
+    this.position = [0, 0];
+    this.size = [3600000, 1800000];
+    this.rotation = 0;
+    this.flipH = false;
+    this.flipV = false;
+    this.name = "";
+    this.internalId = `drawing-${++drawingId}`;
+    this.parent = null;
+    this.tableLook = null;
+  }
+  GetClassType() { return "table"; }
+  GetInternalId() { return this.internalId; }
+  GetName() { return this.name; }
+  SetName(value) { this.name = value; }
+  GetRow(index) { return this.rows[index] || null; }
+  SetPosition(x, y) { this.position = [x, y]; }
+  GetPosX() { return this.position[0]; }
+  GetPosY() { return this.position[1]; }
+  SetSize(width, height) { this.size = [width, height]; }
+  GetWidth() { return this.size[0]; }
+  GetHeight() { return this.size[1]; }
+  SetRotation(value) { this.rotation = value; }
+  GetRotation() { return this.rotation; }
+  SetFlipH(value) { this.flipH = value; }
+  SetFlipV(value) { this.flipV = value; }
+  GetFlipH() { return this.flipH; }
+  GetFlipV() { return this.flipV; }
+  SetColumnWidth(index, value) { this.columnWidths[index] = value; return value; }
+  GetColumnWidth(index) { return this.columnWidths[index] ?? null; }
+  SetTableLook(...values) { this.tableLook = values; }
+  AddRow(cell, before) {
+    const currentColumns = Math.max(1, ...this.rows.map(row => row.cells.length));
+    const row = new MockTableRow(currentColumns);
+    row.table = this;
+    if (!cell) {
+      this.rows.push(row);
+      return row;
+    }
+    const index = this.rows.indexOf(cell.row);
+    this.rows.splice(before ? index : index + 1, 0, row);
+    return row;
+  }
+  AddColumn(cell, before) {
+    const column = cell ? cell.row.cells.indexOf(cell) : -1;
+    const target = column < 0 ? this.columnWidths.length : (before ? column : column + 1);
+    for (const row of this.rows) {
+      const inserted = new MockTableCell();
+      inserted.row = row;
+      row.cells.splice(target, 0, inserted);
+    }
+    this.columnWidths.splice(target, 0, 360000);
+  }
+  RemoveRow(cell) {
+    const index = this.rows.indexOf(cell.row);
+    if (index < 0 || this.rows.length <= 1) return false;
+    this.rows.splice(index, 1);
+    return true;
+  }
+  RemoveColumn(cell) {
+    const index = cell.row.cells.indexOf(cell);
+    if (index < 0 || this.columnWidths.length <= 1) return false;
+    for (const row of this.rows) row.cells.splice(index, 1);
+    this.columnWidths.splice(index, 1);
+    return true;
+  }
+  MergeCells(cells) {
+    if (cells.length < 2) return null;
+    this.mergedCells = cells;
+    return cells[0];
+  }
+  Delete() {
+    if (!this.parent) return false;
+    return this.parent.RemoveObject(this);
+  }
+  ToJSON() {
+    return JSON.stringify({
+      kind: "table",
+      name: this.name,
+      rows: this.rows.length,
+      columns: Math.max(...this.rows.map(row => row.cells.length)),
+    });
+  }
+}
+
+class MockGroup {
+  constructor(drawings) {
+    this.drawings = drawings;
+    this.name = "";
+    this.internalId = `drawing-${++drawingId}`;
+    this.parent = null;
+  }
+  GetClassType() { return "group"; }
+  GetInternalId() { return this.internalId; }
+  GetName() { return this.name; }
+  SetName(value) { this.name = value; }
+  GetPosX() { return Math.min(...this.drawings.map(drawing => drawing.GetPosX())); }
+  GetPosY() { return Math.min(...this.drawings.map(drawing => drawing.GetPosY())); }
+  GetWidth() {
+    const left = this.GetPosX();
+    return Math.max(...this.drawings.map(drawing => drawing.GetPosX() + drawing.GetWidth())) - left;
+  }
+  GetHeight() {
+    const top = this.GetPosY();
+    return Math.max(...this.drawings.map(drawing => drawing.GetPosY() + drawing.GetHeight())) - top;
+  }
+  GetRotation() { return 0; }
+  GetFlipH() { return false; }
+  GetFlipV() { return false; }
+  Ungroup() {
+    if (!this.parent) return false;
+    const slide = this.parent;
+    slide.RemoveObject(this);
+    for (const drawing of this.drawings) slide.AddObject(drawing);
+    return true;
+  }
+  ToJSON() { return JSON.stringify({ kind: "group", name: this.name, count: this.drawings.length }); }
+}
+
+class MockCustomPath {
+  constructor() {
+    this.commands = [];
+  }
+  SetWidth(value) { this.width = value; }
+  SetHeight(value) { this.height = value; }
+  SetStroke(value) { this.stroke = value; }
+  SetFill(value) { this.fill = value; }
+  MoveTo(...values) { this.commands.push(["moveTo", ...values]); }
+  LineTo(...values) { this.commands.push(["lineTo", ...values]); }
+  QuadBezTo(...values) { this.commands.push(["quadBezTo", ...values]); }
+  CubicBezTo(...values) { this.commands.push(["cubicBezTo", ...values]); }
+  ArcTo(...values) { this.commands.push(["arcTo", ...values]); }
+  Close() { this.commands.push(["close"]); }
+}
+
+class MockCustomGeometry {
+  constructor() {
+    this.paths = [];
+  }
+  AddPath() {
+    const path = new MockCustomPath();
+    this.paths.push(path);
+    return path;
+  }
+  GetPreset() { return null; }
+  IsCustom() { return true; }
+}
+
+class MockAnimationEffect {
+  constructor(sequence, shape, effectType, trigger) {
+    this.sequence = sequence;
+    this.shape = shape;
+    this.effectType = effectType;
+    this.trigger = trigger;
+    this.duration = 500;
+    this.delay = 0;
+    this.repeatCount = 1;
+  }
+  GetShape() { return this.shape; }
+  GetEffectType() { return this.effectType; }
+  GetTriggerType() { return this.trigger; }
+  SetTriggerType(value) { this.trigger = value; return true; }
+  GetDuration() { return this.duration; }
+  SetDuration(value) { this.duration = value; return true; }
+  GetDelay() { return this.delay; }
+  SetDelay(value) { this.delay = value; return true; }
+  GetRepeatCount() { return this.repeatCount; }
+  SetRepeatCount(value) { this.repeatCount = value; return true; }
+  MoveTo(index) {
+    const current = this.sequence.effects.indexOf(this);
+    if (current < 0 || index < 0) return false;
+    this.sequence.effects.splice(current, 1);
+    this.sequence.effects.splice(Math.min(index, this.sequence.effects.length), 0, this);
+    return true;
+  }
+  Delete() {
+    const index = this.sequence.effects.indexOf(this);
+    if (index < 0) return false;
+    this.sequence.effects.splice(index, 1);
+    return true;
+  }
+}
+
+class MockAnimationSequence {
+  constructor() { this.effects = []; }
+  AddEffect(shape, effectType, trigger) {
+    const effect = new MockAnimationEffect(this, shape, effectType, trigger);
+    this.effects.push(effect);
+    return effect;
+  }
+  GetCount() { return this.effects.length; }
+  RemoveAllEffects() { this.effects.splice(0); return true; }
+}
+
+class MockTimeline {
+  constructor() {
+    this.main = new MockAnimationSequence();
+    this.interactive = [];
+  }
+  GetMainSequence() { return this.main; }
+  AddInteractiveSequence(trigger) {
+    let entry = this.interactive.find(item => item.trigger === trigger);
+    if (!entry) {
+      entry = { trigger, sequence: new MockAnimationSequence() };
+      this.interactive.push(entry);
+    }
+    return entry.sequence;
+  }
+  GetInteractiveSequences() { return this.interactive.map(item => item.sequence); }
+  GetAllEffects() {
+    return [
+      ...this.main.effects,
+      ...this.interactive.flatMap(item => item.sequence.effects),
+    ];
+  }
+}
+
+let commentId = 0;
+
+class MockComment {
+  constructor(presentation, x, y, text, author = "", userId = "", parent = null) {
+    this.presentation = presentation;
+    this.position = [x, y];
+    this.text = text;
+    this.author = author;
+    this.userId = userId;
+    this.parent = parent;
+    this.id = `comment-${++commentId}`;
+    this.solved = false;
+    this.replies = [];
+  }
+  GetId() { return this.id; }
+  GetText() { return this.text; }
+  SetText(value) { this.text = value; return true; }
+  GetAuthorName() { return this.author; }
+  SetAuthorName(value) { this.author = value; return true; }
+  GetUserId() { return this.userId; }
+  SetUserId(value) { this.userId = value; return true; }
+  GetPosition() { return this.position; }
+  SetPosition(x, y) { this.position = [x, y]; return true; }
+  GetTime() { return "2026-07-23T00:00:00"; }
+  GetTimeUTC() { return "2026-07-22T16:00:00Z"; }
+  IsSolved() { return this.solved; }
+  SetSolved(value) { this.solved = value; return true; }
+  GetRepliesCount() { return this.replies.length; }
+  GetReply(index) { return this.replies[index] || null; }
+  AddReply(text, author, userId) {
+    const reply = new MockComment(this.presentation, 0, 0, text, author, userId, this);
+    this.replies.push(reply);
+    return reply;
+  }
+  RemoveReplies(start, count) {
+    this.replies.splice(start, count);
+    return true;
+  }
+  Delete() {
+    const collection = this.parent ? this.parent.replies : this.presentation.comments;
+    const index = collection.indexOf(this);
+    if (index < 0) return false;
+    collection.splice(index, 1);
+    return true;
+  }
+}
+
 class MockSlide {
   constructor(presentation, texts = []) {
     this.presentation = presentation;
     this.shapes = texts.map(text => new SlideShape(text));
     this.shapes.forEach(shape => { shape.parent = this; });
     this.charts = [];
+    this.images = [];
+    this.tables = [];
+    this.groups = [];
     this.background = null;
+    this.visible = true;
+    this.layout = presentation.masters[0].GetLayout(0);
+    this.notesBody = new SlideShape();
+    this.transition = null;
+    this.timeline = new MockTimeline();
   }
   GetAllShapes() { return this.shapes; }
   GetAllCharts() { return this.charts; }
-  GetAllDrawings() { return [...this.shapes, ...this.charts]; }
-  GetWidth() { return 9144000; }
-  GetHeight() { return 5143500; }
+  GetAllImages() { return this.images; }
+  GetAllTables() { return this.tables; }
+  GetAllDrawings() { return [...this.shapes, ...this.charts, ...this.images, ...this.tables, ...this.groups]; }
+  GetWidth() { return this.presentation.width; }
+  GetHeight() { return this.presentation.height; }
+  GetVisible() { return this.visible; }
+  SetVisible(value) { this.visible = Boolean(value); return true; }
+  GetLayout() { return this.layout; }
+  ApplyLayout(layout) { this.layout = layout; return true; }
+  GetTheme() { return this.theme || this.layout.GetMaster().GetTheme(); }
+  ApplyTheme(theme) { this.theme = theme; return true; }
+  GetNotesPage() {
+    return {
+      GetBodyShape: () => this.notesBody,
+      GetBodyShapeText: () => this.notesBody.GetContent().GetText(),
+    };
+  }
+  AddNotesText(text) {
+    const paragraph = new SlideParagraph(String(text));
+    this.notesBody.GetContent().Push(paragraph);
+    return true;
+  }
+  AddComment(x, y, text, author, userId) {
+    const comment = new MockComment(this.presentation, x, y, text, author, userId);
+    this.presentation.comments.push(comment);
+    return comment;
+  }
+  GetTimeLine() { return this.timeline; }
+  Select() { this.presentation.selectedSlide = this; return true; }
+  GetSlideShowTransition() { return this.transition; }
+  SetSlideShowTransition(value) { this.transition = value; return true; }
+  MoveTo(index) {
+    const current = this.presentation.slides.indexOf(this);
+    if (current < 0 || index < 0 || index >= this.presentation.slides.length) return false;
+    this.presentation.slides.splice(current, 1);
+    this.presentation.slides.splice(index, 0, this);
+    return true;
+  }
+  GroupDrawings(drawings) {
+    for (const drawing of drawings) {
+      if (!this.RemoveObject(drawing)) return null;
+    }
+    const group = new MockGroup(drawings);
+    this.AddObject(group);
+    return group;
+  }
   AddObject(shape) {
     shape.parent = this;
     if (shape.GetClassType() === "chart") this.charts.push(shape);
+    else if (shape.GetClassType() === "image") this.images.push(shape);
+    else if (shape.GetClassType() === "table") this.tables.push(shape);
+    else if (shape.GetClassType() === "group") this.groups.push(shape);
     else this.shapes.push(shape);
   }
   RemoveObject(shape) {
-    const collection = shape.GetClassType() === "chart" ? this.charts : this.shapes;
+    const collection = shape.GetClassType() === "chart"
+      ? this.charts
+      : shape.GetClassType() === "image"
+        ? this.images
+        : shape.GetClassType() === "table"
+          ? this.tables
+          : shape.GetClassType() === "group" ? this.groups : this.shapes;
     const index = collection.indexOf(shape);
     if (index < 0) return false;
     collection.splice(index, 1);
@@ -309,7 +808,15 @@ class MockSlide {
   ClearBackground() { this.background = null; }
   FollowLayoutBackground() { this.background = "layout"; }
   FollowMasterBackground() { this.background = "master"; }
-  ToJSON() { return JSON.stringify({ shapes: this.shapes.length, charts: this.charts.length }); }
+  ToJSON() {
+    return JSON.stringify({
+      shapes: this.shapes.length,
+      charts: this.charts.length,
+      images: this.images.length,
+      tables: this.tables.length,
+      groups: this.groups.length,
+    });
+  }
   Duplicate() {
     const copy = new MockSlide(this.presentation, this.shapes.map(shape => shape.GetContent().GetText()));
     const index = this.presentation.slides.indexOf(this);
@@ -325,13 +832,44 @@ class MockSlide {
 }
 
 function slidesHarness() {
+  const layouts = [
+    new MockLayout("Title Slide", "title"),
+    new MockLayout("Title and Content", "obj"),
+  ];
   const presentation = {
     slides: [],
+    masters: [new MockMaster(layouts)],
+    width: 9144000,
+    height: 5143500,
+    loop: false,
+    comments: [],
+    pluginCalls: [],
     historyPoints: 0,
     GetSlidesCount() { return this.slides.length; },
     GetAllSlides() { return this.slides; },
     GetSlideByIndex(index) { return this.slides[index]; },
     GetCurSlideIndex() { return 0; },
+    GetWidth() { return this.width; },
+    GetHeight() { return this.height; },
+    SetSizes(width, height) { this.width = width; this.height = height; return true; },
+    GetMastersCount() { return this.masters.length; },
+    GetAllSlideMasters() { return this.masters; },
+    GetMaster(index) { return this.masters[index] || null; },
+    GetLoopUntilStopped() { return this.loop; },
+    SetLoopUntilStopped(value) { this.loop = Boolean(value); return true; },
+    ApplyTheme(theme) {
+      this.appliedTheme = theme;
+      this.slides.forEach(slide => { slide.theme = theme; });
+      return true;
+    },
+    GetAllComments() { return this.comments; },
+    AddMathEquation(text, format) {
+      const slide = this.selectedSlide || this.slides[this.GetCurSlideIndex()];
+      const equation = new SlideShape(text);
+      equation.mathFormat = format;
+      slide.AddObject(equation);
+      return true;
+    },
     CreateNewHistoryPoint() { this.historyPoints += 1; },
     AddSlide(slide, index) {
       if (Number.isInteger(index)) this.slides.splice(index, 0, slide);
@@ -353,6 +891,7 @@ function slidesHarness() {
     CreateLinearGradientFill: (stops, angle) => mockFill("linearGradient", { stops, angle }),
     CreateRadialGradientFill: stops => mockFill("radialGradient", { stops }),
     CreatePatternFill: (pattern, background, foreground) => mockFill("pattern", { pattern, background, foreground }),
+    CreateBlipFill: (url, mode) => mockFill("blip", { url, mode }),
     CreateStroke: (width, fill) => mockStroke(width, fill),
     CreateShape: (type, width, height, fill, line) => {
       const shape = new SlideShape();
@@ -362,8 +901,84 @@ function slidesHarness() {
       shape.line = line;
       return shape;
     },
+    CreatePlaceholder: type => ({ type }),
+    CreateLayout: master => {
+      const layout = new MockLayout("", "custom", master);
+      master.layouts.push(layout);
+      return layout;
+    },
+    CreateThemeColorScheme: (colors, name) => ({
+      colors,
+      name,
+      ToJSON() { return JSON.stringify({ colors: this.colors, name: this.name }); },
+    }),
+    CreateThemeFontScheme: (majorLatin, majorEastAsian, majorComplex, minorLatin, minorEastAsian, minorComplex, name) => ({
+      majorLatin,
+      majorEastAsian,
+      majorComplex,
+      minorLatin,
+      minorEastAsian,
+      minorComplex,
+      name,
+      ToJSON() {
+        return JSON.stringify({
+          majorLatin: this.majorLatin,
+          majorEastAsian: this.majorEastAsian,
+          majorComplex: this.majorComplex,
+          minorLatin: this.minorLatin,
+          minorEastAsian: this.minorEastAsian,
+          minorComplex: this.minorComplex,
+          name: this.name,
+        });
+      },
+    }),
     CreatePresetGeometry: type => ({ preset: type, GetPreset() { return this.preset; } }),
+    CreateBullet: symbol => ({ kind: "bullet", symbol }),
+    CreateNumbering: (type, startAt) => ({ kind: "number", type, startAt }),
+    CreateHyperlink: (link, tooltip) => ({ link, tooltip }),
+    CreateSlideShowTransition: () => ({
+      effect: null,
+      speed: null,
+      duration: null,
+      advanceOnClick: null,
+      advanceOnTime: null,
+      advanceTime: null,
+      SetEntryEffect(value) { this.effect = value; return true; },
+      GetEntryEffect() { return this.effect; },
+      SetSpeed(value) { this.speed = value; return true; },
+      GetSpeed() { return this.speed; },
+      SetDuration(value) { this.duration = value; return true; },
+      GetDuration() { return this.duration; },
+      SetAdvanceOnClick(value) { this.advanceOnClick = value; return true; },
+      GetAdvanceOnClick() { return this.advanceOnClick; },
+      SetAdvanceOnTime(value) { this.advanceOnTime = value; return true; },
+      GetAdvanceOnTime() { return this.advanceOnTime; },
+      SetAdvanceTime(value) { this.advanceTime = value; return true; },
+      GetAdvanceTime() { return this.advanceTime; },
+    }),
     CreateChart: (...args) => new SlideChart(...args),
+    CreateImage: (url, width, height) => new SlideImage(url, width, height),
+    CreateTextPr: () => ({
+      SetFontSize(value) { this.fontSize = value; },
+      SetFontFamily(value) { this.fontFamily = value; },
+      SetBold(value) { this.bold = value; },
+      SetItalic(value) { this.italic = value; },
+      SetUnderline(value) { this.underline = value; },
+      SetCaps(value) { this.caps = value; },
+      SetColor(value) { this.color = value; },
+    }),
+    CreateWordArt: (_textPr, text, transform, fill, line, rotation, width, height) => {
+      const shape = new SlideShape(text);
+      shape.wordArtTransform = transform;
+      shape.fill = fill;
+      shape.line = line;
+      shape.rotation = rotation;
+      shape.size = [width, height];
+      return shape;
+    },
+    CreateOleObject: (...args) => new MockOleObject(...args),
+    CreateTable: (rows, columns) => new MockTable(rows, columns),
+    CreateCustomGeometry: () => new MockCustomGeometry(),
     FromJSON: raw => {
       if (typeof raw === "string") raw = JSON.parse(raw);
       if (!raw || typeof raw !== "object") return null;
@@ -373,8 +988,26 @@ function slidesHarness() {
     },
     CreateParagraph: () => new SlideParagraph(),
     CreateSlide: () => new MockSlide(presentation),
+    __executeMethod(method, params, callback) {
+      presentation.pluginCalls.push([method, params]);
+      const values = {
+        GetEditorThemes: JSON.stringify([{ id: 7, name: "Ion" }]),
+        ApplyTheme: true,
+        GetMacros: JSON.stringify({ macrosArray: [] }),
+        GetVBAMacros: "Sub Main()\nEnd Sub",
+        SetMacros: true,
+        StartSlideShow: true,
+        EndSlideShow: true,
+        PauseSlideShow: true,
+        ResumeSlideShow: true,
+        GoToNextSlideInSlideShow: true,
+        GoToPreviousSlideInSlideShow: true,
+        GoToSlideInSlideShow: true,
+      };
+      callback(values[method]);
+    },
   };
-  return { bridge: loadBridge(slidesSource, api).slide, presentation, first, selection };
+  return { bridge: loadBridge(slidesSource, api).slide, presentation, first, second, selection };
 }
 
 class MockRange {
@@ -622,6 +1255,529 @@ test("Slides bridge executes every public Slides tool in one history point", asy
   assert.equal(first.shapes.at(-1).GetContent().GetText(), "bridge-added");
 });
 
+test("Slides bridge adds a centered proportional image and exposes it to inspect/delete", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  const asset = {
+    url: "https://app.test/copilot-api/images/asset.png?token=signed",
+    assetId: "asset.png",
+    widthPx: 800,
+    heightPx: 600,
+  };
+  const result = await bridge.execute([
+    {
+      name: "slides_add_image",
+      arguments: {
+        slide: 1,
+        _image: asset,
+        rotationDeg: 15,
+        flipH: true,
+        name: "产品截图",
+      },
+    },
+    { name: "slides_inspect_objects", arguments: { slide: 1 } },
+    { name: "slides_delete_object", arguments: { slide: 1, name: "产品截图" } },
+  ]);
+
+  const added = result.results[0].object;
+  assert.equal(result.changed, 2);
+  assert.equal(result.needsSave, true);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(added.kind, "image");
+  assert.equal(added.name, "产品截图");
+  assert.equal(added.widthMm, 120);
+  assert.equal(added.heightMm, 90);
+  assert.ok(Math.abs(added.xMm - 67) < 0.001);
+  assert.ok(Math.abs(added.yMm - 26.4375) < 0.001);
+  assert.equal(added.rotationDeg, 15);
+  assert.equal(added.flipH, true);
+  assert.equal(result.results[1].slides[0].objects.at(-1).kind, "image");
+  assert.equal(first.images.length, 0);
+});
+
+test("Slides bridge derives one dimension and only stretches when ratio preservation is disabled", async () => {
+  const { bridge, first } = slidesHarness();
+  const asset = {
+    url: "https://app.test/copilot-api/images/asset.png?token=signed",
+    widthPx: 400,
+    heightPx: 200,
+  };
+  const result = await bridge.execute([
+    {
+      name: "slides_add_image",
+      arguments: {
+        slide: 1,
+        _image: asset,
+        widthMm: 80,
+        xMm: 10,
+        yMm: 20,
+      },
+    },
+    {
+      name: "slides_add_image",
+      arguments: {
+        slide: 1,
+        _image: asset,
+        widthMm: 80,
+        heightMm: 80,
+        preserveAspectRatio: false,
+        flipV: true,
+      },
+    },
+  ]);
+
+  assert.equal(result.results[0].object.widthMm, 80);
+  assert.equal(result.results[0].object.heightMm, 40);
+  assert.equal(result.results[0].object.xMm, 10);
+  assert.equal(result.results[0].object.yMm, 20);
+  assert.equal(result.results[1].object.widthMm, 80);
+  assert.equal(result.results[1].object.heightMm, 80);
+  assert.equal(result.results[1].object.flipV, true);
+  assert.equal(first.images.length, 2);
+});
+
+test("Slides bridge crops an image to a preset shape and applies a border", async () => {
+  const { bridge, first } = slidesHarness();
+  const asset = {
+    url: "https://app.test/copilot-api/images/vector.svg?token=signed",
+    assetId: "vector.svg",
+    widthPx: 400,
+    heightPx: 200,
+  };
+  const result = await bridge.execute([
+    {
+      name: "slides_add_image_shape",
+      arguments: {
+        slide: 1,
+        _image: asset,
+        shapeType: "ellipse",
+        widthMm: 60,
+        heightMm: 60,
+        preserveAspectRatio: false,
+        line: { widthPt: 2, color: "#336699" },
+        name: "Avatar",
+      },
+    },
+    {
+      name: "slides_update_object",
+      arguments: {
+        slide: 1,
+        name: "Avatar",
+        line: { widthPt: 3, color: "#AA3300" },
+      },
+    },
+  ]);
+
+  assert.equal(result.changed, 2);
+  assert.equal(result.results[0].object.kind, "shape");
+  assert.equal(result.results[0].object.shapeType, "ellipse");
+  assert.equal(result.results[0].object.fill.type, "blip");
+  assert.equal(result.results[0].object.widthMm, 60);
+  assert.equal(result.results[0].object.heightMm, 60);
+  assert.equal(result.results[1].object.line.widthPt, 3);
+  assert.equal(first.shapes.at(-1).GetName(), "Avatar");
+});
+
+test("Slides bridge rejects an invalid slide before creating an image", async () => {
+  const { bridge, first } = slidesHarness();
+  await assert.rejects(
+    bridge.execute([{
+      name: "slides_add_image",
+      arguments: {
+        slide: 99,
+        _image: {
+          url: "https://app.test/copilot-api/images/asset.png?token=signed",
+          widthPx: 100,
+          heightPx: 100,
+        },
+      },
+    }]),
+    /页码超出范围/,
+  );
+  assert.equal(first.images.length, 0);
+});
+
+test("Slides bridge inspects layouts and changes order, visibility, size, layout, and loop settings", async () => {
+  const { bridge, presentation, first, second } = slidesHarness();
+  const result = await bridge.execute([
+    { name: "slides_inspect_layouts", arguments: {} },
+    { name: "slides_apply_layout", arguments: { slide: 1, masterIndex: 1, layoutIndex: 2 } },
+    { name: "slides_set_visibility", arguments: { slide: 2, visible: false } },
+    { name: "slides_move_slide", arguments: { slide: 2, toIndex: 1 } },
+    {
+      name: "slides_set_size",
+      arguments: { preset: "custom", widthMm: 300, heightMm: 170, orientation: "landscape" },
+    },
+    { name: "slides_set_show_settings", arguments: { loop: true } },
+    { name: "slides_inspect", arguments: {} },
+  ]);
+
+  assert.equal(result.changed, 5);
+  assert.equal(result.needsSave, true);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(result.results[0].masters[0].layouts[1].name, "Title and Content");
+  assert.equal(first.GetLayout().GetName(), "Title and Content");
+  assert.equal(second.GetVisible(), false);
+  assert.equal(presentation.slides[0], second);
+  assert.equal(Math.round(presentation.GetWidth() / 36000), 300);
+  assert.equal(Math.round(presentation.GetHeight() / 36000), 170);
+  assert.equal(presentation.GetLoopUntilStopped(), true);
+  assert.equal(result.results[6].slides[0].visible, false);
+  assert.equal(result.results[6].loopUntilStopped, true);
+});
+
+test("Slides bridge inspects and customizes themes, masters, and layouts", async () => {
+  const { bridge, presentation, first, second } = slidesHarness();
+  const colors = [
+    "#111111", "#FFFFFF", "#222222", "#F5F5F5",
+    "#0066CC", "#CC3300", "#008866", "#993399",
+    "#FF9900", "#33AACC", "#0000EE", "#551A8B",
+  ];
+  const result = await bridge.execute([
+    { name: "slides_inspect_themes", arguments: { includeRaw: true } },
+    {
+      name: "slides_set_theme",
+      arguments: {
+        masterIndex: 1,
+        colors,
+        colorSchemeName: "AI Bridge",
+        fonts: {
+          majorLatin: "Aptos Display",
+          minorLatin: "Aptos",
+          majorEastAsian: "思源黑体",
+          minorEastAsian: "思源黑体",
+          name: "AI Bridge fonts",
+        },
+      },
+    },
+    {
+      name: "slides_create_layout",
+      arguments: {
+        masterIndex: 1,
+        name: "AI Two Column",
+        followMasterBackground: true,
+        placeholders: [
+          { type: "title", text: "Title", xMm: 15, yMm: 10, widthMm: 220, heightMm: 25 },
+          { type: "body", xMm: 15, yMm: 45, widthMm: 110, heightMm: 100 },
+        ],
+        applyToSlides: [1],
+      },
+    },
+    {
+      name: "slides_add_template_shape",
+      arguments: {
+        scope: "master",
+        masterIndex: 1,
+        shapeType: "rect",
+        name: "Brand bar",
+        xMm: 0,
+        yMm: 180,
+        widthMm: 254,
+        heightMm: 10,
+        fill: { type: "solid", color: "#0066CC" },
+      },
+    },
+    {
+      name: "slides_set_template_background",
+      arguments: { scope: "layout", masterIndex: 1, layoutIndex: 3, mode: "master" },
+    },
+    {
+      name: "slides_apply_theme",
+      arguments: { sourceMasterIndex: 1, targetSlide: 2 },
+    },
+    {
+      name: "slides_manage_template_object",
+      arguments: {
+        scope: "master",
+        masterIndex: 1,
+        action: "update",
+        name: "Brand bar",
+        newName: "Brand bar updated",
+        heightMm: 12,
+        fill: { type: "solid", color: "#CC3300" },
+      },
+    },
+    { name: "slides_inspect_layouts", arguments: { includeObjects: true } },
+    {
+      name: "slides_manage_template_object",
+      arguments: {
+        scope: "master",
+        masterIndex: 1,
+        action: "delete",
+        name: "Brand bar updated",
+      },
+    },
+  ]);
+
+  const master = presentation.GetMaster(0);
+  const layout = master.GetLayout(2);
+  assert.equal(result.changed, 7);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(result.results[0].masters[0].theme.raw.name, "Office");
+  assert.equal(master.GetTheme().GetColorScheme().name, "AI Bridge");
+  assert.equal(master.GetTheme().GetFontScheme().majorLatin, "Aptos Display");
+  assert.equal(layout.GetName(), "AI Two Column");
+  assert.equal(layout.GetAllDrawings().length, 2);
+  assert.equal(layout.GetAllDrawings()[0].placeholder.type, "title");
+  assert.equal(layout.background, "master");
+  assert.equal(first.GetLayout(), layout);
+  assert.equal(result.results[7].masters[0].drawings[0].name, "Brand bar updated");
+  assert.equal(result.results[7].masters[0].drawings[0].heightMm, 12);
+  assert.equal(master.GetAllDrawings().length, 0);
+  assert.equal(second.GetTheme(), master.GetTheme());
+});
+
+test("Slides bridge manages rich paragraphs, object links, notes, comments, and transitions", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  first.shapes[0].SetName("Agenda");
+  const result = await bridge.execute([
+    {
+      name: "slides_set_text_content",
+      arguments: {
+        slide: 1,
+        name: "Agenda",
+        paragraphs: [
+          { text: "Agenda", fontSize: 28, bold: true, align: "center" },
+          { text: "Discover", listType: "bullet", bulletSymbol: "•", level: 0 },
+          {
+            text: "Decide",
+            listType: "number",
+            numberingType: "ArabicPeriod",
+            startAt: 1,
+            level: 1,
+          },
+        ],
+      },
+    },
+    {
+      name: "slides_format_paragraphs",
+      arguments: {
+        slide: 1,
+        name: "Agenda",
+        paragraphIndexes: [2],
+        leftIndentMm: 8,
+        spacingAfterPt: 6,
+        lineSpacing: 1.2,
+        lineRule: "auto",
+        italic: true,
+      },
+    },
+    {
+      name: "slides_update_object",
+      arguments: { slide: 1, name: "Agenda", xMm: 20, yMm: 25, widthMm: 180, heightMm: 75, rotationDeg: 3 },
+    },
+    {
+      name: "slides_set_hyperlink",
+      arguments: { slide: 1, name: "Agenda", action: "slide", targetSlide: 2, tooltip: "Next topic" },
+    },
+    { name: "slides_set_notes", arguments: { slide: 1, text: "Mention the decision criteria." } },
+    {
+      name: "slides_add_comment",
+      arguments: { slide: 1, text: "Confirm wording", xMm: 12, yMm: 14, author: "AI Bridge", userId: "ai" },
+    },
+    {
+      name: "slides_set_transition",
+      arguments: {
+        slide: 1,
+        effect: "effectFade",
+        speed: "medium",
+        durationMs: 600,
+        advanceOnClick: true,
+        advanceOnTime: true,
+        advanceTimeMs: 3500,
+      },
+    },
+    { name: "slides_inspect", arguments: {} },
+  ]);
+
+  const paragraphs = first.shapes[0].GetContent().GetAllParagraphs();
+  assert.equal(result.changed, 7);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(paragraphs.length, 3);
+  assert.equal(paragraphs[0].align, "center");
+  assert.equal(paragraphs[1].bullet.symbol, "•");
+  assert.equal(paragraphs[1].leftIndent, Math.round(8 * 1440 / 25.4));
+  assert.equal(paragraphs[1].spacingAfter[0], 120);
+  assert.deepEqual(paragraphs[1].spacingLine, [288, "auto"]);
+  assert.equal(paragraphs[1].runs[0].format.italic, true);
+  assert.equal(paragraphs[2].bullet.kind, "number");
+  assert.equal(first.shapes[0].GetPosX(), 20 * 36000);
+  assert.equal(first.shapes[0].GetHyperlink().link, "ppaction://hlinksldjumpslide1");
+  assert.equal(first.GetNotesPage().GetBodyShapeText(), "Mention the decision criteria.");
+  assert.equal(presentation.comments.length, 1);
+  assert.equal(first.GetSlideShowTransition().GetEntryEffect(), "effectFade");
+  assert.equal(result.results[7].slides[0].notes, "Mention the decision criteria.");
+  assert.equal(result.results[7].slides[0].transition.advanceTimeMs, 3500);
+  assert.equal(result.results[7].commentCount, 1);
+});
+
+test("Slides bridge creates, edits, merges, and formats tables", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  const result = await bridge.execute([
+    {
+      name: "slides_add_table",
+      arguments: {
+        slide: 1,
+        rows: 2,
+        columns: 2,
+        name: "Metrics",
+        data: [["Metric", "Value"], ["Revenue", "42"]],
+        xMm: 20,
+        yMm: 35,
+        widthMm: 180,
+        heightMm: 45,
+        header: { bold: true, backgroundColor: "#DDEEFF", align: "center" },
+      },
+    },
+    {
+      name: "slides_set_table_cell",
+      arguments: {
+        slide: 1,
+        name: "Metrics",
+        row: 2,
+        column: 2,
+        text: "43",
+        backgroundColor: "#FFF2CC",
+        verticalAlign: "center",
+      },
+    },
+    {
+      name: "slides_edit_table",
+      arguments: { slide: 1, name: "Metrics", action: "addRow", row: 1, position: "after" },
+    },
+    {
+      name: "slides_edit_table",
+      arguments: { slide: 1, name: "Metrics", action: "addColumn", row: 1, column: 1, position: "after" },
+    },
+    {
+      name: "slides_edit_table",
+      arguments: {
+        slide: 1,
+        name: "Metrics",
+        action: "mergeCells",
+        rowStart: 1,
+        rowEnd: 1,
+        columnStart: 1,
+        columnEnd: 2,
+      },
+    },
+    {
+      name: "slides_edit_table",
+      arguments: {
+        slide: 1,
+        name: "Metrics",
+        action: "splitCell",
+        row: 2,
+        column: 2,
+        rows: 2,
+        columns: 2,
+      },
+    },
+    {
+      name: "slides_format_table",
+      arguments: {
+        slide: 1,
+        name: "Metrics",
+        columnWidthsMm: [70, 40, 70],
+        rowHeightsMm: [14, 12, 12],
+        tableLook: { firstRow: true, horizontalBanding: true },
+        border: { widthMm: 0.5, color: "#333333" },
+        fontSize: 12,
+      },
+    },
+    { name: "slides_inspect_objects", arguments: { slide: 1, kinds: ["table"], includeRaw: true } },
+  ]);
+
+  const table = first.tables[0];
+  assert.equal(result.changed, 7);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(table.GetName(), "Metrics");
+  assert.equal(table.GetRow(2).GetCell(2).GetText(), "43");
+  assert.equal(table.rows.length, 3);
+  assert.equal(table.columnWidths.length, 3);
+  assert.equal(table.mergedCells.length, 2);
+  assert.deepEqual(table.GetRow(1).GetCell(1).split, [2, 2]);
+  assert.equal(table.GetColumnWidth(0), 70 * 36000);
+  assert.equal(table.GetRow(0).GetHeight(), 14 * 36000);
+  assert.equal(table.GetRow(0).GetCell(0).borders.top[0], 0.5);
+  assert.equal(result.results[7].slides[0].objects[0].kind, "table");
+  assert.equal(result.results[7].slides[0].objects[0].rows, 3);
+  assert.equal(result.results[7].slides[0].objects[0].columns, 3);
+});
+
+test("Slides bridge aligns, distributes, groups, reorders, and creates custom geometry", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  first.shapes[0].SetName("A");
+  first.shapes[1].SetName("B");
+  first.shapes[0].SetPosition(10 * 36000, 20 * 36000);
+  first.shapes[1].SetPosition(100 * 36000, 50 * 36000);
+  const third = new SlideShape("C");
+  third.SetName("C");
+  third.SetPosition(200 * 36000, 80 * 36000);
+  first.AddObject(third);
+
+  const result = await bridge.execute([
+    {
+      name: "slides_align_objects",
+      arguments: {
+        slide: 1,
+        targets: [{ name: "A" }, { name: "B" }, { name: "C" }],
+        align: "top",
+        distribute: "horizontal",
+        relativeTo: "selection",
+      },
+    },
+    {
+      name: "slides_group_objects",
+      arguments: { slide: 1, action: "group", targets: [{ name: "A" }, { name: "B" }], name: "AB" },
+    },
+    { name: "slides_group_objects", arguments: { slide: 1, action: "ungroup", name: "AB" } },
+    { name: "slides_reorder_object", arguments: { slide: 1, name: "C", action: "back" } },
+    {
+      name: "slides_add_connector",
+      arguments: {
+        slide: 1,
+        connectorType: "straightConnector1",
+        startXmm: 20,
+        startYmm: 30,
+        endXmm: 120,
+        endYmm: 70,
+        name: "Flow",
+        line: { widthPt: 2, color: "#2255AA" },
+      },
+    },
+    {
+      name: "slides_add_freeform",
+      arguments: {
+        slide: 1,
+        name: "Triangle",
+        xMm: 140,
+        yMm: 30,
+        widthMm: 50,
+        heightMm: 40,
+        fill: { type: "solid", color: "#FFCC66" },
+        paths: [{
+          commands: [
+            { type: "moveTo", xMm: 25, yMm: 0 },
+            { type: "lineTo", xMm: 50, yMm: 40 },
+            { type: "lineTo", xMm: 0, yMm: 40 },
+            { type: "close" },
+          ],
+        }],
+      },
+    },
+  ]);
+
+  assert.equal(result.changed, 8);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(first.shapes.find(shape => shape.GetName() === "A").GetPosY(), 20 * 36000);
+  assert.equal(first.groups.length, 0);
+  assert.equal(first.GetAllDrawings()[0].GetName(), "C");
+  assert.equal(first.shapes.some(shape => shape.GetName() === "Flow"), true);
+  const freeform = first.shapes.find(shape => shape.GetName() === "Triangle");
+  assert.equal(freeform.GetGeometry().IsCustom(), true);
+  assert.equal(freeform.GetGeometry().paths[0].commands.length, 4);
+});
+
 test("Slides bridge round-trips gradients and supports shape and chart CRUD", async () => {
   const { bridge, presentation, first } = slidesHarness();
   const result = await bridge.execute([
@@ -788,6 +1944,164 @@ test("Slides bridge rejects selection formatting when nothing is selected", asyn
     harness.bridge.execute([{ name: "slides_format_selection", arguments: { bold: true } }]),
     /请先在 PPT/,
   );
+});
+
+test("Slides bridge adds WordArt, math equations, and OLE objects", async () => {
+  const { bridge, presentation } = slidesHarness();
+  const preview = {
+    url: "https://app.test/copilot-api/images/asset.png?token=signed",
+    assetId: "asset.png",
+    widthPx: 800,
+    heightPx: 600,
+  };
+  const result = await bridge.execute([
+    {
+      name: "slides_add_word_art",
+      arguments: {
+        slide: 1,
+        text: "AI Bridge",
+        transform: "textArchUp",
+        fontSize: 32,
+        bold: true,
+        color: "#112233",
+        widthMm: 90,
+        heightMm: 25,
+        name: "WordArt",
+      },
+    },
+    {
+      name: "slides_add_math",
+      arguments: {
+        slide: 1,
+        text: "\\frac{a}{b}",
+        format: "latex",
+        xMm: 20,
+        yMm: 50,
+        widthMm: 60,
+        heightMm: 20,
+        name: "Equation",
+      },
+    },
+    {
+      name: "slides_add_ole_object",
+      arguments: {
+        slide: 1,
+        _image: preview,
+        data: "embedded-data",
+        appId: "asc.custom",
+        widthMm: 80,
+        heightMm: 50,
+        name: "Embedded",
+        includeRaw: true,
+      },
+    },
+  ]);
+
+  assert.equal(result.changed, 3);
+  assert.equal(result.needsSave, true);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(result.results[0].object.name, "WordArt");
+  assert.equal(result.results[1].object.name, "Equation");
+  assert.equal(result.results[1].format, "latex");
+  assert.equal(result.results[2].object.kind, "oleObject");
+  assert.equal(result.results[2].object.applicationId, "asc.custom");
+  assert.equal(result.results[2].object.dataLength, "embedded-data".length);
+});
+
+test("Slides bridge manages animation timelines and exposes timing", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  first.shapes[0].SetName("Animated title");
+  const result = await bridge.execute([
+    {
+      name: "slides_manage_animation",
+      arguments: {
+        slide: 1,
+        action: "add",
+        objectIndex: 0,
+        effectType: "entranceFade",
+        trigger: "afterprevious",
+        durationMs: 900,
+        delayMs: 125,
+        repeatCount: 2,
+      },
+    },
+    { name: "slides_inspect_animations", arguments: { slide: 1 } },
+    {
+      name: "slides_manage_animation",
+      arguments: {
+        slide: 1,
+        action: "update",
+        effectIndex: 0,
+        trigger: "onclick",
+        durationMs: 1200,
+      },
+    },
+    { name: "slides_inspect_animations", arguments: { slide: 1 } },
+  ]);
+
+  assert.equal(result.changed, 2);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(result.results[1].slides[0].effects[0].objectName, "Animated title");
+  assert.equal(result.results[1].slides[0].effects[0].durationMs, 900);
+  assert.equal(result.results[1].slides[0].effects[0].delayMs, 125);
+  assert.equal(result.results[3].slides[0].effects[0].trigger, "onclick");
+  assert.equal(result.results[3].slides[0].effects[0].durationMs, 1200);
+});
+
+test("Slides bridge inspects, edits, replies to, and deletes comments", async () => {
+  const { bridge, presentation } = slidesHarness();
+  const result = await bridge.execute([
+    {
+      name: "slides_add_comment",
+      arguments: { slide: 1, text: "Review this", author: "Alice", userId: "alice" },
+    },
+    {
+      name: "slides_manage_comment",
+      arguments: { action: "addReply", commentIndex: 0, text: "Done", author: "Bob", userId: "bob" },
+    },
+    {
+      name: "slides_manage_comment",
+      arguments: { action: "update", commentIndex: 0, text: "Reviewed", solved: true, xMm: 10, yMm: 20 },
+    },
+    { name: "slides_inspect_comments", arguments: {} },
+    { name: "slides_manage_comment", arguments: { action: "delete", commentIndex: 0 } },
+  ]);
+
+  assert.equal(result.changed, 4);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(result.results[3].comments[0].text, "Reviewed");
+  assert.equal(result.results[3].comments[0].solved, true);
+  assert.equal(result.results[3].comments[0].replies[0].text, "Done");
+  assert.deepEqual(Array.from(result.results[3].comments[0].position), [360000, 720000]);
+  assert.equal(presentation.comments.length, 0);
+});
+
+test("Slides bridge uses plugin methods for built-in themes, macros, and slideshow control", async () => {
+  const { bridge, presentation } = slidesHarness();
+  const themes = await bridge.execute([
+    { name: "slides_inspect_builtin_themes", arguments: {} },
+  ]);
+  const applied = await bridge.execute([
+    { name: "slides_apply_builtin_theme", arguments: { theme: 7 } },
+  ]);
+  const macros = await bridge.execute([
+    { name: "slides_set_macros", arguments: { content: { macrosArray: [] } } },
+  ]);
+  const slideshow = await bridge.execute([
+    { name: "slides_control_slideshow", arguments: { action: "goto", slide: 2 } },
+  ]);
+
+  assert.equal(themes.results[0].content[0].name, "Ion");
+  assert.equal(applied.needsSave, true);
+  assert.equal(macros.needsSave, true);
+  assert.equal(slideshow.needsSave, false);
+  assert.deepEqual(Array.from(presentation.pluginCalls, entry => entry[0]), [
+    "GetEditorThemes",
+    "ApplyTheme",
+    "SetMacros",
+    "GoToSlideInSlideShow",
+  ]);
+  assert.deepEqual(Array.from(presentation.pluginCalls[3][1]), [1]);
 });
 
 test("Slides bridge rejects a Sheets tool at the adapter boundary", async () => {

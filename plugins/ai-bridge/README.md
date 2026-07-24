@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.2.0`
+- Version: `0.4.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -20,6 +20,7 @@ External Copilot UI
      OR client-sdk.js -> allow-listed postMessage relay
      OR local HTTPX -> editor-JWT-bound /copilot-api/bridge relay
   -> host-bridge.js
+  -> POST /copilot-api/images/import (image tools only)
   -> instance-bound postMessage protocol
   -> headless ai-bridge plugin (plugin.js)
   -> allow-listed Word / Slides / Sheets bridge
@@ -57,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev26",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
     },
@@ -105,7 +106,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -159,6 +160,39 @@ const result = await window.aiBridge.executeBatch([
 ]);
 ```
 
+Insert an external image. The host imports the source first and normally sends
+only a short-lived, signed same-origin URL to the plugin:
+
+```js
+await window.aiBridge.word.addImage({
+  source: { type: "url", url: "https://images.example.com/diagram.png" },
+  widthMm: 120,
+  search: "Architecture",
+  wrapping: "square",
+  name: "Architecture diagram",
+});
+
+await window.aiBridge.slides.addImage({
+  slide: 2,
+  source: { type: "dataUrl", dataUrl: clipboardImageDataUrl },
+  widthMm: 140,
+  rotationDeg: 2,
+  name: "Pasted screenshot",
+});
+```
+
+`source` accepts public HTTPS URLs or strict
+`data:image/{png,jpeg,gif,webp};base64,...` / `data:image/svg+xml;base64,...`
+values. SVG is parsed and normalized, with scripts, event handlers, external
+resources, DTDs, and entities rejected. The service rejects private
+network targets, unsafe redirects, mismatched MIME/magic bytes, images over
+8 MiB, edges over 12,000 pixels, or more than 40 MP. Set
+`COPILOT_IMAGE_ALLOWED_HOSTS` to a comma-separated optional hostname allow-list.
+On the localhost demo, ONLYOFFICE blocks engine-side loopback downloads by
+default. The trusted host therefore reads the already-imported asset through
+its signed URL and passes an internal Data URL to `Api.CreateImage`; this keeps
+the DocumentServer private-IP filter enabled.
+
 Common controls:
 
 ```js
@@ -180,28 +214,44 @@ The versioned public contract is available as:
 - `public-api.d.ts`: TypeScript declarations for the full API and all tool arguments.
 - `public-api.json`: machine-readable tool schemas, limits, errors, and transport metadata.
 - `client-sdk.js`: optional cross-origin iframe/popup client for the allow-listed relay.
+- `DOCX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge D01-D70 capability matrix.
+- `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
+- `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
 
 ## Tool names
 
 - Word: `word_inspect`, `word_replace_text`, `word_append_paragraph`,
   `word_insert_paragraph`, `word_format_document`, `word_format_selection`,
   `word_format_matches`, `word_delete_matches`, `word_add_hyperlink`,
-  `word_add_comment`, `word_add_bookmark`, `word_format_paragraphs`,
+  `word_add_comment`, `word_add_bookmark`, `word_add_image`,
+  `word_inspect_advanced`, `word_set_document_properties`,
+  `word_manage_section`, `word_manage_style`, `word_set_tabs`,
+  `word_set_numbering`, `word_format_table_advanced`, `word_add_nested_table`,
+  `word_manage_drawing`, `word_add_shape`, `word_add_chart`, `word_add_math`,
+  `word_add_ole_object`, `word_manage_fields`, `word_manage_long_document`,
+  `word_manage_comments`, `word_manage_revisions`, `word_set_protection`,
+  `word_manage_content_control`, `word_manage_custom_xml`, `word_inspect_macros`,
+  `word_set_macros`, `word_set_watermark`, `word_format_paragraphs`,
   `word_set_paragraph_text`, `word_delete_paragraphs`, `word_set_list`,
   `word_insert_page_break`, `word_navigate`, `word_scroll`, `word_scale_font`,
   `word_add_table`, `word_set_table_cell`, `word_format_table`,
   `word_edit_table`, `word_set_page_layout`, `word_set_header_footer`,
   `word_set_document_text`.
-- Slides: `slides_inspect`, `slides_inspect_objects`, `slides_replace_text`,
-  `slides_scale_font`, `slides_format_text`, `slides_format_selection`,
-  `slides_add_slide`, `slides_duplicate_slide`, `slides_delete_slide`,
-  `slides_add_textbox`, `slides_set_background`, `slides_add_shape`,
-  `slides_update_shape`, `slides_delete_object`, `slides_inspect_charts`,
-  `slides_add_chart`, `slides_update_chart`, `slides_delete_chart`.
-- Sheets: `sheets_inspect`, `sheets_set_values`, `sheets_set_formula`,
-  `sheets_replace_text`, `sheets_format_range`, `sheets_add_sheet`,
-  `sheets_rename_sheet`, `sheets_delete_sheet`, `sheets_add_chart`,
-  `sheets_inspect_charts`, `sheets_update_chart`, `sheets_delete_chart`.
+- Slides: 61 allow-listed tools covering slides, themes, masters, layouts,
+  placeholders, text/paragraphs, shapes, connectors, freeform geometry,
+  grouping/alignment/layering, safe raster/SVG images, image-shape crops,
+  tables, charts, WordArt, math, OLE, notes, comments, hyperlinks,
+  transitions/Morph, animations, macros, and slideshow control. See
+  `public-api.json` for the canonical list and
+  [PPTX-CAPABILITIES.zh-CN.md](PPTX-CAPABILITIES.zh-CN.md) for the P01-P77
+  mapping.
+- Sheets: 43 allow-listed tools covering inspection, typed values, formulas and
+  array formulas, ranges, rich text, sheets, defined names, recalculation,
+  sorting/filtering/tables, conditional formatting, validation, pivots, charts,
+  drawings, hyperlinks, comments, freeze panes, document properties, protected
+  ranges, page layout, and macros. See `public-api.json` for the canonical list
+  and [XLSX-CAPABILITIES.zh-CN.md](XLSX-CAPABILITIES.zh-CN.md) for the X01-X78
+  mapping.
 
 The external agent must send tool names and JSON arguments, never JavaScript
 source. `plugin.js` checks the editor-specific allow list before calling a
@@ -212,15 +262,21 @@ so a retried transport message cannot apply the same edit twice.
 
 | Area | Supported operations |
 | --- | --- |
-| Read/context | Full text, selection, pages, visible pages, paragraph indexes/styles, table dimensions, optional comments |
+| Read/context | Full text, selection, pages, sections, properties, styles, numbering, drawings, bookmarks, notes, comments, revisions, content controls and custom XML |
 | Text | Replace, delete exact matches, overwrite a paragraph or the whole document |
-| Character style | Font, size, bold, italic, underline, strikeout, color, highlight, caps, spacing, sub/superscript |
-| Paragraph style | Named/heading styles, outline level, alignment, spacing, line spacing, indents, keep/widow/page-break rules |
-| Structure | Append/insert/delete paragraphs, bullet/numbered lists, page breaks, bookmarks, links, comments |
-| Tables | Create/fill, style, format cells, add/remove rows and columns, merge/split, clear/delete |
-| Page layout | A4/Letter/Legal/custom size, portrait/landscape, margins, header/footer distances |
-| Header/footer | Default/first/even header or footer, text, dynamic page number and page count |
+| Character style | Font, size, bold, italic, underline, strikeout, color, highlight, caps, spacing, sub/superscript, named character styles |
+| Paragraph style | Named/heading/custom/inherited styles, outline level, alignment, spacing, line spacing, indents, tabs, keep/widow/page-break rules |
+| Structure | Paragraphs, simple/custom/multilevel lists, page/section breaks, columns, bookmarks, links, fields and notes |
+| Images/drawings | Secure image import, sizing, rotation, borders, wrapping and floating positioning; shapes/text boxes, charts, formulas and OLE |
+| Tables | Create/fill/style, cell borders/margins, row height/column width, repeated headers, nested tables, structural edits |
+| Long documents | TOC, captions, table of figures, six cross-reference target types, footnotes/endnotes and dynamic fields |
+| Review/control | Comments, revision tracking, accept/reject all, editing restrictions, content controls, custom XML and macros |
+| Page layout | Per-section size/orientation/margins/columns, first/even headers and footers, start page number and watermark |
 | View navigation | Start/end/page, next/previous/relative page, search-to-selection, page-granular up/down scrolling |
+
+See [DOCX-CAPABILITIES.zh-CN.md](DOCX-CAPABILITIES.zh-CN.md) for the D01-D70
+status and the exact public-API limitations that are intentionally not
+advertised as supported.
 
 `word_scroll` deliberately uses document pages rather than synthetic browser
 mouse events. The Office API exposes stable page navigation and selection
@@ -234,8 +290,14 @@ therefore remains deterministic and does not create an undo entry.
 | PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, chart summary, and optional raw Office JSON |
 | PPT slides | Add, duplicate, delete, and set custom/clear/layout/master background |
 | PPT shapes | Add any preset geometry; update text, geometry, name, position, size, rotation, flips, padding, text style, fill, and line; delete any drawing |
+| PPT structure/theme | Slide CRUD/order/visibility/size; themes, theme colors/fonts, masters, layouts, placeholders, backgrounds, and template-object CRUD |
+| PPT text/tables | Rich paragraphs and multilevel lists, WordArt, math, notes, comments, tables with row/column edits and cell merge/split |
+| PPT images | Add imported PNG/JPEG/GIF/WebP/SVG; contain/stretch sizing, position, rotation, flips, borders, safe SVG normalization, and preset-shape crops |
 | PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
-| XLSX cells | Inspect workbook, set values/formulas, replace text, format ranges, and add/rename/delete sheets |
+| PPT animation/show | Slide transitions including Morph, object entrance/emphasis/exit/path effects, ordering/timing/interactive triggers, loop and live slideshow control |
+| XLSX workbook/cells | Typed text/number/date/time/percentage/boolean values, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
+| XLSX data | Sort, filter, formatted tables, conditional formats, validation/drop-downs, and pivot tables |
+| XLSX objects/view | Images, shapes, text boxes, OLE, links, comments, freeze panes, protected ranges, and documented page-layout properties |
 | XLSX charts | Inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | Fill model | None, solid, linear gradient, radial gradient, pattern, and lossless `raw` Office JSON replay |
 
@@ -258,10 +320,21 @@ example storage. These same-origin endpoints are used:
 - `POST /copilot-api/history`
 - `POST /copilot-api/undo`
 - `POST /copilot-api/redo`
+- `POST /copilot-api/images/import`
+- `GET /copilot-api/images/<asset>?token=<signature>`
 
 `copilot_server.py` implements the endpoints for the example application. In a
 production integration, persist ONLYOFFICE callback statuses `6` and `2` in
-your own storage service.
+your own storage service. A successful force-save does not reload the live
+editor: the WebSocket session already contains the saved version, so the
+current page, selection, and scroll position remain intact. Undo and redo still
+reload because they replace the canonical file with another stored version.
+
+Imported assets are content-addressed under the example file directory's
+private `.ai-bridge-images` folder. Download signatures bind the asset,
+document identity, and expiry; URLs last 15 minutes and files are retained for
+24 hours. DOCX/PPTX insertion embeds the media into the document package, so
+the saved file does not depend on the temporary URL.
 
 ## Local HTTPX Relay
 
@@ -305,6 +378,8 @@ does not render a user interface.
 - `public-api.d.ts`: TypeScript API declarations.
 - `public-api.json`: machine-readable API and tool contract.
 - `INTEGRATION.zh-CN.md`: complete external-project integration guide.
+- `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
+- `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
 - `bridges/*.js`: editor-specific Office API implementations.
 - `copilot_server.py`: optional planning API plus example save/version service.
 - `nginx-ds-example.conf`: example plugin and host API injection.

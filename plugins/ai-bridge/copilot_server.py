@@ -4,19 +4,25 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import glob
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
+import struct
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -54,6 +60,32 @@ BRIDGE_ALLOWED_METHODS = {
     "getState",
 }
 BRIDGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+BRIDGE_LOG_PHASES = {"word-command", "editor-save"}
+IMAGE_MAX_BYTES = 8 * 1024 * 1024
+IMAGE_MAX_REQUEST_BYTES = 12_000_000
+IMAGE_MAX_EDGE_PX = 12_000
+IMAGE_MAX_PIXELS = 40_000_000
+IMAGE_FETCH_TIMEOUT_SECONDS = 20
+IMAGE_MAX_REDIRECTS = 3
+IMAGE_URL_TTL_SECONDS = 15 * 60
+IMAGE_RETENTION_SECONDS = 24 * 60 * 60
+IMAGE_ASSET_PATTERN = re.compile(r"^[0-9a-f]{64}\.(png|jpg|gif|webp|svg)$")
+IMAGE_MIME_EXTENSIONS = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+}
+IMAGE_SOURCE_TOOLS = {
+    "word_add_image",
+    "slides_add_image",
+    "slides_add_image_shape",
+    "slides_add_ole_object",
+    "word_add_ole_object",
+    "word_set_watermark",
+    "sheets_manage_drawing",
+}
 BRIDGE_CONDITION = threading.Condition()
 BRIDGE_SESSIONS: dict[str, dict[str, Any]] = {}
 BRIDGE_AUTHORITATIVE: dict[tuple[str, str, str, str], str] = {}
@@ -99,6 +131,30 @@ WORD_TOOL_DESCRIPTIONS = {
     "word_add_hyperlink": "给 Word 中指定的文本命中范围添加超链接",
     "word_add_comment": "给 Word 中指定的文本命中范围添加批注",
     "word_add_bookmark": "给 Word 中精确指定的一处文本添加书签",
+    "word_add_image": "把 HTTPS URL 或 Base64 Data URL 图片安全导入 Word，可按光标、段落序号或文本命中定位并设置尺寸与环绕",
+    "word_inspect_advanced": "只读检查 Word 文档属性、节、样式、编号、绘图、书签、脚注尾注、批注、修订、内容控件和自定义 XML",
+    "word_set_document_properties": "设置 Word 文档标题、主题、作者等文档属性",
+    "word_manage_section": "创建或配置 Word 文档节、分节类型、起始页码和分栏",
+    "word_manage_style": "创建或更新 Word 段落、字符、表格或编号样式及其继承关系",
+    "word_set_tabs": "设置 Word 段落制表位",
+    "word_set_numbering": "设置 Word 段落的高级编号属性",
+    "word_format_table_advanced": "设置 Word 表格的高级布局、边框、间距和单元格属性",
+    "word_add_nested_table": "在 Word 表格单元格中添加嵌套表格",
+    "word_manage_drawing": "定位并更新或删除 Word 绘图对象",
+    "word_add_shape": "在 Word 中添加带可选文本的形状并设置尺寸、样式、旋转和环绕",
+    "word_add_chart": "在 Word 中添加图表并设置数据和样式",
+    "word_add_math": "在 Word 中添加数学公式对象",
+    "word_add_ole_object": "在 Word 中添加受控 OLE 对象",
+    "word_manage_fields": "添加 Word 动态字段、更新全部字段或清除表单字段",
+    "word_manage_long_document": "管理 Word 目录、题注、图表目录、交叉引用、脚注尾注和书签",
+    "word_manage_comments": "管理 Word 批注线程和状态",
+    "word_manage_revisions": "启停修订模式，或接受、拒绝全部 Word 修订",
+    "word_set_protection": "设置或移除 Word 文档保护",
+    "word_manage_content_control": "添加、更新、检查或删除 Word 内容控件，支持列表、日期、外观和自定义 XML 数据绑定",
+    "word_manage_custom_xml": "管理 Word 自定义 XML 部件及 XPath 元素、属性",
+    "word_inspect_macros": "只读检查 Word 的 ONLYOFFICE 或 VBA 宏",
+    "word_set_macros": "替换 Word 文档中保存的 ONLYOFFICE 宏集合",
+    "word_set_watermark": "设置或移除 Word 水印",
     "word_format_paragraphs": "按段落序号、文本或当前光标设置完整段落样式",
     "word_set_paragraph_text": "替换指定段落的文本并可同时设置样式",
     "word_delete_paragraphs": "删除按序号、文本或当前光标选中的段落",
@@ -174,6 +230,9 @@ WORD_TOOLS = load_contract_tools("word", WORD_TOOL_DESCRIPTIONS)
 
 SLIDE_TOOL_DESCRIPTIONS = {
     "slides_inspect": "只读检查 PPT 页数与文本摘要；修改前优先调用",
+    "slides_inspect_layouts": "只读检查 PPT 母版和版式",
+    "slides_inspect_themes": "只读检查 PPT 主题、主题颜色和主题字体",
+    "slides_inspect_builtin_themes": "只读检查 ONLYOFFICE 编辑器内置主题库",
     "slides_inspect_objects": "只读检查 PPT 图形、图表、图片、表格、组合等对象及填充、线条、位置和可选原始 JSON",
     "slides_replace_text": "在 PPT 全部或指定幻灯片中查找替换",
     "slides_scale_font": "按比例缩放 PPT 全部或指定页字号",
@@ -182,7 +241,44 @@ SLIDE_TOOL_DESCRIPTIONS = {
     "slides_add_slide": "新建幻灯片",
     "slides_duplicate_slide": "复制指定幻灯片",
     "slides_delete_slide": "删除指定幻灯片",
+    "slides_move_slide": "移动指定幻灯片到新的页序",
+    "slides_set_visibility": "显示或隐藏指定幻灯片",
+    "slides_set_size": "设置演示文稿页面尺寸和方向",
+    "slides_apply_layout": "给指定幻灯片应用母版版式",
+    "slides_set_show_settings": "设置幻灯片放映循环选项",
+    "slides_apply_theme": "把现有 PPT 主题应用到指定幻灯片",
+    "slides_apply_builtin_theme": "把 ONLYOFFICE 编辑器内置主题应用到当前演示文稿",
+    "slides_set_theme": "创建或更新 PPT 主题及其颜色、字体方案",
+    "slides_create_layout": "在 PPT 母版中创建自定义幻灯片版式",
+    "slides_add_template_shape": "在 PPT 母版或版式中添加模板图形或占位符",
+    "slides_manage_template_object": "更新或删除 PPT 母版、版式中的模板对象",
+    "slides_set_template_background": "设置 PPT 母版或版式的背景填充",
     "slides_add_textbox": "在指定 PPT 页添加可设置位置、尺寸、文本、渐变填充和线条的文本框；尺寸单位为毫米",
+    "slides_add_word_art": "在指定 PPT 页添加艺术字并设置变换、字体、填充、线条和位置",
+    "slides_add_math": "在指定 PPT 页插入 LaTeX、Unicode 或 MathML 数学公式",
+    "slides_add_image": "把 HTTPS URL 或 Base64 Data URL 图片安全导入指定 PPT 页，可设置位置、尺寸、旋转、翻转和名称",
+    "slides_add_image_shape": "把安全导入的图片填充到圆形或其他预设形状中，实现按形状裁剪并可设置边框",
+    "slides_add_ole_object": "在指定 PPT 页添加带安全预览图的 OLE 对象",
+    "slides_add_connector": "在指定 PPT 页添加连接线",
+    "slides_add_freeform": "在指定 PPT 页添加自由形状",
+    "slides_group_objects": "组合或取消组合指定 PPT 绘图对象",
+    "slides_align_objects": "对齐或分布指定 PPT 绘图对象",
+    "slides_reorder_object": "调整指定 PPT 绘图对象的层级顺序",
+    "slides_set_text_content": "替换指定 PPT 对象的富文本段落内容",
+    "slides_format_paragraphs": "设置指定 PPT 文本对象的段落格式、缩进、间距和列表",
+    "slides_update_object": "按对象 ID、序号或名称更新 PPT 绘图对象的通用属性",
+    "slides_set_hyperlink": "给 PPT 文本或对象设置或移除超链接",
+    "slides_set_notes": "设置或清除指定幻灯片的演讲者备注",
+    "slides_add_comment": "在指定幻灯片添加批注",
+    "slides_inspect_comments": "只读检查 PPT 批注及其回复",
+    "slides_manage_comment": "更新、回复、删除 PPT 批注或批注回复",
+    "slides_set_transition": "设置或清除指定幻灯片的切换效果和计时",
+    "slides_inspect_animations": "只读检查 PPT 对象动画时间线、序列和计时",
+    "slides_manage_animation": "添加、更新、排序、删除或清空 PPT 对象动画",
+    "slides_add_table": "在指定幻灯片添加表格",
+    "slides_set_table_cell": "设置 PPT 表格单元格内容和格式",
+    "slides_format_table": "设置 PPT 表格整体及单元格格式",
+    "slides_edit_table": "增删 PPT 表格行列，或合并、拆分和删除表格",
     "slides_set_background": "设置、清除或恢复 PPT 页背景；自定义背景支持纯色、线性渐变、径向渐变、图案和 raw 填充",
     "slides_add_shape": "在指定 PPT 页添加任意预设图形，并设置文本、几何、渐变填充、线条、旋转和内边距",
     "slides_update_shape": "按 objectId、objectIndex 或 name 更新 PPT 图形的文本、类型、位置、尺寸、旋转、填充和线条",
@@ -191,6 +287,9 @@ SLIDE_TOOL_DESCRIPTIONS = {
     "slides_add_chart": "用数值系列和分类在 PPT 页创建图表，并设置系列、坐标轴、图例、标签、渐变填充和位置",
     "slides_update_chart": "按 chartId、chartIndex 或 name 更新 PPT 图表系列、分类、坐标轴、图例、标签、颜色、位置和尺寸",
     "slides_delete_chart": "按 chartId、chartIndex 或 name 删除 PPT 图表",
+    "slides_inspect_macros": "只读检查 PPT 的 ONLYOFFICE 宏或 VBA 宏",
+    "slides_set_macros": "设置或清除 PPT 的 ONLYOFFICE 宏内容",
+    "slides_control_slideshow": "启动、结束、暂停、继续或导航当前 PPT 放映",
 }
 
 SHEET_TOOL_DESCRIPTIONS = {
@@ -206,6 +305,37 @@ SHEET_TOOL_DESCRIPTIONS = {
     "sheets_inspect_charts": "只读检查 XLSX 图表类型、标题、系列、位置、样式和可选原始 JSON",
     "sheets_update_chart": "按 chartIndex 或 name 更新 XLSX 图表系列、数据区域、坐标轴、图例、标签、颜色、位置和尺寸",
     "sheets_delete_chart": "按 chartIndex 或 name 删除 XLSX 图表；部分 ONLYOFFICE 版本/许可不提供 ApiDrawing.Delete，此时会明确失败",
+    "sheets_inspect_range": "只读检查 XLSX 指定区域的值、公式和格式",
+    "sheets_manage_range": "管理 XLSX 区域的合并、行列插删、复制、剪切、清除、填充、隐藏和自动调整",
+    "sheets_set_array_formula": "给 XLSX 区域设置数组公式",
+    "sheets_set_rich_text": "给 XLSX 单元格设置富文本内容",
+    "sheets_sort": "对 XLSX 区域按指定字段排序",
+    "sheets_filter": "设置、更新或清除 XLSX 区域筛选",
+    "sheets_inspect_tables": "只读检查 XLSX 工作表中的结构化表格、范围、样式和显示属性",
+    "sheets_manage_validation": "管理 XLSX 单元格数据验证",
+    "sheets_manage_conditional_format": "管理 XLSX 条件格式规则",
+    "sheets_manage_table": "创建、格式化、更新、缩放、删除结构化表格，或把表格转换为普通区域",
+    "sheets_manage_hyperlink": "设置或移除 XLSX 单元格超链接",
+    "sheets_manage_comments": "添加、更新或删除 XLSX 单元格批注",
+    "sheets_inspect_comments": "只读检查 XLSX 单元格批注",
+    "sheets_manage_names": "创建、更新或删除 XLSX 定义名称",
+    "sheets_inspect_names": "只读检查 XLSX 定义名称",
+    "sheets_manage_freeze_panes": "冻结或取消冻结 XLSX 窗格",
+    "sheets_inspect_freeze_panes": "只读检查 XLSX 冻结窗格状态",
+    "sheets_manage_page_layout": "设置 XLSX 打印页面布局",
+    "sheets_inspect_page_layout": "只读检查 XLSX 打印页面布局",
+    "sheets_manage_properties": "设置 XLSX 工作簿属性",
+    "sheets_inspect_properties": "只读检查 XLSX 工作簿属性",
+    "sheets_manage_sheet": "管理 XLSX 工作表的可见性、顺序和其他属性",
+    "sheets_manage_protected_ranges": "创建或更新 XLSX 受保护区域，并管理其可编辑用户",
+    "sheets_inspect_protected_ranges": "只读检查 XLSX 受保护区域",
+    "sheets_manage_drawing": "添加、更新或删除 XLSX 绘图对象",
+    "sheets_inspect_drawings": "只读检查 XLSX 绘图对象",
+    "sheets_manage_pivot": "创建、配置、刷新或清空 XLSX 数据透视表",
+    "sheets_inspect_pivots": "只读检查 XLSX 数据透视表",
+    "sheets_set_macros": "设置或清除 XLSX 宏内容",
+    "sheets_inspect_macros": "只读检查 XLSX 宏信息",
+    "sheets_recalculate": "触发 XLSX 工作簿重新计算",
 }
 
 SLIDE_TOOLS = load_contract_tools("slide", SLIDE_TOOL_DESCRIPTIONS)
@@ -291,6 +421,403 @@ def bridge_identity(claims: dict[str, Any]) -> tuple[str, str, str, str]:
 
 def bridge_identity_digest(identity: tuple[str, str, str, str]) -> str:
     return hashlib.sha256("\0".join(identity).encode()).hexdigest()[:12]
+
+
+def image_asset_root() -> str:
+    return os.environ.get(
+        "COPILOT_IMAGE_DIR",
+        os.path.join(EXAMPLE_FILES, ".ai-bridge-images"),
+    )
+
+
+def image_allowed_hosts() -> list[str]:
+    return [
+        value.strip().lower().rstrip(".")
+        for value in os.environ.get("COPILOT_IMAGE_ALLOWED_HOSTS", "").split(",")
+        if value.strip()
+    ]
+
+
+def image_error(status: int, code: str, message: str) -> BridgeError:
+    return BridgeError(status, code, message)
+
+
+def validate_image_url(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(value))
+    except ValueError as error:
+        raise image_error(400, "INVALID_IMAGE_SOURCE", "图片 URL 无效") from error
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise image_error(400, "INVALID_IMAGE_SOURCE", "外部图片只允许 HTTPS URL")
+    if parsed.username or parsed.password:
+        raise image_error(400, "INVALID_IMAGE_SOURCE", "图片 URL 不允许包含用户名或密码")
+    hostname = parsed.hostname.lower().rstrip(".")
+    allowed_hosts = image_allowed_hosts()
+    if allowed_hosts and not any(
+        hostname == allowed or hostname.endswith("." + allowed)
+        for allowed in allowed_hosts
+    ):
+        raise image_error(403, "IMAGE_FETCH_BLOCKED", "图片来源域名不在允许列表中")
+    try:
+        addresses = socket.getaddrinfo(
+            hostname,
+            parsed.port or 443,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as error:
+        raise image_error(502, "IMAGE_FETCH_FAILED", "无法解析图片来源地址") from error
+    if not addresses:
+        raise image_error(502, "IMAGE_FETCH_FAILED", "无法解析图片来源地址")
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address[4][0].split("%", 1)[0])
+        except ValueError as error:
+            raise image_error(403, "IMAGE_FETCH_BLOCKED", "图片来源地址不安全") from error
+        if not ip.is_global:
+            raise image_error(403, "IMAGE_FETCH_BLOCKED", "禁止从本机、私网或保留地址导入图片")
+    return urllib.parse.urlunsplit(parsed)
+
+
+class SafeImageRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        redirect_count = int(getattr(request, "_ai_bridge_redirect_count", 0)) + 1
+        if redirect_count > IMAGE_MAX_REDIRECTS:
+            raise image_error(502, "IMAGE_FETCH_FAILED", "图片 URL 重定向次数过多")
+        validated_url = validate_image_url(urllib.parse.urljoin(request.full_url, new_url))
+        redirected = super().redirect_request(request, fp, code, msg, headers, validated_url)
+        if redirected is not None:
+            setattr(redirected, "_ai_bridge_redirect_count", redirect_count)
+        return redirected
+
+
+def sniff_image(data: bytes) -> tuple[str, str, int, int]:
+    mime_type = ""
+    extension = ""
+    width = 0
+    height = 0
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        mime_type, extension = "image/png", "png"
+        width, height = struct.unpack(">II", data[16:24])
+    elif data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        mime_type, extension = "image/gif", "gif"
+        width, height = struct.unpack("<HH", data[6:10])
+    elif data.startswith(b"\xff\xd8"):
+        mime_type, extension = "image/jpeg", "jpg"
+        offset = 2
+        start_of_frame = {
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+            0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+        }
+        while offset + 4 <= len(data):
+            if data[offset] != 0xFF:
+                offset += 1
+                continue
+            while offset < len(data) and data[offset] == 0xFF:
+                offset += 1
+            if offset >= len(data):
+                break
+            marker = data[offset]
+            offset += 1
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                continue
+            if offset + 2 > len(data):
+                break
+            segment_length = struct.unpack(">H", data[offset:offset + 2])[0]
+            if segment_length < 2 or offset + segment_length > len(data):
+                break
+            if marker in start_of_frame and segment_length >= 7:
+                height, width = struct.unpack(">HH", data[offset + 3:offset + 7])
+                break
+            offset += segment_length
+    elif len(data) >= 30 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        mime_type, extension = "image/webp", "webp"
+        chunk_type = data[12:16]
+        if chunk_type == b"VP8X":
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+        elif chunk_type == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        elif chunk_type == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+            packed = int.from_bytes(data[21:25], "little")
+            width = (packed & 0x3FFF) + 1
+            height = ((packed >> 14) & 0x3FFF) + 1
+    if not mime_type or width <= 0 or height <= 0:
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "仅支持有效的 PNG、JPEG、GIF 或 WebP 图片")
+    if width > IMAGE_MAX_EDGE_PX or height > IMAGE_MAX_EDGE_PX or width * height > IMAGE_MAX_PIXELS:
+        raise image_error(413, "IMAGE_TOO_LARGE", "图片像素尺寸超过限制")
+    return mime_type, extension, width, height
+
+
+SVG_FORBIDDEN_ELEMENTS = {
+    "script",
+    "style",
+    "foreignobject",
+    "iframe",
+    "object",
+    "embed",
+    "audio",
+    "video",
+}
+SVG_LENGTH_PATTERN = re.compile(
+    r"^\s*([0-9]+(?:\.[0-9]+)?|\.[0-9]+)\s*(px|pt|pc|mm|cm|in|q)?\s*$",
+    re.IGNORECASE,
+)
+SVG_URL_PATTERN = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.IGNORECASE)
+
+
+def svg_length_px(value: Any) -> float | None:
+    if value is None:
+        return None
+    match = SVG_LENGTH_PATTERN.fullmatch(str(value))
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "px").lower()
+    scale = {
+        "px": 1.0,
+        "pt": 96.0 / 72.0,
+        "pc": 16.0,
+        "mm": 96.0 / 25.4,
+        "cm": 96.0 / 2.54,
+        "in": 96.0,
+        "q": 96.0 / 101.6,
+    }[unit]
+    return number * scale
+
+
+def sanitize_svg(data: bytes) -> tuple[bytes, int, int]:
+    if (
+        re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", data, re.IGNORECASE)
+        or b"\x00" in data
+    ):
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 包含不允许的文档声明")
+    try:
+        text = data.decode("utf-8")
+        root = ET.fromstring(text)
+    except (UnicodeDecodeError, ET.ParseError) as error:
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 不是有效的 UTF-8 XML") from error
+    root_name = root.tag.rsplit("}", 1)[-1].lower()
+    if root_name != "svg":
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 根元素无效")
+    for element in root.iter():
+        element_name = str(element.tag).rsplit("}", 1)[-1].lower()
+        if element_name in SVG_FORBIDDEN_ELEMENTS:
+            raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 包含不安全的活动内容")
+        for attribute, raw_value in element.attrib.items():
+            attribute_name = str(attribute).rsplit("}", 1)[-1].lower()
+            value = str(raw_value).strip()
+            lowered = value.lower()
+            if attribute_name.startswith("on"):
+                raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 包含不安全的事件处理器")
+            if (
+                "javascript:" in lowered
+                or "vbscript:" in lowered
+                or "expression(" in lowered
+                or "@import" in lowered
+            ):
+                raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 包含不安全的脚本或样式")
+            if attribute_name in {"href", "src"} and value and not value.startswith("#"):
+                raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 不允许引用外部资源")
+            for url_match in SVG_URL_PATTERN.finditer(value):
+                if not url_match.group(2).strip().startswith("#"):
+                    raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 不允许引用外部资源")
+    view_box = str(root.attrib.get("viewBox", root.attrib.get("viewbox", ""))).strip()
+    view_width = None
+    view_height = None
+    if view_box:
+        try:
+            values = [float(value) for value in re.split(r"[\s,]+", view_box) if value]
+        except ValueError as error:
+            raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG viewBox 无效") from error
+        if len(values) != 4 or values[2] <= 0 or values[3] <= 0:
+            raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG viewBox 无效")
+        view_width, view_height = values[2], values[3]
+    width = svg_length_px(root.attrib.get("width"))
+    height = svg_length_px(root.attrib.get("height"))
+    if width is None and height is not None and view_width and view_height:
+        width = height * view_width / view_height
+    if height is None and width is not None and view_width and view_height:
+        height = width * view_height / view_width
+    width = width if width is not None else (view_width or 300.0)
+    height = height if height is not None else (view_height or 150.0)
+    width_px = max(1, int(round(width)))
+    height_px = max(1, int(round(height)))
+    if (
+        width_px > IMAGE_MAX_EDGE_PX
+        or height_px > IMAGE_MAX_EDGE_PX
+        or width_px * height_px > IMAGE_MAX_PIXELS
+    ):
+        raise image_error(413, "IMAGE_TOO_LARGE", "图片像素尺寸超过限制")
+    try:
+        ET.register_namespace("", "http://www.w3.org/2000/svg")
+        ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+        sanitized = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    except (TypeError, ValueError) as error:
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "SVG 无法安全规范化") from error
+    if len(sanitized) > IMAGE_MAX_BYTES:
+        raise image_error(413, "IMAGE_TOO_LARGE", "图片文件超过 8 MiB 限制")
+    return sanitized, width_px, height_px
+
+
+def decode_image_source(source: Any) -> tuple[bytes, str | None]:
+    if not isinstance(source, dict):
+        raise image_error(400, "INVALID_IMAGE_SOURCE", "source 必须是图片来源对象")
+    source_type = str(source.get("type", ""))
+    if source_type == "dataUrl":
+        data_url = source.get("dataUrl")
+        if not isinstance(data_url, str):
+            raise image_error(400, "INVALID_IMAGE_SOURCE", "dataUrl 不能为空")
+        match = re.fullmatch(
+            r"data:(image/(?:png|jpeg|gif|webp)|image/svg\+xml);base64,([A-Za-z0-9+/]*={0,2})",
+            data_url,
+        )
+        if not match:
+            raise image_error(400, "INVALID_IMAGE_SOURCE", "Data URL 必须是受支持图片的严格 Base64 编码")
+        try:
+            data = base64.b64decode(match.group(2), validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise image_error(400, "INVALID_IMAGE_SOURCE", "图片 Base64 数据无效") from error
+        if not data or len(data) > IMAGE_MAX_BYTES:
+            raise image_error(413, "IMAGE_TOO_LARGE", "图片文件超过 8 MiB 限制")
+        return data, match.group(1)
+    if source_type == "url":
+        url = source.get("url")
+        if not isinstance(url, str):
+            raise image_error(400, "INVALID_IMAGE_SOURCE", "图片 URL 不能为空")
+        validated_url = validate_image_url(url)
+        request = urllib.request.Request(
+            validated_url,
+            headers={
+                "Accept": "image/png,image/jpeg,image/gif,image/webp,image/svg+xml",
+                "User-Agent": "OnlyOffice-ai-bridge/0.3",
+            },
+            method="GET",
+        )
+        opener = urllib.request.build_opener(SafeImageRedirectHandler())
+        try:
+            with opener.open(request, timeout=IMAGE_FETCH_TIMEOUT_SECONDS) as response:
+                content_type = str(response.headers.get_content_type()).lower()
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > IMAGE_MAX_BYTES:
+                    raise image_error(413, "IMAGE_TOO_LARGE", "图片文件超过 8 MiB 限制")
+                data = response.read(IMAGE_MAX_BYTES + 1)
+        except BridgeError:
+            raise
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError) as error:
+            raise image_error(502, "IMAGE_FETCH_FAILED", "获取外部图片失败") from error
+        if len(data) > IMAGE_MAX_BYTES:
+            raise image_error(413, "IMAGE_TOO_LARGE", "图片文件超过 8 MiB 限制")
+        if content_type not in IMAGE_MIME_EXTENSIONS:
+            raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "远程响应不是受支持的图片类型")
+        return data, content_type
+    raise image_error(400, "INVALID_IMAGE_SOURCE", "source.type 必须是 url 或 dataUrl")
+
+
+def cleanup_image_assets(now: float | None = None) -> None:
+    root = image_asset_root()
+    if not os.path.isdir(root):
+        return
+    current = time.time() if now is None else now
+    for name in os.listdir(root):
+        if not IMAGE_ASSET_PATTERN.fullmatch(name):
+            continue
+        path = os.path.join(root, name)
+        try:
+            if current - os.path.getmtime(path) > IMAGE_RETENTION_SECONDS:
+                os.remove(path)
+        except FileNotFoundError:
+            continue
+
+
+def import_image(source: Any, claims: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    data, declared_mime = decode_image_source(source)
+    if declared_mime == "image/svg+xml":
+        data, width, height = sanitize_svg(data)
+        mime_type, extension = "image/svg+xml", "svg"
+    else:
+        mime_type, extension, width, height = sniff_image(data)
+    if declared_mime != mime_type:
+        raise image_error(415, "UNSUPPORTED_IMAGE_FORMAT", "图片声明类型与实际内容不一致")
+    current = time.time() if now is None else now
+    root = image_asset_root()
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    cleanup_image_assets(current)
+    digest = hashlib.sha256(data).hexdigest()
+    asset_id = f"{digest}.{extension}"
+    asset_path = os.path.join(root, asset_id)
+    try:
+        with open(asset_path, "xb") as stream:
+            stream.write(data)
+        os.chmod(asset_path, 0o600)
+    except FileExistsError:
+        os.utime(asset_path, (current, current))
+    expires_at = int(current) + IMAGE_URL_TTL_SECONDS
+    identity_digest = bridge_identity_digest(bridge_identity(claims))
+    token = sign_jwt(
+        {
+            "scope": "ai-bridge-image",
+            "assetId": asset_id,
+            "identity": identity_digest,
+            "exp": expires_at,
+        },
+        get_jwt_secret(),
+    )
+    return {
+        "ok": True,
+        "asset": {
+            "assetId": asset_id,
+            "path": f"/copilot-api/images/{asset_id}?token={token}",
+            "mimeType": mime_type,
+            "widthPx": width,
+            "heightPx": height,
+            "expiresAt": expires_at,
+        },
+    }
+
+
+def verify_image_asset(asset_id: str, token: str, now: float | None = None) -> tuple[str, str]:
+    if not IMAGE_ASSET_PATTERN.fullmatch(asset_id):
+        raise image_error(404, "IMAGE_ASSET_EXPIRED", "图片资源不存在或已过期")
+    try:
+        encoded_header, encoded_payload, encoded_signature = token.split(".")
+        unsigned = f"{encoded_header}.{encoded_payload}"
+        expected = b64url(hmac.new(get_jwt_secret().encode(), unsigned.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(encoded_signature, expected):
+            raise ValueError("signature")
+        header = json.loads(base64.urlsafe_b64decode(encoded_header + "=" * (-len(encoded_header) % 4)))
+        payload = json.loads(base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4)))
+        if (
+            header.get("alg") != "HS256"
+            or not isinstance(payload, dict)
+            or payload.get("scope") != "ai-bridge-image"
+            or not hmac.compare_digest(str(payload.get("assetId", "")), asset_id)
+        ):
+            raise ValueError("claims")
+        current = time.time() if now is None else now
+        if float(payload.get("exp", 0)) < current:
+            raise image_error(410, "IMAGE_ASSET_EXPIRED", "图片资源不存在或已过期")
+    except BridgeError:
+        raise
+    except Exception as error:
+        raise image_error(404, "IMAGE_ASSET_EXPIRED", "图片资源不存在或已过期") from error
+    path = os.path.join(image_asset_root(), asset_id)
+    if not os.path.isfile(path):
+        raise image_error(404, "IMAGE_ASSET_EXPIRED", "图片资源不存在或已过期")
+    extension = asset_id.rsplit(".", 1)[1]
+    mime_type = next(
+        mime for mime, configured_extension in IMAGE_MIME_EXTENSIONS.items()
+        if configured_extension == extension
+    )
+    return path, mime_type
 
 
 def bridge_binding_token(claims: dict[str, Any]) -> tuple[str, int]:
@@ -830,8 +1357,9 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         if name not in allowed_tools:
             raise BridgeError(400, "TOOL_NOT_ALLOWED", f"当前编辑器不允许工具：{name or 'unknown'}")
         arguments = bridge_parse_json_parameter(payload, "arguments", "argumentsJson", dict, {})
-        if len(compact_json(arguments)) > 250000:
-            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", "arguments 超过 250000 字符")
+        argument_limit = IMAGE_MAX_REQUEST_BYTES if name in IMAGE_SOURCE_TOOLS else 250000
+        if len(compact_json(arguments)) > argument_limit:
+            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"arguments 超过 {argument_limit} 字符")
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
@@ -840,8 +1368,13 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         for call in tool_calls:
             if not isinstance(call, dict) or call.get("name") not in allowed_tools:
                 raise BridgeError(400, "TOOL_NOT_ALLOWED", "批量调用包含当前编辑器不允许的工具")
-        if len(compact_json(tool_calls)) > 250000:
-            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", "toolCalls 超过 250000 字符")
+        arguments_limit = (
+            IMAGE_MAX_REQUEST_BYTES
+            if any(call.get("name") in IMAGE_SOURCE_TOOLS for call in tool_calls)
+            else 250000
+        )
+        if len(compact_json(tool_calls)) > arguments_limit:
+            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"toolCalls 超过 {arguments_limit} 字符")
         params = {"toolCalls": tool_calls}
 
     return {
@@ -1025,9 +1558,9 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
         return
 
 
-def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+def read_json(handler: BaseHTTPRequestHandler, max_bytes: int = 2_000_000) -> dict[str, Any]:
     length = int(handler.headers.get("Content-Length", "0"))
-    if length <= 0 or length > 2_000_000:
+    if length <= 0 or length > max_bytes:
         raise ValueError("请求体为空或过大")
     payload = json.loads(handler.rfile.read(length).decode("utf-8"))
     if not isinstance(payload, dict):
@@ -1443,10 +1976,32 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "OnlyOfficeCopilot/1.3"
 
     def do_GET(self) -> None:
-        if self.path.rstrip("/") == "/health":
+        parsed_path = urllib.parse.urlsplit(self.path)
+        request_path = parsed_path.path.rstrip("/")
+        if request_path == "/health":
             json_response(self, 200, {"ok": True, "modelConfigured": bool(os.environ.get("COPILOT_API_KEY") and os.environ.get("COPILOT_MODEL")), "editors": ["word", "slide", "cell"]})
             return
-        if self.path.rstrip("/") == "/bridge/sessions":
+        if request_path.startswith("/images/"):
+            try:
+                asset_id = request_path.removeprefix("/images/")
+                token = urllib.parse.parse_qs(parsed_path.query).get("token", [""])[0]
+                asset_path, mime_type = verify_image_asset(asset_id, token)
+                with open(asset_path, "rb") as stream:
+                    body = stream.read()
+                self.send_response(200)
+                self.send_header("Content-Type", mime_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "private, max-age=900")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+            except BridgeError as error:
+                self.log_bridge_error(error)
+                json_response(self, error.status, error.payload())
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            return
+        if request_path == "/bridge/sessions":
             try:
                 json_response(self, 200, bridge_sessions(bridge_authorization(self)))
             except BridgeError as error:
@@ -1457,24 +2012,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         payload: dict[str, Any] = {}
+        request_path = ""
         try:
-            payload = read_json(self)
-            if self.path.rstrip("/") == "/bridge/register":
+            request_path = urllib.parse.urlsplit(self.path).path.rstrip("/")
+            max_bytes = (
+                IMAGE_MAX_REQUEST_BYTES
+                if request_path in ("/images/import", "/bridge/execute")
+                else 2_000_000
+            )
+            payload = read_json(self, max_bytes)
+            if request_path == "/images/import":
+                json_response(
+                    self,
+                    200,
+                    import_image(payload.get("source"), bridge_authorization(self)),
+                )
+                return
+            if request_path == "/bridge/register":
                 json_response(self, 200, bridge_register(payload))
                 return
-            if self.path.rstrip("/") == "/bridge/poll":
+            if request_path == "/bridge/poll":
                 json_response(self, 200, bridge_poll(payload))
                 return
-            if self.path.rstrip("/") == "/bridge/result":
+            if request_path == "/bridge/result":
                 json_response(self, 200, bridge_result(payload))
                 return
-            if self.path.rstrip("/") == "/bridge/unregister":
+            if request_path == "/bridge/unregister":
                 json_response(self, 200, bridge_unregister(payload))
                 return
-            if self.path.rstrip("/") == "/bridge/execute":
+            if request_path == "/bridge/execute":
                 json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
                 return
-            if self.path.rstrip("/") == "/chat":
+            if request_path == "/chat":
                 editor = str(payload.get("editorType", ""))
                 if editor not in TOOLS_BY_EDITOR:
                     raise ValueError(f"不支持 editorType：{editor}")
@@ -1482,7 +2051,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("message 不能为空")
                 json_response(self, 200, call_model(editor, payload))
                 return
-            if self.path.rstrip("/") == "/forcesave":
+            if request_path == "/forcesave":
                 json_response(
                     self,
                     200,
@@ -1493,14 +2062,14 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            if self.path.rstrip("/") == "/checkpoint":
+            if request_path == "/checkpoint":
                 json_response(self, 200, create_checkpoint(payload.get("fileName")))
                 return
-            if self.path.rstrip("/") == "/history":
+            if request_path == "/history":
                 json_response(self, 200, version_status(payload.get("fileName")))
                 return
-            if self.path.rstrip("/") in ("/undo", "/redo"):
-                direction = self.path.strip("/")
+            if request_path in ("/undo", "/redo"):
+                direction = request_path.strip("/")
                 json_response(
                     self,
                     200,
@@ -1519,18 +2088,30 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as error:
             json_response(self, 400, {"error": str(error)})
         except Exception as error:  # noqa: BLE001 - boundary must return JSON
-            json_response(self, 502, {"error": str(error)})
+            if request_path == "/images/import":
+                safe_error = image_error(502, "IMAGE_FETCH_FAILED", "图片导入失败")
+                self.log_bridge_error(safe_error, payload)
+                json_response(self, safe_error.status, safe_error.payload())
+            else:
+                json_response(self, 502, {"error": str(error)})
 
     def log_message(self, format: str, *args: Any) -> None:
         if getattr(self, "_suppress_access_log", False):
             return
-        print(f"[{self.log_date_time_string()}] {self.client_address[0]} {format % args}", flush=True)
+        rendered = format % args
+        rendered = re.sub(
+            r"(/images/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg))\?token=[^ ]+",
+            r"\1?token=[redacted]",
+            rendered,
+        )
+        print(f"[{self.log_date_time_string()}] {self.client_address[0]} {rendered}", flush=True)
 
     def log_bridge_error(self, error: BridgeError, payload: dict[str, Any] | None = None) -> None:
         self._suppress_access_log = bool(error.suppress_log)
         if error.suppress_log:
             return
         session_id = str((payload or {}).get("sessionId", "")).strip()
+        request_id = str((payload or {}).get("requestId", "")).strip()
         event = {
             "path": self.path.split("?", 1)[0],
             "status": error.status,
@@ -1539,6 +2120,12 @@ class Handler(BaseHTTPRequestHandler):
         }
         if BRIDGE_ID_PATTERN.fullmatch(session_id):
             event["sessionId"] = session_id
+        if BRIDGE_ID_PATTERN.fullmatch(request_id):
+            event["requestId"] = request_id
+        details = error.details if isinstance(error.details, dict) else {}
+        phase = str(details.get("phase", "")).strip()
+        if phase in BRIDGE_LOG_PHASES:
+            event["phase"] = phase
         print(
             "[bridge-error] "
             + compact_json(event),

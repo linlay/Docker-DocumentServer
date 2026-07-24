@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.2.0";
+  const VERSION = "0.4.0";
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -20,6 +20,9 @@
   const readyWaiters = new Set();
   const listeners = new Map();
   const relayClients = new Map();
+  const preparedImageCommands = new Map();
+  const IMAGE_TOOL_NAMES = new Set(["word_add_image", "slides_add_image", "slides_add_image_shape", "word_add_ole_object", "slides_add_ole_object"]);
+  const OPTIONAL_IMAGE_TOOL_NAMES = new Set(["word_set_watermark", "sheets_manage_drawing"]);
   const sessionId = createRequestId("session");
   let pluginWindow = null;
   let ready = false;
@@ -242,6 +245,8 @@
       editorType: editorConfig.documentType || "",
       callbackUrl: editorConfig.editorConfig && editorConfig.editorConfig.callbackUrl || "",
       userId: editorConfig.editorConfig && editorConfig.editorConfig.user && editorConfig.editorConfig.user.id || "",
+      interfaceLanguage: editorConfig.editorConfig && editorConfig.editorConfig.lang || "",
+      region: editorConfig.editorConfig && editorConfig.editorConfig.region || "",
     };
   }
 
@@ -388,8 +393,211 @@
     });
   }
 
+  async function importImageSource(source) {
+    const token = editorToken();
+    if (!token) throw bridgeError("EDITOR_TOKEN_REQUIRED", "当前编辑器没有可用于导入图片的凭证");
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw bridgeError("INVALID_IMAGE_SOURCE", "source 必须是图片来源对象");
+    }
+    if (source.type === "url") {
+      if (typeof source.url !== "string" || !/^https:\/\//i.test(source.url)) {
+        throw bridgeError("INVALID_IMAGE_SOURCE", "外部图片只允许 HTTPS URL");
+      }
+    } else if (source.type === "dataUrl") {
+      if (typeof source.dataUrl !== "string" || !/^data:(?:image\/(?:png|jpeg|gif|webp)|image\/svg\+xml);base64,/i.test(source.dataUrl)) {
+        throw bridgeError("INVALID_IMAGE_SOURCE", "Data URL 必须是受支持图片的 Base64 编码");
+      }
+    } else {
+      throw bridgeError("INVALID_IMAGE_SOURCE", "source.type 必须是 url 或 dataUrl");
+    }
+    if (typeof window.fetch !== "function") {
+      throw bridgeError("IMAGE_FETCH_FAILED", "当前宿主页不支持图片导入请求");
+    }
+    let response;
+    try {
+      response = await window.fetch("/copilot-api/images/import", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ source }),
+      });
+    } catch (error) {
+      throw bridgeError("IMAGE_FETCH_FAILED", "图片导入服务不可用");
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw bridgeError("IMAGE_FETCH_FAILED", `图片导入服务返回了无效响应：${response.status}`);
+    }
+    if (!response.ok || !body || body.ok === false) {
+      const serviceError = body && body.error;
+      throw bridgeError(
+        serviceError && serviceError.code || "IMAGE_FETCH_FAILED",
+        serviceError && serviceError.message || `图片导入失败：${response.status}`,
+        { details: serviceError && serviceError.details },
+      );
+    }
+    const asset = body.asset;
+    if (
+      !asset
+      || typeof asset.path !== "string"
+      || !/^\/copilot-api\/images\/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)\?token=/.test(asset.path)
+      || !Number.isFinite(Number(asset.widthPx))
+      || !Number.isFinite(Number(asset.heightPx))
+      || Number(asset.widthPx) <= 0
+      || Number(asset.heightPx) <= 0
+    ) {
+      throw bridgeError("IMAGE_FETCH_FAILED", "图片导入服务缺少有效资源信息");
+    }
+    let resolvedUrl = new URL(asset.path, window.location.origin).toString();
+    let transport = "url";
+    const loopbackHost = (
+      window.location.hostname === "localhost"
+      || window.location.hostname === "127.0.0.1"
+      || window.location.hostname === "::1"
+      || window.location.hostname === "[::1]"
+    );
+    if (loopbackHost) {
+      let assetResponse;
+      try {
+        assetResponse = await window.fetch(asset.path, {
+          method: "GET",
+          credentials: "same-origin",
+        });
+      } catch (error) {
+        throw bridgeError("IMAGE_FETCH_FAILED", "无法读取已导入的图片资源");
+      }
+      if (!assetResponse.ok || typeof assetResponse.arrayBuffer !== "function") {
+        throw bridgeError(
+          assetResponse.status === 410 ? "IMAGE_ASSET_EXPIRED" : "IMAGE_FETCH_FAILED",
+          "无法读取已导入的图片资源",
+        );
+      }
+      let contentType;
+      let bytes;
+      try {
+        contentType = String(assetResponse.headers && assetResponse.headers.get("Content-Type") || "")
+          .split(";", 1)[0]
+          .toLowerCase();
+        bytes = new Uint8Array(await assetResponse.arrayBuffer());
+      } catch (error) {
+        throw bridgeError("IMAGE_FETCH_FAILED", "无法读取已导入的图片资源");
+      }
+      if (contentType !== String(asset.mimeType || "").toLowerCase()) {
+        throw bridgeError("UNSUPPORTED_IMAGE_FORMAT", "已导入图片的响应类型不一致");
+      }
+      if (!bytes.length || bytes.length > 8 * 1024 * 1024) {
+        throw bridgeError("IMAGE_TOO_LARGE", "已导入图片超过 8 MiB 限制");
+      }
+      if (typeof window.btoa !== "function") {
+        throw bridgeError("IMAGE_API_UNSUPPORTED", "当前宿主页不能编码内部图片资源");
+      }
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 32768) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 32768));
+      }
+      resolvedUrl = `data:${contentType};base64,${window.btoa(binary)}`;
+      transport = "dataUrl";
+    }
+    return {
+      url: resolvedUrl,
+      transport,
+      assetId: String(asset.assetId || ""),
+      mimeType: String(asset.mimeType || ""),
+      widthPx: Number(asset.widthPx),
+      heightPx: Number(asset.heightPx),
+    };
+  }
+
+  async function prepareImageCommand(command) {
+    if (!command || typeof command !== "object") return command;
+    const rawCalls = Array.isArray(command.toolCalls)
+      ? command.toolCalls
+      : command.name ? [command] : null;
+    if (!rawCalls || !rawCalls.some(function (call) {
+      return call && (IMAGE_TOOL_NAMES.has(call.name) || OPTIONAL_IMAGE_TOOL_NAMES.has(call.name));
+    })) {
+      return command;
+    }
+    const preparedCalls = await Promise.all(rawCalls.map(async function (call) {
+      if (!call || (!IMAGE_TOOL_NAMES.has(call.name) && !OPTIONAL_IMAGE_TOOL_NAMES.has(call.name))) return call;
+      let args = call.arguments === undefined ? call.args : call.arguments;
+      if (typeof args === "string") {
+        try {
+          args = JSON.parse(args || "{}");
+        } catch (error) {
+          throw bridgeError("INVALID_ARGUMENTS", `${call.name}.arguments 不是有效 JSON`);
+        }
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args)) {
+        throw bridgeError("INVALID_ARGUMENTS", `${call.name}.arguments 必须是对象`);
+      }
+      if (args._image !== undefined) {
+        throw bridgeError("INVALID_IMAGE_SOURCE", "外部调用不能提供内部图片资源");
+      }
+      if (OPTIONAL_IMAGE_TOOL_NAMES.has(call.name) && args.source === undefined) return call;
+      const imported = await importImageSource(args.source);
+      const preparedArgs = { ...args, _image: imported };
+      delete preparedArgs.source;
+      return { ...call, arguments: preparedArgs };
+    }));
+    return { toolCalls: preparedCalls };
+  }
+
   function execute(command, options) {
-    return request("execute", { command }, options);
+    const requestOptions = { ...(options || {}) };
+    if (!requestOptions.requestId) requestOptions.requestId = createRequestId("command");
+    if (typeof requestOptions.requestId !== "string" || !REQUEST_ID_PATTERN.test(requestOptions.requestId)) {
+      return Promise.reject(bridgeError(
+        "INVALID_REQUEST_ID",
+        "requestId 只能包含字母、数字、点、下划线、冒号或连字符，且长度不超过 200",
+      ));
+    }
+    const containsImage = Boolean(
+      command
+      && typeof command === "object"
+      && (
+        IMAGE_TOOL_NAMES.has(command.name)
+        || OPTIONAL_IMAGE_TOOL_NAMES.has(command.name)
+        || (Array.isArray(command.toolCalls)
+          && command.toolCalls.some(function (call) {
+            return call && (IMAGE_TOOL_NAMES.has(call.name) || OPTIONAL_IMAGE_TOOL_NAMES.has(call.name));
+          }))
+      )
+    );
+    if (!containsImage) return request("execute", { command }, requestOptions);
+
+    const fingerprint = stableHash(JSON.stringify(command));
+    const cached = preparedImageCommands.get(requestOptions.requestId);
+    if (cached && cached.fingerprint !== fingerprint) {
+      return Promise.reject(bridgeError(
+        "REQUEST_ID_CONFLICT",
+        "相同 requestId 不能用于不同的图片命令",
+        { requestId: requestOptions.requestId },
+      ));
+    }
+    const prepared = cached || {
+      fingerprint,
+      promise: prepareImageCommand(command),
+    };
+    if (!cached) {
+      preparedImageCommands.set(requestOptions.requestId, prepared);
+      while (preparedImageCommands.size > 100) {
+        preparedImageCommands.delete(preparedImageCommands.keys().next().value);
+      }
+      prepared.promise.catch(function () {
+        if (preparedImageCommands.get(requestOptions.requestId) === prepared) {
+          preparedImageCommands.delete(requestOptions.requestId);
+        }
+      });
+    }
+    return prepared.promise.then(function (preparedCommand) {
+      return request("execute", { command: preparedCommand }, requestOptions);
+    });
   }
 
   function executeTool(name, args, options) {
@@ -549,6 +757,30 @@
       addHyperlink: function (args, options) { return executeTool("word_add_hyperlink", args, options); },
       addComment: function (args, options) { return executeTool("word_add_comment", args, options); },
       addBookmark: function (args, options) { return executeTool("word_add_bookmark", args, options); },
+      addImage: function (args, options) { return executeTool("word_add_image", args, options); },
+      inspectAdvanced: function (args, options) { return executeTool("word_inspect_advanced", args, options); },
+      setDocumentProperties: function (args, options) { return executeTool("word_set_document_properties", args, options); },
+      manageSection: function (args, options) { return executeTool("word_manage_section", args, options); },
+      manageStyle: function (args, options) { return executeTool("word_manage_style", args, options); },
+      setTabs: function (args, options) { return executeTool("word_set_tabs", args, options); },
+      setNumbering: function (args, options) { return executeTool("word_set_numbering", args, options); },
+      formatTableAdvanced: function (args, options) { return executeTool("word_format_table_advanced", args, options); },
+      addNestedTable: function (args, options) { return executeTool("word_add_nested_table", args, options); },
+      manageDrawing: function (args, options) { return executeTool("word_manage_drawing", args, options); },
+      addShape: function (args, options) { return executeTool("word_add_shape", args, options); },
+      addChart: function (args, options) { return executeTool("word_add_chart", args, options); },
+      addMath: function (args, options) { return executeTool("word_add_math", args, options); },
+      addOleObject: function (args, options) { return executeTool("word_add_ole_object", args, options); },
+      manageFields: function (args, options) { return executeTool("word_manage_fields", args, options); },
+      manageLongDocument: function (args, options) { return executeTool("word_manage_long_document", args, options); },
+      manageComments: function (args, options) { return executeTool("word_manage_comments", args, options); },
+      manageRevisions: function (args, options) { return executeTool("word_manage_revisions", args, options); },
+      setProtection: function (args, options) { return executeTool("word_set_protection", args, options); },
+      manageContentControl: function (args, options) { return executeTool("word_manage_content_control", args, options); },
+      manageCustomXml: function (args, options) { return executeTool("word_manage_custom_xml", args, options); },
+      inspectMacros: function (args, options) { return executeTool("word_inspect_macros", args, options); },
+      setMacros: function (args, options) { return executeTool("word_set_macros", args, options); },
+      setWatermark: function (args, options) { return executeTool("word_set_watermark", args, options); },
       formatParagraphs: function (args, options) { return executeTool("word_format_paragraphs", args, options); },
       setParagraphText: function (args, options) { return executeTool("word_set_paragraph_text", args, options); },
       deleteParagraphs: function (args, options) { return executeTool("word_delete_paragraphs", args, options); },
@@ -567,6 +799,9 @@
     },
     slides: {
       inspect: function (args, options) { return executeTool("slides_inspect", args, options); },
+      inspectLayouts: function (args, options) { return executeTool("slides_inspect_layouts", args, options); },
+      inspectThemes: function (args, options) { return executeTool("slides_inspect_themes", args, options); },
+      inspectBuiltinThemes: function (args, options) { return executeTool("slides_inspect_builtin_themes", args, options); },
       inspectObjects: function (args, options) { return executeTool("slides_inspect_objects", args, options); },
       replaceText: function (args, options) { return executeTool("slides_replace_text", args, options); },
       scaleFont: function (args, options) { return executeTool("slides_scale_font", args, options); },
@@ -575,7 +810,44 @@
       addSlide: function (args, options) { return executeTool("slides_add_slide", args, options); },
       duplicateSlide: function (args, options) { return executeTool("slides_duplicate_slide", args, options); },
       deleteSlide: function (args, options) { return executeTool("slides_delete_slide", args, options); },
+      moveSlide: function (args, options) { return executeTool("slides_move_slide", args, options); },
+      setVisibility: function (args, options) { return executeTool("slides_set_visibility", args, options); },
+      setSize: function (args, options) { return executeTool("slides_set_size", args, options); },
+      applyLayout: function (args, options) { return executeTool("slides_apply_layout", args, options); },
+      setShowSettings: function (args, options) { return executeTool("slides_set_show_settings", args, options); },
+      applyTheme: function (args, options) { return executeTool("slides_apply_theme", args, options); },
+      applyBuiltinTheme: function (args, options) { return executeTool("slides_apply_builtin_theme", args, options); },
+      setTheme: function (args, options) { return executeTool("slides_set_theme", args, options); },
+      createLayout: function (args, options) { return executeTool("slides_create_layout", args, options); },
+      addTemplateShape: function (args, options) { return executeTool("slides_add_template_shape", args, options); },
+      manageTemplateObject: function (args, options) { return executeTool("slides_manage_template_object", args, options); },
+      setTemplateBackground: function (args, options) { return executeTool("slides_set_template_background", args, options); },
+      setTextContent: function (args, options) { return executeTool("slides_set_text_content", args, options); },
+      formatParagraphs: function (args, options) { return executeTool("slides_format_paragraphs", args, options); },
+      updateObject: function (args, options) { return executeTool("slides_update_object", args, options); },
+      setHyperlink: function (args, options) { return executeTool("slides_set_hyperlink", args, options); },
+      setNotes: function (args, options) { return executeTool("slides_set_notes", args, options); },
+      addComment: function (args, options) { return executeTool("slides_add_comment", args, options); },
+      inspectComments: function (args, options) { return executeTool("slides_inspect_comments", args, options); },
+      manageComment: function (args, options) { return executeTool("slides_manage_comment", args, options); },
+      setTransition: function (args, options) { return executeTool("slides_set_transition", args, options); },
+      inspectAnimations: function (args, options) { return executeTool("slides_inspect_animations", args, options); },
+      manageAnimation: function (args, options) { return executeTool("slides_manage_animation", args, options); },
+      addTable: function (args, options) { return executeTool("slides_add_table", args, options); },
+      setTableCell: function (args, options) { return executeTool("slides_set_table_cell", args, options); },
+      editTable: function (args, options) { return executeTool("slides_edit_table", args, options); },
+      formatTable: function (args, options) { return executeTool("slides_format_table", args, options); },
+      alignObjects: function (args, options) { return executeTool("slides_align_objects", args, options); },
+      groupObjects: function (args, options) { return executeTool("slides_group_objects", args, options); },
+      reorderObject: function (args, options) { return executeTool("slides_reorder_object", args, options); },
+      addConnector: function (args, options) { return executeTool("slides_add_connector", args, options); },
+      addFreeform: function (args, options) { return executeTool("slides_add_freeform", args, options); },
       addTextBox: function (args, options) { return executeTool("slides_add_textbox", args, options); },
+      addWordArt: function (args, options) { return executeTool("slides_add_word_art", args, options); },
+      addMath: function (args, options) { return executeTool("slides_add_math", args, options); },
+      addImage: function (args, options) { return executeTool("slides_add_image", args, options); },
+      addImageShape: function (args, options) { return executeTool("slides_add_image_shape", args, options); },
+      addOleObject: function (args, options) { return executeTool("slides_add_ole_object", args, options); },
       setBackground: function (args, options) { return executeTool("slides_set_background", args, options); },
       addShape: function (args, options) { return executeTool("slides_add_shape", args, options); },
       updateShape: function (args, options) { return executeTool("slides_update_shape", args, options); },
@@ -584,6 +856,9 @@
       addChart: function (args, options) { return executeTool("slides_add_chart", args, options); },
       updateChart: function (args, options) { return executeTool("slides_update_chart", args, options); },
       deleteChart: function (args, options) { return executeTool("slides_delete_chart", args, options); },
+      inspectMacros: function (args, options) { return executeTool("slides_inspect_macros", args, options); },
+      setMacros: function (args, options) { return executeTool("slides_set_macros", args, options); },
+      controlSlideshow: function (args, options) { return executeTool("slides_control_slideshow", args, options); },
     },
     sheets: {
       inspect: function (args, options) { return executeTool("sheets_inspect", args, options); },
@@ -598,6 +873,37 @@
       inspectCharts: function (args, options) { return executeTool("sheets_inspect_charts", args, options); },
       updateChart: function (args, options) { return executeTool("sheets_update_chart", args, options); },
       deleteChart: function (args, options) { return executeTool("sheets_delete_chart", args, options); },
+      inspectRange: function (args, options) { return executeTool("sheets_inspect_range", args, options); },
+      setArrayFormula: function (args, options) { return executeTool("sheets_set_array_formula", args, options); },
+      manageSheet: function (args, options) { return executeTool("sheets_manage_sheet", args, options); },
+      manageRange: function (args, options) { return executeTool("sheets_manage_range", args, options); },
+      setRichText: function (args, options) { return executeTool("sheets_set_rich_text", args, options); },
+      inspectNames: function (args, options) { return executeTool("sheets_inspect_names", args, options); },
+      manageNames: function (args, options) { return executeTool("sheets_manage_names", args, options); },
+      recalculate: function (args, options) { return executeTool("sheets_recalculate", args, options); },
+      sort: function (args, options) { return executeTool("sheets_sort", args, options); },
+      filter: function (args, options) { return executeTool("sheets_filter", args, options); },
+      inspectTables: function (args, options) { return executeTool("sheets_inspect_tables", args, options); },
+      manageTable: function (args, options) { return executeTool("sheets_manage_table", args, options); },
+      manageConditionalFormat: function (args, options) { return executeTool("sheets_manage_conditional_format", args, options); },
+      manageValidation: function (args, options) { return executeTool("sheets_manage_validation", args, options); },
+      inspectPivots: function (args, options) { return executeTool("sheets_inspect_pivots", args, options); },
+      managePivot: function (args, options) { return executeTool("sheets_manage_pivot", args, options); },
+      inspectDrawings: function (args, options) { return executeTool("sheets_inspect_drawings", args, options); },
+      manageDrawing: function (args, options) { return executeTool("sheets_manage_drawing", args, options); },
+      manageHyperlink: function (args, options) { return executeTool("sheets_manage_hyperlink", args, options); },
+      inspectComments: function (args, options) { return executeTool("sheets_inspect_comments", args, options); },
+      manageComments: function (args, options) { return executeTool("sheets_manage_comments", args, options); },
+      inspectFreezePanes: function (args, options) { return executeTool("sheets_inspect_freeze_panes", args, options); },
+      manageFreezePanes: function (args, options) { return executeTool("sheets_manage_freeze_panes", args, options); },
+      inspectProperties: function (args, options) { return executeTool("sheets_inspect_properties", args, options); },
+      manageProperties: function (args, options) { return executeTool("sheets_manage_properties", args, options); },
+      inspectProtectedRanges: function (args, options) { return executeTool("sheets_inspect_protected_ranges", args, options); },
+      manageProtectedRanges: function (args, options) { return executeTool("sheets_manage_protected_ranges", args, options); },
+      inspectPageLayout: function (args, options) { return executeTool("sheets_inspect_page_layout", args, options); },
+      managePageLayout: function (args, options) { return executeTool("sheets_manage_page_layout", args, options); },
+      inspectMacros: function (args, options) { return executeTool("sheets_inspect_macros", args, options); },
+      setMacros: function (args, options) { return executeTool("sheets_set_macros", args, options); },
     },
   };
 
