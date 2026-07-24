@@ -49,6 +49,14 @@
 默认值。外部集成必须在创建 `DocsAPI.DocEditor` 前设置此项；无需监听 Home 点击，
 也不要依赖编辑器内部 `section` 的绝对 XPath。
 
+当 `host-bridge.js` 与编辑器 iframe 同源时，还会把原生 Save、Undo、Redo 按钮
+移动到 Editing 控件左侧，并隐藏完整的 28px 文档标题栏。Logo、文档名称、标题栏
+用户名、Print 快捷按钮和快速访问下拉不再占用空间；Print 仍保留在 File 菜单，
+Open file location 与 Mark as favorite 两个顶栏按钮也会隐藏，主工具栏的协作者
+状态不受影响。迁移直接复用 ONLYOFFICE 原生按钮节点，保留按钮状态、快捷键和
+事件；如果未来版本缺少所需语义槽位，则保留原标题栏作为安全降级。跨域编辑器
+iframe 无法使用这项 DOM 收缩。
+
 页面加载后：
 
 ```js

@@ -28,6 +28,165 @@ function eventTarget(target) {
   return target;
 }
 
+function fakeElement(tagName, id = "") {
+  const attributes = new Map();
+  return {
+    tagName: String(tagName).toUpperCase(),
+    id,
+    className: "",
+    dataset: {},
+    children: [],
+    parentElement: null,
+    textContent: "",
+    appendChild(child) {
+      if (child.parentElement) {
+        const previousIndex = child.parentElement.children.indexOf(child);
+        if (previousIndex >= 0) child.parentElement.children.splice(previousIndex, 1);
+      }
+      this.children.push(child);
+      child.parentElement = this;
+      return child;
+    },
+    insertBefore(child, reference) {
+      if (child.parentElement) {
+        const previousIndex = child.parentElement.children.indexOf(child);
+        if (previousIndex >= 0) child.parentElement.children.splice(previousIndex, 1);
+      }
+      const referenceIndex = this.children.indexOf(reference);
+      assert.notEqual(referenceIndex, -1, "insertBefore reference must be a child");
+      this.children.splice(referenceIndex, 0, child);
+      child.parentElement = this;
+      return child;
+    },
+    setAttribute(name, value) {
+      attributes.set(String(name), String(value));
+    },
+    getAttribute(name) {
+      return attributes.has(String(name)) ? attributes.get(String(name)) : null;
+    },
+  };
+}
+
+function createEditorUiHarness(options = {}) {
+  const html = fakeElement("html");
+  const head = fakeElement("head");
+  const appTitle = fakeElement("section", "app-title");
+  const logo = fakeElement("div", "header-logo");
+  const save = fakeElement("div", "slot-btn-dt-save");
+  const print = fakeElement("div", "slot-btn-dt-print");
+  const undo = fakeElement("div", "slot-btn-dt-undo");
+  const redo = fakeElement("div", "slot-btn-dt-redo");
+  const quickAccessMenu = fakeElement("div", "slot-btn-dt-quick-access");
+  const documentName = fakeElement("div", "id-box-doc-name");
+  const userName = fakeElement("div");
+  userName.setAttribute("data-layout-name", "header-user");
+  const rightGroup = fakeElement("section", "box-right-btn-group");
+  const editModeGroup = fakeElement("div");
+  editModeGroup.setAttribute("data-layout-name", "header-editMode");
+  const collaborators = fakeElement("div");
+  collaborators.setAttribute("data-layout-name", "header-users");
+
+  for (const element of [logo, save, print, undo, quickAccessMenu, documentName, userName]) {
+    appTitle.appendChild(element);
+  }
+  if (!options.missingRedo) appTitle.insertBefore(redo, quickAccessMenu);
+  rightGroup.appendChild(editModeGroup);
+  rightGroup.appendChild(collaborators);
+
+  const roots = [html, head, appTitle, rightGroup];
+  const findById = id => {
+    const pending = roots.slice();
+    while (pending.length) {
+      const element = pending.shift();
+      if (element.id === id) return element;
+      pending.push(...element.children);
+    }
+    return null;
+  };
+  const findByLayout = layoutName => {
+    const pending = roots.slice();
+    while (pending.length) {
+      const element = pending.shift();
+      if (element.getAttribute("data-layout-name") === layoutName) return element;
+      pending.push(...element.children);
+    }
+    return null;
+  };
+
+  const resizeEvents = [];
+  const editorDocument = {
+    documentElement: html,
+    head,
+    defaultView: {
+      Event: class Event {
+        constructor(type) { this.type = type; }
+      },
+      requestAnimationFrame(callback) { callback(); },
+      dispatchEvent(event) { resizeEvents.push(event.type); },
+    },
+    createElement(tagName) {
+      return fakeElement(tagName);
+    },
+    querySelector(selector) {
+      if (selector.startsWith("#")) return findById(selector.slice(1));
+      if (selector === '[data-layout-name="header-editMode"]') {
+        return findByLayout("header-editMode");
+      }
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+  };
+  const frameListeners = new Map();
+  const frame = {
+    contentDocument: editorDocument,
+    addEventListener(name, listener) {
+      frameListeners.set(name, listener);
+    },
+  };
+  const hostDocument = {
+    documentElement: fakeElement("html"),
+    currentScript: {
+      src: "https://docs.test/sdkjs-plugins/ai-bridge/host-bridge.js",
+    },
+    querySelector(selector) {
+      return selector === 'iframe[src*="/web-apps/apps/"]' ? frame : null;
+    },
+  };
+  const observers = [];
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+      observers.push(this);
+    }
+    observe() {}
+    disconnect() {}
+  }
+
+  return {
+    appTitle,
+    collaborators,
+    documentName,
+    editModeGroup,
+    editorDocument,
+    frame,
+    frameListeners,
+    hostDocument,
+    logo,
+    observers,
+    print,
+    quickAccessMenu,
+    redo,
+    resizeEvents,
+    rightGroup,
+    save,
+    undo,
+    userName,
+    MutationObserver: FakeMutationObserver,
+  };
+}
+
 function createHarness(options = {}) {
   const editorType = options.editorType || "word";
   const editorConfig = {
@@ -154,16 +313,17 @@ function createHarness(options = {}) {
     },
   };
 
+  const hostDocument = options.hostDocument || {
+    documentElement,
+    querySelector() { return null; },
+    currentScript: {
+      src: "https://docs.test/sdkjs-plugins/ai-bridge/host-bridge.js",
+    },
+  };
   vm.runInNewContext(hostSource, {
     window: hostWindow,
-    document: {
-      documentElement,
-      querySelector() { return null; },
-      currentScript: {
-        src: "https://docs.test/sdkjs-plugins/ai-bridge/host-bridge.js",
-      },
-    },
-    MutationObserver: class MutationObserver {
+    document: hostDocument,
+    MutationObserver: options.MutationObserver || class MutationObserver {
       observe() {}
       disconnect() {}
     },
@@ -324,6 +484,72 @@ function createWordBridgeHarness(options = {}) {
     get text() { return documentText; },
   };
 }
+
+test("same-origin editor header moves the native quick access slots before edit mode", () => {
+  const ui = createEditorUiHarness();
+  createHarness({
+    hostDocument: ui.hostDocument,
+    MutationObserver: ui.MutationObserver,
+  });
+
+  const quickAccess = ui.editorDocument.querySelector("#ai-bridge-quick-access");
+  assert.ok(quickAccess);
+  assert.deepEqual(quickAccess.children, [ui.save, ui.undo, ui.redo]);
+  assert.deepEqual(ui.rightGroup.children, [
+    quickAccess,
+    ui.editModeGroup,
+    ui.collaborators,
+  ]);
+  assert.equal(quickAccess.getAttribute("role"), "menubar");
+  assert.equal(quickAccess.getAttribute("aria-label"), "Quick access toolbar");
+  assert.equal(ui.editorDocument.documentElement.dataset.aiBridgeCompactHeader, "true");
+  assert.equal(ui.resizeEvents.length, 1);
+  const uiStyle = ui.editorDocument.head.children.find(
+    child => child.id === "ai-bridge-editor-ui-customization",
+  );
+  assert.ok(uiStyle);
+  assert.match(uiStyle.textContent, /#btn-go-back,/);
+  assert.match(uiStyle.textContent, /#id-btn-favorite,/);
+
+  assert.equal(ui.print.parentElement, ui.appTitle);
+  assert.equal(ui.quickAccessMenu.parentElement, ui.appTitle);
+  assert.equal(ui.logo.parentElement, ui.appTitle);
+  assert.equal(ui.documentName.parentElement, ui.appTitle);
+  assert.equal(ui.userName.parentElement, ui.appTitle);
+  assert.equal(ui.collaborators.parentElement, ui.rightGroup);
+});
+
+test("same-origin editor header customization is idempotent", () => {
+  const ui = createEditorUiHarness();
+  createHarness({
+    hostDocument: ui.hostDocument,
+    MutationObserver: ui.MutationObserver,
+  });
+  const quickAccess = ui.editorDocument.querySelector("#ai-bridge-quick-access");
+  assert.equal(ui.observers.length, 1);
+
+  ui.observers[0].callback([]);
+  ui.observers[0].callback([]);
+
+  assert.equal(ui.editorDocument.querySelector("#ai-bridge-quick-access"), quickAccess);
+  assert.deepEqual(quickAccess.children, [ui.save, ui.undo, ui.redo]);
+  assert.equal(ui.rightGroup.children.filter(child => child === quickAccess).length, 1);
+  assert.equal(ui.resizeEvents.length, 1);
+});
+
+test("same-origin editor keeps the original title when a required slot is missing", () => {
+  const ui = createEditorUiHarness({ missingRedo: true });
+  createHarness({
+    hostDocument: ui.hostDocument,
+    MutationObserver: ui.MutationObserver,
+  });
+
+  assert.equal(ui.editorDocument.querySelector("#ai-bridge-quick-access"), null);
+  assert.equal(ui.editorDocument.documentElement.dataset.aiBridgeCompactHeader, undefined);
+  assert.equal(ui.save.parentElement, ui.appTitle);
+  assert.equal(ui.undo.parentElement, ui.appTitle);
+  assert.deepEqual(ui.rightGroup.children, [ui.editModeGroup, ui.collaborators]);
+});
 
 test("headless plugin handshakes with one host instance and executes a read-only tool", async () => {
   const { hostWindow } = createHarness();

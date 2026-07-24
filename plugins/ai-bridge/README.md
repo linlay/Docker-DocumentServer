@@ -83,6 +83,16 @@ that want the same behavior must set
 `editorConfig.customization.compactToolbar` to `true` before constructing
 `DocsAPI.DocEditor`.
 
+When `host-bridge.js` can access the editor iframe on the same origin, it also
+moves the native Save, Undo, and Redo slots immediately before the Editing
+control and hides the complete 28-pixel document-title row. This removes the
+logo, document-name, title-row user name, Print shortcut, and quick-access menu
+without cloning the three retained buttons. The Open file location and Mark as
+favorite header buttons are hidden as well. Print remains available from File,
+and the toolbar collaboration status remains visible. If the expected semantic
+slots are missing, the original title row is left intact. Cross-origin editor
+iframes cannot use this DOM compaction.
+
 ## Load the external-page API
 
 Load `host-bridge.js` in the page that owns the ONLYOFFICE editor. If the

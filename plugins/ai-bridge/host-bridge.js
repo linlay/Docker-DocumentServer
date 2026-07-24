@@ -27,9 +27,17 @@
   let bridgeCapabilities = null;
 
   const editorUiStyleId = "ai-bridge-editor-ui-customization";
+  const editorQuickAccessId = "ai-bridge-quick-access";
+  const editorQuickAccessSlotSelectors = [
+    "#slot-btn-dt-save",
+    "#slot-btn-dt-undo",
+    "#slot-btn-dt-redo",
+  ];
   const editorUiStyle = [
     "#left-menu,",
     "#view-left-menu,",
+    "#btn-go-back,",
+    "#id-btn-favorite,",
     'li[data-layout-name="toolbar-collaboration"],',
     'li[data-layout-name="toolbar-plugins"]',
     "{ display: none !important; }",
@@ -39,6 +47,20 @@
     "  max-width: 0 !important;",
     "  flex: 0 0 0 !important;",
     "}",
+    'html[data-ai-bridge-compact-header="true"] #app-title {',
+    "  display: none !important;",
+    "  height: 0 !important;",
+    "  min-height: 0 !important;",
+    "  max-height: 0 !important;",
+    "  flex: 0 0 0 !important;",
+    "  overflow: hidden !important;",
+    "}",
+    `#${editorQuickAccessId} {`,
+    "  display: flex !important;",
+    "  align-items: center !important;",
+    "  flex: 0 0 auto !important;",
+    "  height: 27px !important;",
+    "}",
   ].join("\n");
 
   function hideDynamicEditorUi(editorDocument) {
@@ -46,6 +68,66 @@
     for (const link of aiLinks) {
       if (link.parentElement) link.parentElement.style.setProperty("display", "none", "important");
     }
+  }
+
+  function compactEditorHeader(editorDocument) {
+    const rightGroup = editorDocument.querySelector("#box-right-btn-group");
+    const editModeGroup = editorDocument.querySelector('[data-layout-name="header-editMode"]');
+    const appTitle = editorDocument.querySelector("#app-title");
+    const quickAccessSlots = editorQuickAccessSlotSelectors.map(function (selector) {
+      return editorDocument.querySelector(selector);
+    });
+    if (
+      !rightGroup
+      || !editModeGroup
+      || !appTitle
+      || quickAccessSlots.some(function (slot) { return !slot; })
+    ) {
+      return false;
+    }
+
+    let changed = false;
+    let quickAccess = editorDocument.querySelector(`#${editorQuickAccessId}`);
+    if (!quickAccess) {
+      quickAccess = editorDocument.createElement("div");
+      quickAccess.id = editorQuickAccessId;
+      quickAccess.className = "hedset ai-bridge-quick-access";
+      quickAccess.setAttribute("role", "menubar");
+      quickAccess.setAttribute("aria-label", "Quick access toolbar");
+      changed = true;
+    }
+
+    const rightChildren = Array.from(rightGroup.children);
+    if (
+      quickAccess.parentElement !== rightGroup
+      || rightChildren.indexOf(quickAccess) + 1 !== rightChildren.indexOf(editModeGroup)
+    ) {
+      rightGroup.insertBefore(quickAccess, editModeGroup);
+      changed = true;
+    }
+
+    const currentSlots = Array.from(quickAccess.children);
+    if (
+      currentSlots.length !== quickAccessSlots.length
+      || quickAccessSlots.some(function (slot, index) { return currentSlots[index] !== slot; })
+    ) {
+      for (const slot of quickAccessSlots) quickAccess.appendChild(slot);
+      changed = true;
+    }
+
+    if (editorDocument.documentElement.dataset.aiBridgeCompactHeader !== "true") {
+      editorDocument.documentElement.dataset.aiBridgeCompactHeader = "true";
+      changed = true;
+    }
+    return changed;
+  }
+
+  function requestEditorResize(editorDocument) {
+    const editorWindow = editorDocument.defaultView;
+    if (!editorWindow) return;
+    editorWindow.requestAnimationFrame(function () {
+      editorWindow.dispatchEvent(new editorWindow.Event("resize"));
+    });
   }
 
   function customizeEditorFrame(frame) {
@@ -61,13 +143,12 @@
       (editorDocument.head || editorDocument.documentElement).appendChild(style);
 
       hideDynamicEditorUi(editorDocument);
-      const editorWindow = editorDocument.defaultView;
-      if (editorWindow) {
-        editorWindow.requestAnimationFrame(function () {
-          editorWindow.dispatchEvent(new editorWindow.Event("resize"));
-        });
-      }
-      const observer = new MutationObserver(function () { hideDynamicEditorUi(editorDocument); });
+      compactEditorHeader(editorDocument);
+      requestEditorResize(editorDocument);
+      const observer = new MutationObserver(function () {
+        hideDynamicEditorUi(editorDocument);
+        if (compactEditorHeader(editorDocument)) requestEditorResize(editorDocument);
+      });
       observer.observe(editorDocument.documentElement, { childList: true, subtree: true });
     } catch (error) {
       // The bundled example is same-origin. Cross-origin integrations use the
