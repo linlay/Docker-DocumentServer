@@ -17,6 +17,15 @@ class ContractAlignmentTests(unittest.TestCase):
 
         self.assertNotRegex(config, r"\buid-[0-9]+\b")
 
+    def test_example_proxy_enables_native_compact_toolbar_before_editor_events(self):
+        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
+        with open(config_path, encoding="utf-8") as stream:
+            config = stream.read()
+
+        compact_toolbar = "config.editorConfig.customization.compactToolbar = true;"
+        self.assertEqual(config.count(compact_toolbar), 1)
+        self.assertLess(config.index(compact_toolbar), config.rindex("config.events = {"))
+
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
         with open(contract_path, encoding="utf-8") as stream:

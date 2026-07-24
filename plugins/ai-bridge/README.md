@@ -52,6 +52,9 @@ const editorConfig = {
   editorConfig: {
     callbackUrl: "https://app.example.com/onlyoffice/callback",
     user: { id: "user-42", name: "Demo User" },
+    customization: {
+      compactToolbar: true,
+    },
     plugins: {
       pluginsData: [
         "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19",
@@ -72,7 +75,13 @@ example application's `userid` input remains authoritative, and ai-bridge reads
 the resulting signed `editorConfig.user.id`. The injection removes the complete
 left-menu layout container, including its reserved width, and hides the unused
 Collaboration, Plugins, and default AI toolbar tabs in the same-origin demo
-without changing document permissions.
+without changing document permissions. It also enables ONLYOFFICE's native
+compact toolbar: the ribbon starts folded, a normal tab click expands it, and
+clicking the active tab folds it again and clears the selected tab. Existing
+ONLYOFFICE toolbar preferences still take precedence. External integrations
+that want the same behavior must set
+`editorConfig.customization.compactToolbar` to `true` before constructing
+`DocsAPI.DocEditor`.
 
 ## Load the external-page API
 

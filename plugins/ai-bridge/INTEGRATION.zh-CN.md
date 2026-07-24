@@ -23,6 +23,9 @@
     editorConfig: {
       callbackUrl: "https://app.example.com/onlyoffice/callback",
       user: { id: "user-9", name: "张三" },
+      customization: {
+        compactToolbar: true,
+      },
       plugins: {
         pluginsData: [
           "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev19"
@@ -39,6 +42,12 @@
 </script>
 <script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev19"></script>
 ```
+
+`customization.compactToolbar: true` 启用 ONLYOFFICE 原生紧凑功能区：首次进入时
+菜单默认收起且没有选中的普通页签；点击 Home、Insert、Layout 等页签会展开完整
+菜单，再点当前页签会收起并取消选中。已有的 ONLYOFFICE 本地工具栏偏好优先于该
+默认值。外部集成必须在创建 `DocsAPI.DocEditor` 前设置此项；无需监听 Home 点击，
+也不要依赖编辑器内部 `section` 的绝对 XPath。
 
 页面加载后：
 
