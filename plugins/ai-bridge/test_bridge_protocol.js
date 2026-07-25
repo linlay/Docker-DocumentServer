@@ -202,6 +202,7 @@ function createHarness(options = {}) {
       region: options.region || "en-US",
       user: { id: "user-1" },
     },
+    events: options.editorEvents || {},
     token: options.editorToken || "editor-token",
   };
   const executedToolCalls = [];
@@ -354,6 +355,10 @@ function createHarness(options = {}) {
     console,
   });
 
+  if (typeof options.beforePluginInit === "function") {
+    options.beforePluginInit({ editorConfig, hostWindow });
+  }
+
   vm.runInNewContext(pluginSource, {
     window: pluginWindow,
     Asc,
@@ -430,9 +435,16 @@ function replaceLiteral(text, properties) {
 function createWordBridgeHarness(options = {}) {
   let documentText = String(options.text || "");
   let documentParagraphs = [];
+  let documentElements = [];
   let currentPage = Number(options.currentPage) || 0;
   const createdImages = [];
+  const createdTables = [];
+  const createdContentControls = [];
   const executeMethodCalls = [];
+  const nativeSearchAndReplaceCalls = [];
+  const callCommandCalls = [];
+  const insertContentCalls = [];
+  const addElementCalls = [];
   const formattedRanges = [];
   const navigatedPages = [];
   const rangeActions = [];
@@ -442,9 +454,12 @@ function createWordBridgeHarness(options = {}) {
   const fieldInstructions = [];
   const scope = {};
   const styles = new Map();
+  const internalStyles = [];
+  let historyPoints = 0;
 
   function createStyle(name, type) {
     const style = {
+      id: `1_${createdStyles.length + 30}`,
       name: String(name),
       type: String(type),
       basedOn: null,
@@ -456,11 +471,48 @@ function createWordBridgeHarness(options = {}) {
       GetParaPr() { return {}; },
     };
     styles.set(style.name, style);
+    internalStyles[style.id] = style;
     createdStyles.push(style);
     return style;
   }
 
+  const internalStyleCollection = {
+    GetAllStyles() {
+      return internalStyles;
+    },
+  };
+
+  function elementParagraphs(element) {
+    if (!element) return [];
+    if (typeof element.GetClassType === "function" && element.GetClassType() === "paragraph") {
+      return [element];
+    }
+    if (typeof element.GetRowsCount === "function" && typeof element.GetRow === "function") {
+      const paragraphs = [];
+      for (let rowIndex = 0; rowIndex < element.GetRowsCount(); rowIndex += 1) {
+        const row = element.GetRow(rowIndex);
+        for (let columnIndex = 0; columnIndex < row.GetCellsCount(); columnIndex += 1) {
+          const cell = row.GetCell(columnIndex);
+          if (!cell || typeof cell.GetContent !== "function") continue;
+          const content = cell.GetContent();
+          if (content && typeof content.GetAllParagraphs === "function") {
+            paragraphs.push(...content.GetAllParagraphs());
+          }
+        }
+      }
+      return paragraphs;
+    }
+    return [];
+  }
+
+  function refreshDocumentParagraphs() {
+    if (documentElements.length) {
+      documentParagraphs = documentElements.flatMap(elementParagraphs);
+    }
+  }
+
   function syncDocumentText() {
+    refreshDocumentParagraphs();
     documentText = documentParagraphs.map(paragraph => paragraph.text).join("\n");
   }
 
@@ -469,8 +521,13 @@ function createWordBridgeHarness(options = {}) {
       text: String(text),
       drawings: [],
       runs: [],
+      inlineControls: [],
+      parentTable: null,
+      parentContentControl: null,
       GetClassType() { return "paragraph"; },
       GetText() { return this.text; },
+      GetParentTable() { return this.parentTable; },
+      GetParentContentControl() { return this.parentContentControl; },
       AddText(value) {
         const run = {
           text: String(value),
@@ -505,15 +562,35 @@ function createWordBridgeHarness(options = {}) {
         syncDocumentText();
         return this.runs[0] || {};
       },
+      RemoveAllElements() {
+        this.text = "";
+        this.runs = [];
+        this.inlineControls = [];
+        syncDocumentText();
+        return true;
+      },
       GetElementsCount() { return this.runs.length; },
       GetElement(index) { return this.runs[index] || null; },
       SetNumbering(level) { this.numbering = level; return true; },
+      SetPageBreakBefore(value) { this.pageBreakBefore = Boolean(value); return true; },
+      AddPageBreak() { this.pageBreakAfter = true; return true; },
+      AddInlineLvlSdt(control) {
+        this.inlineControls.push(control);
+        control.paragraph = this;
+        this.text += String(control.text || "");
+        syncDocumentText();
+        return control;
+      },
+      Select() { this.selected = true; return true; },
       AddDrawing(drawing) {
         this.drawings.push(drawing);
         drawing.paragraph = this;
         return drawing;
       },
     };
+    if (options.getPosInParentSupported !== false) {
+      paragraph.GetPosInParent = function () { return documentElements.indexOf(this); };
+    }
     if (paragraph.text) {
       paragraph.runs.push({
         text: paragraph.text,
@@ -525,20 +602,131 @@ function createWordBridgeHarness(options = {}) {
     return paragraph;
   }
 
+  function createTable(rowsCount, columnsCount) {
+    const table = {
+      rows: [],
+      width: null,
+      style: null,
+      parentTable: null,
+      parentContentControl: null,
+      GetClassType() { return "table"; },
+      GetParentTable() { return this.parentTable; },
+      GetParentContentControl() { return this.parentContentControl; },
+      GetRowsCount() { return this.rows.length; },
+      GetRow(index) { return this.rows[index] || null; },
+      SetWidth(kind, value) { this.width = { kind, value }; return true; },
+      SetStyle(value) { this.style = value; return true; },
+      SetTableLook(...values) { this.tableLook = values; return true; },
+      SetTableTitle(value) { this.title = String(value); return true; },
+      SetTableDescription(value) { this.description = String(value); return true; },
+    };
+    if (options.getPosInParentSupported !== false) {
+      table.GetPosInParent = function () { return documentElements.indexOf(this); };
+    }
+    for (let rowIndex = 0; rowIndex < rowsCount; rowIndex += 1) {
+      const row = {
+        cells: [],
+        GetCellsCount() { return this.cells.length; },
+        GetCell(index) { return this.cells[index] || null; },
+      };
+      for (let columnIndex = 0; columnIndex < columnsCount; columnIndex += 1) {
+        let cellParagraphs = [createParagraph()];
+        cellParagraphs[0].parentTable = table;
+        const cell = {
+          GetContent() {
+            return {
+              GetAllParagraphs() { return cellParagraphs; },
+              GetElement(index) { return cellParagraphs[index] || null; },
+            };
+          },
+          SetText(value) {
+            const paragraph = createParagraph(String(value));
+            paragraph.parentTable = table;
+            cellParagraphs = [paragraph];
+            syncDocumentText();
+            return paragraph.runs[0] || {};
+          },
+        };
+        row.cells.push(cell);
+      }
+      table.rows.push(row);
+    }
+    createdTables.push(table);
+    return table;
+  }
+
+  function createInlineContentControl() {
+    const control = {
+      id: `inline-${createdContentControls.length + 1}`,
+      text: "",
+      tag: "",
+      title: "",
+      placeholder: "",
+      lock: "unlocked",
+      appearance: "boundingBox",
+      GetClassType() { return "inlineLvlSdt"; },
+      GetId() { return this.id; },
+      GetTag() { return this.tag; },
+      GetAlias() { return this.title; },
+      GetPlaceholderText() { return this.placeholder; },
+      GetLock() { return this.lock; },
+      GetAppearance() { return this.appearance; },
+      SetTag(value) { this.tag = String(value); return true; },
+      SetAlias(value) { this.title = String(value); return true; },
+      SetPlaceholderText(value) { this.placeholder = String(value); return true; },
+      SetLock(value) { this.lock = String(value); return true; },
+      SetColor(value) { this.color = value; return true; },
+      SetAppearance(value) { this.appearance = String(value); return true; },
+      SetDateFormat(value) { this.dateFormat = String(value); return true; },
+      SetDate(value) { this.date = value; return true; },
+      SetDataBinding(value) { this.dataBinding = value; return true; },
+      UpdateFromXmlMapping() { this.updatedFromXml = true; return true; },
+      RemoveAllElements() { this.text = ""; return true; },
+      AddText(value) { this.text += String(value); return true; },
+    };
+    createdContentControls.push(control);
+    return control;
+  }
+
   documentParagraphs = (
     Array.isArray(options.paragraphs)
       ? options.paragraphs
       : documentText.split("\n")
   ).map(createParagraph);
   if (!documentParagraphs.length) documentParagraphs = [createParagraph()];
+  documentElements = [
+    ...documentParagraphs,
+    ...(Array.isArray(options.tables) ? options.tables : []),
+  ];
   syncDocumentText();
+  const initialDocumentElements = [...documentElements];
+  const initialDocumentTables = initialDocumentElements.filter(element => (
+    element && typeof element.GetRowsCount === "function" && typeof element.GetRow === "function"
+  ));
   const document = {
+    Document: {
+      Get_Styles() { return internalStyleCollection; },
+    },
     GetText() { return documentText; },
-    GetElement(index) { return documentParagraphs[index] || null; },
+    GetContent() {
+      return [
+        ...(options.staleTableCollections ? initialDocumentElements : documentElements),
+      ];
+    },
+    GetElementsCount() { return documentElements.length; },
+    GetElement(index) { return documentElements[index] || null; },
     GetAllParagraphs() { return documentParagraphs; },
-    GetAllTables() { return Array.isArray(options.tables) ? options.tables : []; },
+    GetAllTables() {
+      if (options.staleTableCollections) return initialDocumentTables;
+      return documentElements.filter(element => (
+        element && typeof element.GetRowsCount === "function" && typeof element.GetRow === "function"
+      ));
+    },
     GetAllContentControls() {
-      return Array.isArray(options.contentControls) ? options.contentControls : [];
+      return [
+        ...(Array.isArray(options.contentControls) ? options.contentControls : []),
+        ...createdContentControls,
+      ];
     },
     GetContentControlsByTag(tag) {
       return this.GetAllContentControls().filter(control => (
@@ -547,6 +735,12 @@ function createWordBridgeHarness(options = {}) {
     },
     GetCurrentContentControl() {
       return options.currentContentControl || null;
+    },
+    GetCurrentParagraph() {
+      if (options.currentParagraphIndex !== undefined) {
+        return documentParagraphs[Number(options.currentParagraphIndex) - 1] || null;
+      }
+      return options.currentParagraph || null;
     },
     AddComboBoxContentControl(list, selected) {
       return typeof options.addComboBoxContentControl === "function"
@@ -565,19 +759,27 @@ function createWordBridgeHarness(options = {}) {
     },
     RemoveAllElements() {
       if (options.removeAllElementsAccepted === false) return false;
-      documentParagraphs = [createParagraph()];
+      documentElements = [createParagraph()];
       syncDocumentText();
       return true;
     },
-    Push(paragraph) {
+    Push(element) {
       if (options.pushAccepted === false) return false;
-      documentParagraphs.push(paragraph);
+      documentElements.push(element);
       syncDocumentText();
       return true;
     },
-    InsertContent(paragraphs) {
+    InsertContent(elements) {
       if (options.insertContentAccepted === false) return false;
-      documentParagraphs.push(...paragraphs);
+      insertContentCalls.push([...elements]);
+      documentElements.push(...elements);
+      syncDocumentText();
+      return true;
+    },
+    AddElement(position, element) {
+      if (options.addElementAccepted === false) return false;
+      addElementCalls.push({ position, element });
+      documentElements.splice(position, 0, element);
       syncDocumentText();
       return true;
     },
@@ -625,6 +827,10 @@ function createWordBridgeHarness(options = {}) {
     GetPageCount() { return Number(options.pageCount) || 1; },
     GetCurrentPage() { return currentPage; },
     GetCurrentVisiblePages() { return [currentPage]; },
+    GetAllStyles() {
+      if (options.omitCreatedStylesFromGetAllStyles) return [];
+      return Array.from(styles.values());
+    },
     GetStyle(name) { return styles.get(String(name)) || null; },
     CreateStyle(name, type) { return createStyle(name, type); },
     CreateNumbering(kind) {
@@ -635,12 +841,29 @@ function createWordBridgeHarness(options = {}) {
       navigatedPages.push(index);
       return true;
     },
+    CreateNewHistoryPoint() {
+      historyPoints += 1;
+      return true;
+    },
   };
+  if (options.nativeSearchAndReplace) {
+    document.SearchAndReplace = function (properties) {
+      nativeSearchAndReplaceCalls.push(JSON.parse(JSON.stringify(properties)));
+      if (options.nativeSearchAndReplaceAccepted === false) return false;
+      for (const paragraph of documentParagraphs) {
+        paragraph.text = replaceLiteral(paragraph.text, properties);
+      }
+      syncDocumentText();
+      return true;
+    };
+  }
   const officeContext = vm.createContext({
     Asc: { scope },
     Api: {
       GetDocument: () => document,
       CreateParagraph: () => createParagraph(),
+      CreateTable: (rows, columns) => createTable(rows, columns),
+      CreateInlineLvlSdt: () => createInlineContentControl(),
       CreateImage: (url, width, height) => {
         if (options.createImageSupported === false) return undefined;
         const image = {
@@ -678,6 +901,7 @@ function createWordBridgeHarness(options = {}) {
       info: {},
       callCommand(command, close, recalculate, callback) {
         assert.equal(close, false);
+        callCommandCalls.push({ command: command.toString(), recalculate: Boolean(recalculate) });
         try {
           callback(vm.runInContext(`(${command.toString()})()`, officeContext));
         } catch (error) {
@@ -687,7 +911,12 @@ function createWordBridgeHarness(options = {}) {
       executeMethod(name, args, callback) {
         executeMethodCalls.push({ name, args: JSON.parse(JSON.stringify(args)) });
         if (options.executeMethodAccepted === false) return false;
-        if (name === "SearchAndReplace") documentText = replaceLiteral(documentText, args[0]);
+        if (name === "SearchAndReplace") {
+          for (const paragraph of documentParagraphs) {
+            paragraph.text = replaceLiteral(paragraph.text, args[0]);
+          }
+          syncDocumentText();
+        }
         const responses = options.executeMethodResponses || {};
         queueMicrotask(() => callback(Object.prototype.hasOwnProperty.call(responses, name) ? responses[name] : undefined));
         return true;
@@ -700,10 +929,16 @@ function createWordBridgeHarness(options = {}) {
     bridge: pluginWindow.AICopilotBridges.word,
     document,
     executeMethodCalls,
+    nativeSearchAndReplaceCalls,
+    callCommandCalls,
+    insertContentCalls,
+    addElementCalls,
     formattedRanges,
     navigatedPages,
     rangeActions,
     createdImages,
+    createdTables,
+    createdContentControls,
     createdCharts,
     createdStyles,
     appliedStyles,
@@ -711,6 +946,13 @@ function createWordBridgeHarness(options = {}) {
     get text() { return documentText; },
     get paragraphs() { return documentParagraphs.map(paragraph => paragraph.text); },
     get paragraphObjects() { return documentParagraphs; },
+    get elements() { return documentElements; },
+    get tables() {
+      return documentElements.filter(element => (
+        element && typeof element.GetRowsCount === "function" && typeof element.GetRow === "function"
+      ));
+    },
+    get historyPoints() { return historyPoints; },
   };
 }
 
@@ -809,6 +1051,81 @@ test("non-Chinese Word editor preserves the document proofing language", async (
   await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
 
   assert.equal(harness.initializationCommands.length, 0);
+});
+
+test("local Relay reports private startup timings and preserves editor event callbacks", async () => {
+  const ui = createEditorUiHarness();
+  const appContext = { source: "app" };
+  const documentContext = { source: "document" };
+  const appEvent = { type: "app-ready" };
+  const documentEvent = { type: "document-ready" };
+  const callbackCalls = [];
+  let registerState = null;
+
+  const harness = createHarness({
+    hostname: "localhost",
+    hostDocument: ui.hostDocument,
+    MutationObserver: ui.MutationObserver,
+    editorEvents: {
+      onAppReady(event) {
+        callbackCalls.push(["app", this, event]);
+        return "app-result";
+      },
+      onDocumentReady(event) {
+        callbackCalls.push(["document", this, event]);
+        return "document-result";
+      },
+    },
+    beforePluginInit({ editorConfig, hostWindow }) {
+      hostWindow.dispatch("load", {});
+      ui.frameListeners.get("load")();
+      assert.equal(editorConfig.events.onAppReady.call(appContext, appEvent), "app-result");
+      assert.equal(
+        editorConfig.events.onDocumentReady.call(documentContext, documentEvent),
+        "document-result",
+      );
+    },
+    hostFetch: async (requestPath, requestOptions) => {
+      const payload = JSON.parse(requestOptions.body);
+      if (requestPath.endsWith("/register")) {
+        registerState = payload.state;
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        return relayResponse(409, {
+          ok: false,
+          error: { code: "SESSION_SUPERSEDED", message: "done" },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => registerState !== null);
+  await waitFor(() => ui.hostDocument.documentElement.dataset.aiBridgeRelayState === "superseded");
+
+  assert.deepEqual(callbackCalls, [
+    ["app", appContext, appEvent],
+    ["document", documentContext, documentEvent],
+  ]);
+  assert.equal("_diagnostics" in harness.hostWindow.aiBridge.getState(), false);
+  const startup = registerState._diagnostics.startup;
+  for (const field of [
+    "hostScriptMs",
+    "windowLoadMs",
+    "editorFrameSeenMs",
+    "editorFrameLoadMs",
+    "appReadyMs",
+    "documentReadyMs",
+    "bridgeReadyMs",
+  ]) {
+    assert.equal(Number.isFinite(startup[field]), true, field);
+    assert.ok(startup[field] >= 0, field);
+  }
 });
 
 test("superseded HTTP Relay stops without re-registering or reloading", async () => {
@@ -1113,6 +1430,21 @@ test("public contract, plugin allow-lists, and all convenience methods stay alig
       Object.keys(publicContract.tools[editorType]).sort(),
     );
   }
+});
+
+test("public Word contract exposes positioned tables and inline content replacement", () => {
+  const tableProperties = publicContract.tools.word.word_add_table.properties;
+  assert.deepEqual(tableProperties.insertAt.enum, ["end", "current", "before", "after"]);
+  assert.equal(tableProperties.paragraphIndex.minimum, 1);
+  assert.equal(tableProperties.tableIndex.minimum, 1);
+  assert.deepEqual(tableProperties.matchMode.enum, ["contains", "exact"]);
+  assert.equal(tableProperties.pageBreakBefore.type, "boolean");
+
+  const controlProperties = publicContract.tools.word.word_manage_content_control.properties;
+  assert.deepEqual(controlProperties.contentMode.enum, ["append", "replace"]);
+  assert.equal(controlProperties.tableIndex.minimum, 1);
+  assert.equal(controlProperties.row.minimum, 1);
+  assert.equal(controlProperties.column.minimum, 1);
 });
 
 test("DOCX capability matrix covers D01 through D70 exactly once", () => {
@@ -1524,6 +1856,60 @@ test("word bridge skips SearchAndReplace when the source text is absent", async 
   assert.equal(harness.executeMethodCalls.length, 0);
 });
 
+test("word bridge keeps native replacement chains in one mutation callCommand", async () => {
+  const harness = createWordBridgeHarness({
+    text: "A",
+    nativeSearchAndReplace: true,
+  });
+  const replacements = [
+    { name: "word_replace_text", arguments: { search: "A", replace: "B", matchCase: true } },
+    { name: "word_replace_text", arguments: { search: "B", replace: "C", matchCase: true } },
+  ];
+  for (let index = 0; index < 18; index += 1) {
+    replacements.push({
+      name: "word_replace_text",
+      arguments: { search: `missing-${index}`, replace: `unused-${index}`, matchCase: true },
+    });
+  }
+
+  const result = await harness.bridge.execute(replacements);
+
+  assert.equal(harness.text, "C");
+  assert.equal(result.changed, 2);
+  assert.equal(harness.historyPoints, 1);
+  assert.equal(harness.executeMethodCalls.length, 0);
+  assert.equal(harness.callCommandCalls.filter(call => call.recalculate).length, 1);
+  assert.equal(harness.callCommandCalls.filter(call => !call.recalculate).length, 1);
+  assert.deepEqual(harness.nativeSearchAndReplaceCalls, [
+    { searchString: "A", replaceString: "B", matchCase: true },
+    { searchString: "B", replaceString: "C", matchCase: true },
+  ]);
+  assert.deepEqual(Array.from(result.results, entry => entry.search), [
+    "A", "B",
+    ...Array.from({ length: 18 }, (_, index) => `missing-${index}`),
+  ]);
+});
+
+test("word bridge does not fall back after a native SearchAndReplace failure", async () => {
+  const harness = createWordBridgeHarness({
+    text: "A",
+    nativeSearchAndReplace: true,
+    nativeSearchAndReplaceAccepted: false,
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_replace_text",
+      arguments: { search: "A", replace: "B", matchCase: true },
+    }]),
+    /ONLYOFFICE 拒绝执行 SearchAndReplace/,
+  );
+
+  assert.equal(harness.text, "A");
+  assert.equal(harness.nativeSearchAndReplaceCalls.length, 1);
+  assert.equal(harness.executeMethodCalls.length, 0);
+});
+
 test("word bridge formats only matching text ranges", async () => {
   const harness = createWordBridgeHarness({ text: "主任委员：匿名\n副主任委员：匿名、匿名、匿名" });
 
@@ -1560,6 +1946,99 @@ test("word bridge creates ONLYOFFICE run styles for public character styles and 
   assert.equal(result.results[0].type, "character");
   assert.equal(harness.appliedStyles.length, 2);
   assert.ok(harness.appliedStyles.every(entry => entry.style === harness.createdStyles[0]));
+});
+
+test("word advanced inspection includes styles omitted by ONLYOFFICE 9.4 GetAllStyles", async () => {
+  const harness = createWordBridgeHarness({
+    text: "自定义样式",
+    omitCreatedStylesFromGetAllStyles: true,
+  });
+
+  await harness.bridge.execute([
+    {
+      name: "word_manage_style",
+      arguments: {
+        action: "create",
+        name: "正文_仿宋",
+        type: "paragraph",
+        fontFamily: "仿宋",
+        fontSize: 11,
+      },
+    },
+    {
+      name: "word_manage_style",
+      arguments: {
+        action: "create",
+        name: "BodyFangsong",
+        type: "paragraph",
+        fontFamily: "仿宋",
+        fontSize: 11,
+      },
+    },
+    {
+      name: "word_manage_style",
+      arguments: {
+        action: "create",
+        name: "术语强调",
+        type: "character",
+        bold: true,
+      },
+    },
+  ]);
+  const inspected = await harness.bridge.execute([{
+    name: "word_inspect_advanced",
+    arguments: { includeStyles: true },
+  }]);
+
+  assert.equal(inspected.changed, 0);
+  assert.equal(inspected.needsSave, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(inspected.results[0].styles)), [
+    {
+      index: 1,
+      name: "正文_仿宋",
+      type: "paragraph",
+      basedOn: null,
+    },
+    {
+      index: 2,
+      name: "BodyFangsong",
+      type: "paragraph",
+      basedOn: null,
+    },
+    {
+      index: 3,
+      name: "术语强调",
+      type: "run",
+      basedOn: null,
+    },
+  ]);
+});
+
+test("word advanced inspection de-duplicates styles returned by public and internal collections", async () => {
+  const harness = createWordBridgeHarness({ text: "样式去重" });
+
+  await harness.bridge.execute([{
+    name: "word_manage_style",
+    arguments: {
+      action: "create",
+      name: "SharedStyle",
+      type: "paragraph",
+    },
+  }]);
+  const inspected = await harness.bridge.execute([{
+    name: "word_inspect_advanced",
+    arguments: { includeStyles: true },
+  }]);
+
+  assert.deepEqual(
+    inspected.results[0].styles.filter(style => style.name === "SharedStyle"),
+    [{
+      index: 1,
+      name: "SharedStyle",
+      type: "paragraph",
+      basedOn: null,
+    }],
+  );
 });
 
 test("word bridge applies advanced borders and margins to the targeted table row cells", async () => {
@@ -1851,6 +2330,331 @@ test("word bridge passes a list value as the default selection when creating a c
     ],
     selected: "b",
   }]);
+});
+
+test("word bridge inserts tables at top-level paragraph, search, table, cursor, and end positions", async () => {
+  const relativeHarness = createWordBridgeHarness({
+    paragraphs: ["甲锚点", "正文", "乙锚点"],
+    getPosInParentSupported: false,
+  });
+  const relativeResult = await relativeHarness.bridge.execute([
+    {
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 1,
+        data: [["搜索前"]],
+        insertAt: "before",
+        search: "锚点",
+        occurrence: 2,
+      },
+    },
+    {
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 1,
+        data: [["表前"]],
+        insertAt: "before",
+        tableIndex: 1,
+      },
+    },
+    {
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 1,
+        data: [["段后"]],
+        insertAt: "after",
+        paragraphIndex: 1,
+      },
+    },
+  ]);
+
+  assert.deepEqual(relativeHarness.elements.map(element => (
+    element.GetClassType() === "paragraph" ? element.GetText() : element.GetRow(0).GetCell(0).GetContent().GetElement(0).GetText()
+  )), ["甲锚点", "段后", "正文", "表前", "搜索前", "乙锚点"]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(relativeResult.results.map(entry => ({
+      insertAt: entry.insertAt,
+      tableIndex: entry.tableIndex,
+      anchor: entry.anchor,
+    })))),
+    [
+      {
+        insertAt: "before",
+        tableIndex: 1,
+        anchor: {
+          type: "search",
+          search: "锚点",
+          matchCase: false,
+          matchMode: "contains",
+          occurrence: 2,
+          paragraphIndex: 3,
+          position: 2,
+        },
+      },
+      {
+        insertAt: "before",
+        tableIndex: 1,
+        anchor: { type: "table", tableIndex: 1, position: 2 },
+      },
+      {
+        insertAt: "after",
+        tableIndex: 1,
+        anchor: { type: "paragraph", paragraphIndex: 1, position: 0 },
+      },
+    ],
+  );
+
+  const cursorHarness = createWordBridgeHarness({ paragraphs: ["正文"] });
+  const cursorResult = await cursorHarness.bridge.execute([
+    {
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1, insertAt: "current" },
+    },
+    {
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1 },
+    },
+  ]);
+  assert.equal(cursorHarness.insertContentCalls.length, 1);
+  assert.deepEqual(Array.from(cursorResult.results, entry => entry.insertAt), ["current", "end"]);
+  assert.deepEqual(Array.from(cursorResult.results, entry => entry.tableIndex), [1, 2]);
+});
+
+test("word bridge puts a page-break paragraph immediately before a positioned table", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["第一页", "第二页"] });
+
+  const result = await harness.bridge.execute([{
+    name: "word_add_table",
+    arguments: {
+      rows: 1,
+      cols: 1,
+      data: [["分页表"]],
+      insertAt: "before",
+      paragraphIndex: 2,
+      pageBreakBefore: true,
+    },
+  }]);
+
+  assert.equal(harness.elements.length, 4);
+  assert.equal(harness.elements[1].GetClassType(), "paragraph");
+  assert.equal(harness.elements[1].pageBreakBefore, true);
+  assert.equal(harness.elements[2].GetClassType(), "table");
+  assert.equal(result.results[0].tableIndex, 1);
+  assert.equal(result.results[0].pageBreakBefore, true);
+  assert.deepEqual(harness.addElementCalls.map(call => call.position), [1, 2]);
+});
+
+test("word bridge rejects conflicting, missing, out-of-range, and nested table anchors before insertion", async () => {
+  const conflictHarness = createWordBridgeHarness({ paragraphs: ["锚点"] });
+  await assert.rejects(
+    conflictHarness.bridge.execute([{
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 1,
+        insertAt: "before",
+        paragraphIndex: 1,
+        search: "锚点",
+      },
+    }]),
+    /必须且只能提供/,
+  );
+  assert.equal(conflictHarness.createdTables.length, 0);
+  assert.equal(conflictHarness.tables.length, 0);
+
+  await assert.rejects(
+    conflictHarness.bridge.execute([{
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1, insertAt: "after", tableIndex: 1 },
+    }]),
+    /tableIndex 超出文档表格范围/,
+  );
+  assert.equal(conflictHarness.createdTables.length, 0);
+
+  const nestedHarness = createWordBridgeHarness({ paragraphs: ["单元格内锚点"] });
+  nestedHarness.paragraphObjects[0].parentTable = {};
+  await assert.rejects(
+    nestedHarness.bridge.execute([{
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1, insertAt: "before", paragraphIndex: 1 },
+    }]),
+    /嵌套表格/,
+  );
+  assert.equal(nestedHarness.createdTables.length, 0);
+});
+
+test("word bridge appends or replaces inline content controls in paragraphs and table cells", async () => {
+  const paragraphHarness = createWordBridgeHarness({ paragraphs: ["前缀"] });
+  const appendResult = await paragraphHarness.bridge.execute([{
+    name: "word_manage_content_control",
+    arguments: {
+      action: "add",
+      kind: "inline",
+      paragraphIndex: 1,
+      text: "追加",
+      tag: "append-tag",
+    },
+  }]);
+  assert.equal(paragraphHarness.text, "前缀追加");
+  assert.equal(appendResult.results[0].contentMode, "append");
+
+  const replaceResult = await paragraphHarness.bridge.execute([{
+    name: "word_manage_content_control",
+    arguments: {
+      action: "add",
+      kind: "inline",
+      paragraphIndex: 1,
+      contentMode: "replace",
+      text: "",
+      tag: "final-tag",
+      title: "最终内容",
+      placeholder: "请输入",
+      lock: "both",
+      appearance: "hidden",
+    },
+  }]);
+  const paragraphControl = paragraphHarness.createdContentControls.at(-1);
+  assert.equal(paragraphHarness.text, "");
+  assert.equal(paragraphControl.text, "");
+  assert.equal(paragraphControl.tag, "final-tag");
+  assert.equal(paragraphControl.title, "最终内容");
+  assert.equal(paragraphControl.placeholder, "请输入");
+  assert.equal(paragraphControl.lock, "sdtContentLocked");
+  assert.equal(paragraphControl.appearance, "hidden");
+  assert.deepEqual(JSON.parse(JSON.stringify(replaceResult.results[0].target)), {
+    type: "paragraph",
+    paragraphIndex: 1,
+  });
+
+  const cellHarness = createWordBridgeHarness({ paragraphs: ["正文"] });
+  await cellHarness.bridge.execute([{
+    name: "word_add_table",
+    arguments: { rows: 1, cols: 1, data: [["旧值"]] },
+  }]);
+  const cellResult = await cellHarness.bridge.execute([{
+    name: "word_manage_content_control",
+    arguments: {
+      action: "add",
+      kind: "inline",
+      tableIndex: 1,
+      row: 1,
+      column: 1,
+      contentMode: "replace",
+      text: "最终值",
+      tag: "cell-tag",
+    },
+  }]);
+  const cellParagraph = cellHarness.tables[0].GetRow(0).GetCell(0).GetContent().GetElement(0);
+  assert.equal(cellParagraph.GetText(), "最终值");
+  assert.equal(cellParagraph.inlineControls.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(cellResult.results[0].target)), {
+    type: "cell",
+    tableIndex: 1,
+    row: 1,
+    column: 1,
+  });
+});
+
+test("word bridge validates inline content-control replacement targets before mutation", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["保留"] });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_manage_content_control",
+      arguments: {
+        action: "add",
+        kind: "inline",
+        tableIndex: 1,
+        row: 1,
+        contentMode: "replace",
+        text: "新值",
+      },
+    }]),
+    /tableIndex、row、column 必须同时提供/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_manage_content_control",
+      arguments: {
+        action: "add",
+        kind: "inline",
+        paragraphIndex: 1,
+        current: true,
+        contentMode: "replace",
+        text: "新值",
+      },
+    }]),
+    /目标互斥/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_manage_content_control",
+      arguments: {
+        action: "add",
+        kind: "block",
+        paragraphIndex: 1,
+        contentMode: "replace",
+        text: "新值",
+      },
+    }]),
+    /仅支持 inline/,
+  );
+
+  assert.equal(harness.text, "保留");
+  assert.equal(harness.createdContentControls.length, 0);
+});
+
+test("word bridge executes native replace, positioned table, and inline SDT in one history point", async () => {
+  const harness = createWordBridgeHarness({
+    paragraphs: ["A", "锚点"],
+    nativeSearchAndReplace: true,
+    staleTableCollections: true,
+  });
+
+  const result = await harness.bridge.execute([
+    { name: "word_replace_text", arguments: { search: "A", replace: "B", matchCase: true } },
+    {
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 1,
+        data: [["旧单元格"]],
+        insertAt: "after",
+        paragraphIndex: 1,
+      },
+    },
+    {
+      name: "word_manage_content_control",
+      arguments: {
+        action: "add",
+        kind: "inline",
+        tableIndex: 1,
+        row: 1,
+        column: 1,
+        contentMode: "replace",
+        text: "最终单元格",
+        tag: "mixed",
+      },
+    },
+  ]);
+
+  assert.equal(result.changed, 3);
+  assert.deepEqual(Array.from(result.results, entry => entry.name), [
+    "word_replace_text",
+    "word_add_table",
+    "word_manage_content_control",
+  ]);
+  assert.equal(harness.historyPoints, 1);
+  assert.equal(harness.callCommandCalls.filter(call => call.recalculate).length, 1);
+  assert.equal(harness.executeMethodCalls.length, 0);
+  assert.equal(harness.paragraphObjects[0].GetText(), "B");
+  assert.equal(
+    harness.tables[0].GetRow(0).GetCell(0).GetContent().GetElement(0).GetText(),
+    "最终单元格",
+  );
 });
 
 test("word bridge inserts a dynamic field into a zero-width placeholder range", async () => {

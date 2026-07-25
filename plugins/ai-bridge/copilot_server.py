@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -61,6 +62,15 @@ BRIDGE_ALLOWED_METHODS = {
 }
 BRIDGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 BRIDGE_LOG_PHASES = {"word-command", "editor-save"}
+BRIDGE_STARTUP_TIMING_FIELDS = (
+    "hostScriptMs",
+    "windowLoadMs",
+    "editorFrameSeenMs",
+    "editorFrameLoadMs",
+    "appReadyMs",
+    "documentReadyMs",
+    "bridgeReadyMs",
+)
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MAX_REQUEST_BYTES = 12_000_000
 IMAGE_MAX_EDGE_PX = 12_000
@@ -421,6 +431,69 @@ def bridge_identity(claims: dict[str, Any]) -> tuple[str, str, str, str]:
 
 def bridge_identity_digest(identity: tuple[str, str, str, str]) -> str:
     return hashlib.sha256("\0".join(identity).encode()).hexdigest()[:12]
+
+
+def bridge_startup_timings(state: Any) -> dict[str, int]:
+    if not isinstance(state, dict):
+        return {}
+    diagnostics = state.get("_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return {}
+    startup = diagnostics.get("startup")
+    if not isinstance(startup, dict):
+        return {}
+    timings: dict[str, int] = {}
+    for field in BRIDGE_STARTUP_TIMING_FIELDS:
+        value = startup.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric < 0 or numeric > 3_600_000:
+            continue
+        timings[field] = round(numeric)
+    return timings
+
+
+def bridge_command_tool_count(command: dict[str, Any]) -> int:
+    method = command.get("method")
+    params = command.get("params") if isinstance(command.get("params"), dict) else {}
+    if method == "executeTool":
+        return 1
+    if method == "executeBatch":
+        tool_calls = params.get("toolCalls")
+        return len(tool_calls) if isinstance(tool_calls, list) else 0
+    return 0
+
+
+def bridge_elapsed_ms(start: Any, end: Any) -> int | None:
+    if not isinstance(start, (int, float)) or isinstance(start, bool):
+        return None
+    if not isinstance(end, (int, float)) or isinstance(end, bool):
+        return None
+    elapsed = (float(end) - float(start)) * 1000
+    if not math.isfinite(elapsed):
+        return None
+    return max(0, round(elapsed))
+
+
+def log_bridge_command(command: dict[str, Any], event: str, completed_monotonic: float) -> None:
+    if command.get("timingLogged"):
+        return
+    command["timingLogged"] = True
+    created_monotonic = command.get("createdMonotonic")
+    first_delivered_monotonic = command.get("firstDeliveredMonotonic")
+    event_payload = {
+        "event": event,
+        "requestId": command.get("requestId"),
+        "sessionId": command.get("sessionId"),
+        "identity": bridge_identity_digest(command["identity"]),
+        "method": command.get("method"),
+        "toolCount": bridge_command_tool_count(command),
+        "queueWaitMs": bridge_elapsed_ms(created_monotonic, first_delivered_monotonic),
+        "editorRoundTripMs": bridge_elapsed_ms(first_delivered_monotonic, completed_monotonic),
+        "totalMs": bridge_elapsed_ms(created_monotonic, completed_monotonic),
+    }
+    print("[bridge-command] " + compact_json(event_payload), flush=True)
 
 
 def image_asset_root() -> str:
@@ -1202,6 +1275,20 @@ def bridge_register(payload: dict[str, Any]) -> dict[str, Any]:
             ),
             flush=True,
         )
+        startup_timings = bridge_startup_timings(state)
+        if startup_timings:
+            print(
+                "[bridge-startup] "
+                + compact_json(
+                    {
+                        "event": "reconnected" if existing is not None else "registered",
+                        "identity": bridge_identity_digest(identity),
+                        "sessionId": session_id,
+                        **startup_timings,
+                    }
+                ),
+                flush=True,
+            )
         BRIDGE_CONDITION.notify_all()
         return {
             "ok": True,
@@ -1395,13 +1482,19 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
         cached = command_id is not None
         if command_id is None:
             command_id = f"command:{uuid.uuid4()}"
+            created_at = time.time()
+            created_monotonic = time.monotonic()
             command = {
                 "commandId": command_id,
                 "sessionId": session_id,
-                "createdAt": time.time(),
+                "createdAt": created_at,
+                "createdMonotonic": created_monotonic,
                 "deliveredAt": None,
+                "firstDeliveredMonotonic": None,
                 "completedAt": None,
+                "completedMonotonic": None,
                 "response": None,
+                "timingLogged": False,
                 "identity": identity,
                 **command_data,
             }
@@ -1445,6 +1538,7 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
         while command.get("response") is None:
             remaining = deadline - time.time()
             if remaining <= 0:
+                log_bridge_command(command, "timeout", time.monotonic())
                 raise BridgeError(
                     504,
                     "BRIDGE_TIMEOUT",
@@ -1495,6 +1589,9 @@ def bridge_poll(payload: dict[str, Any]) -> dict[str, Any]:
                 if command is None or command.get("response") is not None:
                     continue
                 command["deliveredAt"] = time.time()
+                delivered_monotonic = time.monotonic()
+                if command.get("firstDeliveredMonotonic") is None:
+                    command["firstDeliveredMonotonic"] = delivered_monotonic
                 return {
                     "ok": True,
                     "command": {
@@ -1520,12 +1617,20 @@ def bridge_result(payload: dict[str, Any]) -> dict[str, Any]:
         if command is None or command.get("sessionId") != session_id:
             raise BridgeError(404, "COMMAND_NOT_FOUND", "命令不存在或不属于该编辑器会话")
         if command.get("response") is None:
+            completed_at = time.time()
+            completed_monotonic = time.monotonic()
             command["response"] = {
                 "ok": bool(payload.get("ok")),
                 "result": payload.get("result"),
                 "error": payload.get("error"),
             }
-            command["completedAt"] = time.time()
+            command["completedAt"] = completed_at
+            command["completedMonotonic"] = completed_monotonic
+            log_bridge_command(
+                command,
+                "completed" if command["response"]["ok"] else "failed",
+                completed_monotonic,
+            )
             BRIDGE_CONDITION.notify_all()
         return {"ok": True, "accepted": True}
 

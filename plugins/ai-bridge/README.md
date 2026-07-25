@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev26",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev28",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
     },
@@ -106,7 +106,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -358,6 +358,15 @@ file name, file type, editor type, and user. A newly registered page for that
 stable identity supersedes the previous Relay session, so a storage-version
 change does not require another bind. Stable `requestId` values deduplicate
 retries across page handoff. The editor page must remain open.
+
+The Relay writes one sanitized `[bridge-command]` JSON line for the first
+completion, failure, or timeout of each request. It reports the queue wait,
+editor round trip, total duration, method, and tool count. Editor registration
+also writes `[bridge-startup]` with relative host, iframe, app-ready,
+document-ready, and bridge-ready milestones. Neither log contains tool
+arguments, document content, results, credentials, Relay keys, or error bodies.
+Startup diagnostics remain private to the local page-to-Relay protocol and are
+not exposed by `getState()` or the sessions response.
 
 ## Local run
 

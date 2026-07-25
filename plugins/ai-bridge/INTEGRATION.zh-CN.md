@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev26"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev28"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       },
@@ -40,7 +40,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
 ```
 
 `customization.compactToolbar: true` 启用 ONLYOFFICE 原生紧凑功能区：首次进入时
@@ -85,13 +85,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev26"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev26"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev28"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -192,6 +192,56 @@ console.log(result.changed, result.persisted, result.results);
 ```
 
 一批最多 20 个工具，普通参数 JSON 最大 250000 字符，超时上限 300000 ms。图片导入和 HTTP Relay execute 路径单独允许 12 MiB 请求体；其他聊天、保存和控制接口仍使用原有限制。修改类调用会串行执行：创建 checkpoint、调用 Office API、`Api.Save()`、force-save。`inspect` 只读调用不会写存储。
+
+### Word 大文档的定点表格、inline 内容控件与替换
+
+`word_add_table` 默认仍以 `insertAt: "end"` 追加到文末。`current` 在当前光标处插入；
+`before` / `after` 必须且只能使用 `paragraphIndex`、`tableIndex` 或 `search` 中的一个
+作为锚点。锚点只支持 Word 正文的顶层段落或顶层表格；表格单元格、嵌套表格和内容
+控件内部的段落会被拒绝。搜索锚点可附带 `matchCase`、`matchMode` 和从 1 开始的
+`occurrence`。`pageBreakBefore: true` 会在表格紧前方插入一个分页段落。
+
+```js
+await window.aiBridge.executeBatch([
+  {
+    name: "word_add_table",
+    arguments: {
+      rows: 2,
+      cols: 2,
+      data: [["项目", "结论"], ["安全复核", "通过"]],
+      insertAt: "before",
+      search: "附件",
+      matchMode: "exact",
+      occurrence: 1,
+      pageBreakBefore: true,
+    },
+  },
+  {
+    name: "word_manage_content_control",
+    arguments: {
+      action: "add",
+      kind: "inline",
+      tableIndex: 1,
+      row: 2,
+      column: 2,
+      contentMode: "replace",
+      text: "通过",
+      tag: "review-result",
+      title: "复核结论",
+    },
+  },
+]);
+```
+
+inline 内容控件的 `contentMode` 默认为 `append`，与旧调用一致。显式使用 `replace`
+时必须指定 `paragraphIndex`、`current: true` 或完整的 `tableIndex + row + column`
+目标；目标原内容会被清空，再直接写入携带最终 `text` 和属性的 inline SDT。它不承诺
+保留被替换区域的富文本格式，也不提供任意文本范围的原样包裹。
+
+`word_replace_text` 的参数与结果没有变化。桥接首次替换时会探测运行时是否支持
+文档级 `SearchAndReplace()`：支持时，多个替换和同批表格、内容控件会按调用顺序留在
+同一个 mutation `callCommand` 与 history point 中；旧运行时自动使用兼容插件方法。
+原生方法已经开始执行后若返回失败，整批直接报错，不会再次走兼容路径。
 
 force-save 成功后不会刷新编辑器页面。当前 WebSocket 会话已经包含刚保存的版本，
 继续使用现有会话可以完整保留当前页、页内滚动位置和选区。只有 `undo` / `redo`
@@ -575,8 +625,21 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 - 图片错误不得记录或回显 Base64、签名 URL、远程响应正文；生产反向代理仅对
   `/images/import` 和 `/bridge/execute` 放宽到 12 MiB。
 
+## 本地 Relay 观测日志
+
+本地 Relay 输出两类单行 JSON 日志：
+
+- `[bridge-command]`：每个首次完成、失败或超时的请求只记录一次，包含
+  `requestId`、`sessionId`、文档身份摘要、`method`、`toolCount`、
+  `queueWaitMs`、`editorRoundTripMs` 和 `totalMs`。幂等缓存命中不会重复记录。
+- `[bridge-startup]`：编辑器页面注册时记录 host script、window load、编辑器
+  iframe、`onAppReady`、`onDocumentReady` 和 Bridge ready 相对导航开始的毫秒数。
+
+这两类日志不记录工具参数、正文、返回内容、JWT、Relay key 或错误正文。启动数据
+只在页面与本地 Relay 之间传输，不加入公开 `getState()` 或 sessions 响应。
+
 ## 版本兼容
 
 当前插件版本为 `0.4.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.4.0-rev26`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+`?v=0.4.0-rev28`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

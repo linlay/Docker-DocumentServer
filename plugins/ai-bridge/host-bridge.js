@@ -28,6 +28,32 @@
   let ready = false;
   let editorType = null;
   let bridgeCapabilities = null;
+  const startupNavigationStartedAt = (function () {
+    const performance = window.performance;
+    if (performance && Number.isFinite(Number(performance.timeOrigin))) {
+      return Number(performance.timeOrigin);
+    }
+    if (
+      performance
+      && performance.timing
+      && Number.isFinite(Number(performance.timing.navigationStart))
+    ) {
+      return Number(performance.timing.navigationStart);
+    }
+    return Date.now();
+  }());
+  const startupMarks = {};
+
+  function startupElapsedMs() {
+    return Math.max(0, Math.round(Date.now() - startupNavigationStartedAt));
+  }
+
+  function markStartup(field) {
+    if (startupMarks[field] === undefined) startupMarks[field] = startupElapsedMs();
+  }
+
+  markStartup("hostScriptMs");
+  window.addEventListener("load", function () { markStartup("windowLoadMs"); });
 
   const editorUiStyleId = "ai-bridge-editor-ui-customization";
   const editorQuickAccessId = "ai-bridge-quick-access";
@@ -162,7 +188,14 @@
   function installEditorUiCustomization() {
     const frame = document.querySelector('iframe[src*="/web-apps/apps/"]');
     if (!frame) return false;
-    frame.addEventListener("load", function () { customizeEditorFrame(frame); });
+    markStartup("editorFrameSeenMs");
+    frame.addEventListener("load", function () {
+      markStartup("editorFrameLoadMs");
+      customizeEditorFrame(frame);
+    });
+    if (frame.contentDocument && frame.contentDocument.readyState === "complete") {
+      markStartup("editorFrameLoadMs");
+    }
     customizeEditorFrame(frame);
     return true;
   }
@@ -261,6 +294,30 @@
     };
   }
 
+  function installEditorStartupInstrumentation() {
+    const editorConfig = editorConfiguration();
+    if (!editorConfig || typeof editorConfig !== "object") return;
+    const events = editorConfig.events && typeof editorConfig.events === "object"
+      ? editorConfig.events
+      : (editorConfig.events = {});
+    [
+      ["onAppReady", "appReadyMs"],
+      ["onDocumentReady", "documentReadyMs"],
+    ].forEach(function (entry) {
+      const eventName = entry[0];
+      const timingField = entry[1];
+      const original = events[eventName];
+      if (original && original.__aiBridgeStartupWrapped === true) return;
+      const wrapped = function () {
+        markStartup(timingField);
+        if (typeof original === "function") return original.apply(this, arguments);
+        return undefined;
+      };
+      wrapped.__aiBridgeStartupWrapped = true;
+      events[eventName] = wrapped;
+    });
+  }
+
   function stateSnapshot() {
     return {
       version: VERSION,
@@ -270,6 +327,15 @@
       editorType,
       context: publicContext(),
       capabilities: bridgeCapabilities,
+    };
+  }
+
+  function relayStateSnapshot() {
+    return {
+      ...stateSnapshot(),
+      _diagnostics: {
+        startup: { ...startupMarks },
+      },
     };
   }
 
@@ -311,6 +377,7 @@
   }
 
   function markReady(message) {
+    markStartup("bridgeReadyMs");
     ready = true;
     editorType = message.editorType || editorType;
     bridgeCapabilities = message.capabilities || bridgeCapabilities;
@@ -907,6 +974,8 @@
     },
   };
 
+  installEditorStartupInstrumentation();
+
   window.aiBridge = api;
   window.onlyofficeAI = api;
   window.AiBridgeError = window.AiBridgeError || AiBridgeError;
@@ -1044,7 +1113,7 @@
       await waitUntilReady(30000);
       const payload = {
         sessionId: httpSessionId,
-        state: stateSnapshot(),
+        state: relayStateSnapshot(),
       };
       if (resumeToken) {
         payload.resumeToken = resumeToken;
@@ -1064,7 +1133,7 @@
         sessionId: httpSessionId,
         relayKey,
         commandId: command.commandId,
-        state: stateSnapshot(),
+        state: relayStateSnapshot(),
         ...outcome,
       });
     }
@@ -1077,7 +1146,7 @@
             sessionId: httpSessionId,
             relayKey,
             timeoutMs: 25000,
-            state: stateSnapshot(),
+            state: relayStateSnapshot(),
           });
           retryDelayMs = 1000;
           const command = response.command;

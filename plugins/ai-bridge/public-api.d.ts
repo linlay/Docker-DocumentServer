@@ -233,6 +233,20 @@ export interface WordAddTableArgs extends BasicTextFormat {
   verticalBanding?: boolean;
   title?: string;
   description?: string;
+  /** Defaults to "end". before/after require exactly one anchor below. */
+  insertAt?: "end" | "current" | "before" | "after";
+  /** One-based top-level paragraph anchor. */
+  paragraphIndex?: number;
+  /** One-based top-level table anchor. */
+  tableIndex?: number;
+  /** Paragraph text anchor. */
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  /** One-based search occurrence; defaults to 1. */
+  occurrence?: number;
+  /** Insert a page-break paragraph immediately before the table. */
+  pageBreakBefore?: boolean;
 }
 export interface WordSetTableCellArgs extends WordParagraphFormat {
   tableIndex: number;
@@ -564,6 +578,12 @@ export interface WordManageContentControlArgs {
   updateFromXml?: boolean;
   paragraphIndex?: number;
   current?: boolean;
+  /** Inline-only table cell target; tableIndex, row, and column must be supplied together. */
+  tableIndex?: number;
+  row?: number;
+  column?: number;
+  /** Inline controls default to append; replace clears the selected paragraph or cell first. */
+  contentMode?: "append" | "replace";
 }
 export interface WordManageCustomXmlArgs {
   action:

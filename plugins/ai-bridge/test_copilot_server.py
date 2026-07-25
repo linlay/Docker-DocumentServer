@@ -39,12 +39,15 @@ class ContractAlignmentTests(unittest.TestCase):
             """sub_filter '<option value="zh">zh</option>' '<option value="zh" selected>zh</option>';""",
             config,
         )
-        self.assertIn('if (!requestedLanguage) config.editorConfig.lang = "zh";', config)
-        self.assertIn('config.editorConfig.region = config.editorConfig.lang === "zh" ? "zh-CN"', config)
+        self.assertIn("absolute_redirect off;", config)
+        self.assertIn("if ($uri = /example/editor)", config)
+        self.assertIn('if ($arg_lang != "")', config)
+        self.assertIn("return 302 /example/editor?lang=zh&$args;", config)
+        self.assertNotIn('config.editorConfig.lang = "zh"', config)
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.0-rev26"
+        revision = "0.4.0-rev28"
         paths = [
             "config.json",
             "index.html",
@@ -57,7 +60,7 @@ class ContractAlignmentTests(unittest.TestCase):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
                     contents = stream.read()
                 self.assertIn(revision, contents)
-                self.assertNotIn("0.4.0-rev25", contents)
+                self.assertNotIn("0.4.0-rev26", contents)
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
@@ -719,8 +722,100 @@ class HttpRelayTests(unittest.TestCase):
         self.assertTrue(cached_after_handoff["cached"])
         self.assertEqual(cached_after_handoff["result"]["text"], "current document")
 
+    def test_registration_logs_only_sanitized_startup_timings(self):
+        state = self.editor_state()
+        state["_diagnostics"] = {
+            "startup": {
+                "hostScriptMs": 12.4,
+                "windowLoadMs": "25",
+                "editorFrameSeenMs": -1,
+                "editorFrameLoadMs": float("inf"),
+                "appReadyMs": True,
+                "documentReadyMs": 49_001,
+                "bridgeReadyMs": 49_800,
+                "secret": "敏感正文",
+            }
+        }
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            registration = copilot_server.bridge_register(
+                {
+                    "sessionId": "http-session:startup",
+                    "editorToken": self.editor_token(),
+                    "state": state,
+                }
+            )
+
+        startup_line = next(
+            line for line in output.getvalue().splitlines()
+            if line.startswith("[bridge-startup] ")
+        )
+        event = json.loads(startup_line.split(" ", 1)[1])
+        self.assertEqual(
+            event,
+            {
+                "event": "registered",
+                "identity": copilot_server.bridge_identity_digest(
+                    ("demo.docx", "docx", "word", "uid-1")
+                ),
+                "sessionId": "http-session:startup",
+                "hostScriptMs": 12,
+                "documentReadyMs": 49001,
+                "bridgeReadyMs": 49800,
+            },
+        )
+        self.assertNotIn("_diagnostics", registration["session"])
+        self.assertNotIn("敏感正文", output.getvalue())
+
 
 class BridgeLoggingTests(unittest.TestCase):
+    def test_bridge_command_log_contains_sanitized_timings_once(self):
+        identity = ("demo.docx", "docx", "word", "uid-1")
+        command = {
+            "requestId": "turn-4-batch",
+            "sessionId": "http-session:test",
+            "identity": identity,
+            "method": "executeBatch",
+            "params": {
+                "toolCalls": [
+                    {
+                        "name": "word_append_paragraph",
+                        "arguments": {"text": "敏感正文"},
+                    }
+                    for _ in range(10)
+                ]
+            },
+            "createdMonotonic": 10.0,
+            "firstDeliveredMonotonic": 10.125,
+            "timingLogged": False,
+        }
+
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            copilot_server.log_bridge_command(command, "completed", 11.5)
+            copilot_server.log_bridge_command(command, "completed", 12.0)
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        prefix, encoded = lines[0].split(" ", 1)
+        event = json.loads(encoded)
+        self.assertEqual(prefix, "[bridge-command]")
+        self.assertEqual(
+            event,
+            {
+                "event": "completed",
+                "requestId": "turn-4-batch",
+                "sessionId": "http-session:test",
+                "identity": copilot_server.bridge_identity_digest(identity),
+                "method": "executeBatch",
+                "toolCount": 10,
+                "queueWaitMs": 125,
+                "editorRoundTripMs": 1375,
+                "totalMs": 1500,
+            },
+        )
+        self.assertNotIn("敏感正文", output.getvalue())
+
     def test_bridge_error_log_includes_only_validated_correlation_fields(self):
         handler = object.__new__(copilot_server.Handler)
         handler.path = "/bridge/execute?debug=true"
