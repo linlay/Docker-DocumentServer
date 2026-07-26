@@ -14,7 +14,7 @@ import copilot_server
 
 
 class ContractAlignmentTests(unittest.TestCase):
-    def test_example_proxy_defaults_to_stable_guest_without_overriding_explicit_users(self):
+    def test_capability_gateway_defaults_to_stable_guest_without_forcing_a_user(self):
         config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
@@ -29,7 +29,7 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertNotIn("uid-2", config)
         self.assertNotIn("uid-3", config)
 
-    def test_example_proxy_enables_native_compact_toolbar_before_editor_events(self):
+    def test_capability_gateway_enables_native_compact_toolbar_before_editor_events(self):
         config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
@@ -38,7 +38,7 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertEqual(config.count(compact_toolbar), 1)
         self.assertLess(config.index(compact_toolbar), config.rindex("config.events = {"))
 
-    def test_example_proxy_defaults_interface_locale_to_simplified_chinese(self):
+    def test_capability_gateway_uses_simplified_chinese_editor_config(self):
         config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
@@ -48,10 +48,64 @@ class ContractAlignmentTests(unittest.TestCase):
             config,
         )
         self.assertIn("absolute_redirect off;", config)
-        self.assertIn("if ($uri = /example/editor)", config)
-        self.assertIn('if ($arg_lang != "")', config)
-        self.assertIn("return 302 /example/editor?lang=zh&$args;", config)
+        self.assertIn("&lang=zh;", config)
         self.assertNotIn('config.editorConfig.lang = "zh"', config)
+
+    def test_legacy_example_is_closed_and_storage_is_loopback_only(self):
+        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
+        with open(config_path, encoding="utf-8") as stream:
+            config = stream.read()
+
+        self.assertIn("location = /example {", config)
+        self.assertIn("location ^~ /example/ {", config)
+        self.assertEqual(config.count("return 404;"), 2)
+        self.assertIn("location ^~ /__document_storage/ {", config)
+        self.assertIn("allow 127.0.0.1;", config)
+        self.assertIn("deny all;", config)
+        self.assertIn("internal;", config)
+        with open(
+            os.path.join(os.path.dirname(__file__), "copilot_server.py"),
+            encoding="utf-8",
+        ) as stream:
+            self.assertIn("X-Accel-Redirect", stream.read())
+
+    def test_gateway_exposes_three_create_and_capability_routes(self):
+        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
+        with open(config_path, encoding="utf-8") as stream:
+            config = stream.read()
+
+        self.assertIn("docx|xlsx|pptx", config)
+        self.assertIn("^/new-(docx|xlsx|pptx)$", config)
+        self.assertIn("/__document_editor/", config)
+        self.assertIn("proxy_pass http://127.0.0.1:3001;", config)
+        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", config)
+
+    def test_compose_passes_document_admin_environment_to_copilot_process(self):
+        base_dir = os.path.dirname(__file__)
+        with open(
+            os.path.join(base_dir, "..", "..", "docker-compose.copilot.yml"),
+            encoding="utf-8",
+        ) as stream:
+            compose = stream.read()
+        with open(
+            os.path.join(base_dir, "supervisor-ds-copilot.conf"),
+            encoding="utf-8",
+        ) as stream:
+            supervisor = stream.read()
+        with open(
+            os.path.join(base_dir, "run-copilot.sh"),
+            encoding="utf-8",
+        ) as stream:
+            runner = stream.read()
+
+        self.assertIn('"DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"', compose)
+        self.assertIn('"DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"', compose)
+        self.assertIn("> /run/onlyoffice-copilot.env", compose)
+        self.assertIn(
+            "command=/bin/bash /opt/onlyoffice-copilot/run-copilot.sh",
+            supervisor,
+        )
+        self.assertIn('export "$assignment"', runner)
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
@@ -87,6 +141,189 @@ class ContractAlignmentTests(unittest.TestCase):
             function = entry["function"]
             self.assertTrue(function["description"])
             self.assertNotIn("$ref", json.dumps(function["parameters"]))
+
+
+class DocumentGatewayTests(unittest.TestCase):
+    def setUp(self):
+        self.storage = tempfile.TemporaryDirectory()
+        self.templates = tempfile.TemporaryDirectory()
+        for extension in copilot_server.DOCUMENT_TYPES:
+            with open(
+                os.path.join(self.templates.name, f"new.{extension}"),
+                "wb",
+            ) as stream:
+                stream.write(f"blank-{extension}".encode())
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "DOCUMENT_STORAGE_DIR": self.storage.name,
+                "DOCUMENT_TEMPLATE_ROOT": self.templates.name,
+                "DOCUMENT_PUBLIC_ORIGIN": "https://office.test",
+                "DOCUMENT_ADMIN_USERNAME": "document-admin",
+                "DOCUMENT_ADMIN_PASSWORD": "correct horse battery staple",
+            },
+        )
+        self.environment.start()
+        with copilot_server.DOCUMENT_RATE_LIMIT_LOCK:
+            copilot_server.DOCUMENT_RATE_LIMITS.clear()
+
+    def tearDown(self):
+        self.environment.stop()
+        self.templates.cleanup()
+        self.storage.cleanup()
+        with copilot_server.DOCUMENT_RATE_LIMIT_LOCK:
+            copilot_server.DOCUMENT_RATE_LIMITS.clear()
+
+    def test_creates_all_supported_formats_with_capability_urls(self):
+        for extension in copilot_server.DOCUMENT_TYPES:
+            with self.subTest(extension=extension):
+                created = copilot_server.create_document(extension)
+                self.assertRegex(
+                    created["documentId"],
+                    copilot_server.DOCUMENT_UUID_PATTERN,
+                )
+                self.assertEqual(
+                    created["fileName"],
+                    f"{created['documentId']}.{extension}",
+                )
+                self.assertEqual(
+                    created["editorUrl"],
+                    f"https://office.test/{extension}/{created['documentId']}",
+                )
+                with open(
+                    os.path.join(self.storage.name, created["fileName"]),
+                    "rb",
+                ) as stream:
+                    self.assertEqual(stream.read(), f"blank-{extension}".encode())
+
+    def test_uuid_collision_retries_without_overwriting_existing_file(self):
+        first_id = "123e4567-e89b-42d3-a456-426614174000"
+        second_id = "223e4567-e89b-42d3-a456-426614174000"
+        existing = os.path.join(self.storage.name, f"{first_id}.docx")
+        with open(existing, "wb") as stream:
+            stream.write(b"existing")
+
+        with mock.patch.object(
+            copilot_server.uuid,
+            "uuid4",
+            side_effect=[copilot_server.uuid.UUID(first_id), copilot_server.uuid.UUID(second_id)],
+        ):
+            created = copilot_server.create_document("docx")
+
+        self.assertEqual(created["documentId"], second_id)
+        with open(existing, "rb") as stream:
+            self.assertEqual(stream.read(), b"existing")
+
+    def test_invalid_and_unknown_capability_ids_are_indistinguishable(self):
+        for document_id in (
+            "not-a-uuid",
+            "123e4567-e89b-42d3-a456-426614174000",
+        ):
+            with self.subTest(document_id=document_id):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.document_path("docx", document_id)
+                self.assertEqual(raised.exception.status, 404)
+                self.assertEqual(raised.exception.code, "DOCUMENT_NOT_FOUND")
+
+    def test_httpx_binding_helper_accepts_only_existing_uuid_file_names(self):
+        created = copilot_server.create_document("docx")
+
+        self.assertEqual(
+            copilot_server.document_file_identity(created["fileName"]),
+            ("docx", created["documentId"]),
+        )
+        for file_name in (
+            "legacy-name.docx",
+            f"{created['documentId']}.xlsx",
+            "../" + created["fileName"],
+        ):
+            with self.subTest(file_name=file_name):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.document_file_identity(file_name)
+                self.assertEqual(raised.exception.status, 404)
+                self.assertEqual(raised.exception.code, "DOCUMENT_NOT_FOUND")
+
+    def test_creation_rate_limit_allows_burst_then_refills(self):
+        for _ in range(copilot_server.DOCUMENT_CREATE_BURST):
+            copilot_server.enforce_document_creation_rate("192.0.2.10", now=100)
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.enforce_document_creation_rate("192.0.2.10", now=100)
+        self.assertEqual(raised.exception.status, 429)
+        self.assertEqual(raised.exception.details["retryAfter"], 6)
+
+        copilot_server.enforce_document_creation_rate("192.0.2.10", now=106)
+
+    def test_admin_list_only_contains_uuid_documents(self):
+        first = copilot_server.create_document("docx")
+        second = copilot_server.create_document("xlsx")
+        with open(os.path.join(self.storage.name, "legacy-name.docx"), "wb") as stream:
+            stream.write(b"legacy")
+        os.makedirs(
+            os.path.join(self.storage.name, f"{first['fileName']}-history"),
+        )
+        with open(os.path.join(self.storage.name, ".private"), "wb") as stream:
+            stream.write(b"hidden")
+
+        listed = copilot_server.list_uuid_documents()
+
+        self.assertEqual(
+            {item["fileName"] for item in listed},
+            {first["fileName"], second["fileName"]},
+        )
+        page = copilot_server.admin_documents_html(listed)
+        self.assertIn(
+            f"<code>{first['editorUrl']}</code>",
+            page,
+        )
+        self.assertNotIn("legacy-name.docx", page)
+
+    def test_basic_auth_fails_closed_and_uses_constant_credentials(self):
+        handler = mock.Mock()
+        handler.headers = {}
+        with self.assertRaises(copilot_server.BridgeError) as missing:
+            copilot_server.require_document_admin(handler)
+        self.assertEqual(missing.exception.status, 401)
+
+        handler.headers = {
+            "Authorization": "Basic "
+            + base64.b64encode(b"document-admin:wrong").decode()
+        }
+        with self.assertRaises(copilot_server.BridgeError) as wrong:
+            copilot_server.require_document_admin(handler)
+        self.assertEqual(wrong.exception.status, 401)
+
+        handler.headers = {
+            "Authorization": "Basic "
+            + base64.b64encode(
+                b"document-admin:correct horse battery staple"
+            ).decode()
+        }
+        copilot_server.require_document_admin(handler)
+
+        with mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_ADMIN_USERNAME": "", "DOCUMENT_ADMIN_PASSWORD": ""},
+        ):
+            with self.assertRaises(copilot_server.BridgeError) as unconfigured:
+                copilot_server.require_document_admin(handler)
+        self.assertEqual(unconfigured.exception.status, 503)
+
+    def test_gateway_uses_internal_acceleration_without_redirecting_browser(self):
+        created = copilot_server.create_document("pptx")
+        handler = mock.Mock()
+
+        copilot_server.document_gateway_response(
+            handler,
+            "pptx",
+            created["documentId"],
+        )
+
+        handler.send_response.assert_called_once_with(200)
+        handler.send_header.assert_any_call(
+            "X-Accel-Redirect",
+            f"/__document_editor/pptx/{created['documentId']}",
+        )
 
 
 class ImageImportTests(unittest.TestCase):
@@ -784,6 +1021,40 @@ class HttpRelayTests(unittest.TestCase):
         self.assertGreater(response["bindingExpiresAt"], int(time.time()))
         self.assertEqual(len(response["sessions"]), 1)
         self.assertTrue(response["sessions"][0]["authoritative"])
+
+    def test_editor_jwt_binds_to_the_ready_local_guest_session(self):
+        anonymous_id = "123e4567-e89b-42d3-a456-426614174000"
+        guest_user_id = f"local-guest:{anonymous_id}"
+        initial_token = self.editor_token()
+        guest_token = copilot_server.issue_anonymous_editor_config(
+            {
+                "editorToken": initial_token,
+                "anonymousId": anonymous_id,
+            }
+        )["token"]
+        guest_state = self.editor_state()
+        guest_state["context"]["userId"] = guest_user_id
+        copilot_server.bridge_register(
+            {
+                "sessionId": "http-session:guest",
+                "editorToken": guest_token,
+                "state": guest_state,
+            }
+        )
+
+        initial_claims = copilot_server.verify_editor_jwt(initial_token)
+        response = copilot_server.bridge_sessions(initial_claims)
+        binding_claims = copilot_server.verify_bridge_binding_token(
+            response["bindingToken"]
+        )
+
+        self.assertEqual(binding_claims["userId"], guest_user_id)
+        with copilot_server.BRIDGE_CONDITION:
+            session_id, _ = copilot_server.bridge_select_session_locked(
+                "",
+                binding_claims,
+            )
+        self.assertEqual(session_id, "http-session:guest")
 
     def test_expired_binding_token_is_rejected(self):
         with mock.patch.object(copilot_server, "BRIDGE_BINDING_TOKEN_TTL_SECONDS", -1):

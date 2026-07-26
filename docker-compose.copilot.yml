@@ -7,6 +7,17 @@ services:
       - /bin/bash
       - -c
       - >-
+        umask 077 &&
+        /usr/bin/printf '%s\0'
+        "COPILOT_API_BASE=$${COPILOT_API_BASE}"
+        "COPILOT_API_KEY=$${COPILOT_API_KEY}"
+        "COPILOT_MODEL=$${COPILOT_MODEL}"
+        "JWT_SECRET=$${JWT_SECRET}"
+        "DOCUMENT_PUBLIC_ORIGIN=$${DOCUMENT_PUBLIC_ORIGIN}"
+        "DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"
+        "DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"
+        > /run/onlyoffice-copilot.env &&
+        chown ds:ds /run/onlyoffice-copilot.env &&
         cp /opt/onlyoffice-copilot/nginx-ds-example.conf
         /etc/onlyoffice/documentserver-example/nginx/includes/ds-example.conf &&
         cp /opt/onlyoffice-copilot/nginx-copilot-loopback.conf
@@ -24,6 +35,9 @@ services:
       COPILOT_API_BASE: "${COPILOT_API_BASE:-https://api.openai.com/v1}"
       COPILOT_API_KEY: "${COPILOT_API_KEY:-}"
       COPILOT_MODEL: "${COPILOT_MODEL:-}"
+      DOCUMENT_PUBLIC_ORIGIN: "${DOCUMENT_PUBLIC_ORIGIN:-http://localhost:8088}"
+      DOCUMENT_ADMIN_USERNAME: "${DOCUMENT_ADMIN_USERNAME:-}"
+      DOCUMENT_ADMIN_PASSWORD: "${DOCUMENT_ADMIN_PASSWORD:-}"
     volumes:
       - onlyoffice_data:/var/www/onlyoffice/Data
       - onlyoffice_logs:/var/log/onlyoffice
@@ -33,6 +47,7 @@ services:
       - "./plugins/ai-bridge/nginx-ds-example.conf:/opt/onlyoffice-copilot/nginx-ds-example.conf:ro"
       - "./plugins/ai-bridge/nginx-copilot-loopback.conf:/opt/onlyoffice-copilot/nginx-copilot-loopback.conf:ro"
       - "./plugins/ai-bridge/copilot_server.py:/opt/onlyoffice-copilot/copilot_server.py:ro"
+      - "./plugins/ai-bridge/run-copilot.sh:/opt/onlyoffice-copilot/run-copilot.sh:ro"
       - "./plugins/ai-bridge/supervisor-ds-copilot.conf:/etc/supervisor/conf.d/ds-copilot.conf:ro"
 
 volumes:

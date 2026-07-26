@@ -388,8 +388,11 @@ The localhost example exposes these additional endpoints:
   requested tool against the authoritative page capabilities, and waits for the
   live result.
 
-The caller first fetches the exact local `/example/editor?...` page and stores
-its short-lived editor JWT without printing it. The first `sessions` request
+The caller passes the UUID file name to
+`/copilot-api/documents/editor?fileName=<uuid>.<ext>` and stores the returned
+page's short-lived editor JWT without printing it. The real `/docx/<uuid>`,
+`/xlsx/<uuid>`, or `/pptx/<uuid>` capability page must remain open in a browser
+with its Relay ready. The first `sessions` request
 exchanges that JWT for a 12-hour `ai-bridge-binding` token scoped to the exact
 file name, file type, editor type, and user. A newly registered page for that
 stable identity supersedes the previous Relay session, so a storage-version
@@ -408,12 +411,28 @@ not exposed by `getState()` or the sessions response.
 ## Local run
 
 ```bash
+export DOCUMENT_ADMIN_USERNAME=admin
+export DOCUMENT_ADMIN_PASSWORD='replace-with-a-strong-password'
 docker compose -f docker-compose.copilot.yml up -d
 ```
 
-Open `http://localhost:8088/example/`. The plugin is loaded automatically but
-does not render a user interface. The first user selector defaults to `访客`;
-the browser is not prompted for a nickname.
+Create a document without authentication:
+
+```bash
+curl -X POST http://localhost:8088/new-docx
+curl -X POST http://localhost:8088/new-xlsx
+curl -X POST http://localhost:8088/new-pptx
+```
+
+Each response contains a UUID v4 file name and a capability URL such as
+`http://localhost:8088/docx/<uuid>`. Anyone who knows that URL can edit the
+document; there is no public list or recovery endpoint. The editor assigns a
+stable browser-local guest identity and loads ai-bridge automatically.
+
+Open `http://localhost:8088/admin/` to view UUID documents after Basic Auth.
+Set `DOCUMENT_PUBLIC_ORIGIN` when the public origin is not
+`http://localhost:8088`. The legacy `/example*` surface is intentionally
+closed, and legacy named files are neither listed nor migrated.
 
 ## Files
 

@@ -48,6 +48,12 @@ DOCUMENT_FILE_PATTERN = re.compile(
     r"^(?P<documentId>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?P<fileType>docx|xlsx|pptx)$"
 )
+PUBLIC_DOCUMENT_PATH_PATTERN = re.compile(
+    r"^/(?P<fileType>docx|xlsx|pptx)/"
+    r"(?P<documentId>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
+)
+NEW_DOCUMENT_PATH_PATTERN = re.compile(r"^/new-(?P<fileType>docx|xlsx|pptx)$")
 DOCUMENT_CREATE_RATE_PER_SECOND = 10 / 60
 DOCUMENT_CREATE_BURST = 20
 DOCUMENT_RATE_LIMIT_LOCK = threading.Lock()
@@ -1500,7 +1506,20 @@ def bridge_sessions(claims: dict[str, Any]) -> dict[str, Any]:
                 break
             BRIDGE_CONDITION.wait(timeout=remaining)
     sessions.sort(key=lambda item: int(item.get("generation") or 0), reverse=True)
-    binding_token, expires_at = bridge_binding_token(claims)
+    binding_claims = claims
+    if claims.get("authKind") == "editor" and sessions:
+        selected = next(
+            (session for session in sessions if session.get("ready")),
+            sessions[0],
+        )
+        binding_claims = {
+            "fileName": selected.get("fileName"),
+            "fileType": selected.get("fileType"),
+            "editorType": selected.get("editorType"),
+            "userId": selected.get("userId"),
+            "authKind": "binding",
+        }
+    binding_token, expires_at = bridge_binding_token(binding_claims)
     return {
         "ok": True,
         "bindingToken": binding_token,
@@ -1796,7 +1815,12 @@ def bridge_unregister(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "removed": removed}
 
 
-def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+def json_response(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     try:
         handler.send_response(status)
@@ -1804,6 +1828,8 @@ def json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[st
         handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            handler.send_header(name, value)
         handler.end_headers()
         handler.wfile.write(body)
     except (BrokenPipeError, ConnectionResetError):
@@ -1818,6 +1844,323 @@ def read_json(handler: BaseHTTPRequestHandler, max_bytes: int = 2_000_000) -> di
     if not isinstance(payload, dict):
         raise ValueError("请求体必须是 JSON 对象")
     return payload
+
+
+def document_storage_directory() -> str:
+    return os.environ.get(
+        "DOCUMENT_STORAGE_DIR",
+        os.path.join(EXAMPLE_FILES, EXAMPLE_STORAGE_ID),
+    )
+
+
+def document_template_path(file_type: str) -> str:
+    if file_type not in DOCUMENT_TYPES:
+        raise BridgeError(404, "DOCUMENT_TYPE_NOT_FOUND", "不支持的文档类型")
+    template_root = os.environ.get("DOCUMENT_TEMPLATE_ROOT", DOCUMENT_TEMPLATE_ROOT)
+    return os.path.join(template_root, f"new.{file_type}")
+
+
+def normalize_document_id(value: Any) -> str:
+    document_id = str(value or "").strip()
+    if not DOCUMENT_UUID_PATTERN.fullmatch(document_id):
+        raise BridgeError(404, "DOCUMENT_NOT_FOUND", "文档不存在")
+    return document_id
+
+
+def document_path(file_type: str, document_id: Any, must_exist: bool = True) -> str:
+    document_id = normalize_document_id(document_id)
+    if file_type not in DOCUMENT_TYPES:
+        raise BridgeError(404, "DOCUMENT_NOT_FOUND", "文档不存在")
+    path = os.path.join(document_storage_directory(), f"{document_id}.{file_type}")
+    if must_exist and not os.path.isfile(path):
+        raise BridgeError(404, "DOCUMENT_NOT_FOUND", "文档不存在")
+    return path
+
+
+def document_file_identity(file_name: Any) -> tuple[str, str]:
+    match = DOCUMENT_FILE_PATTERN.fullmatch(str(file_name or "").strip())
+    if not match:
+        raise BridgeError(404, "DOCUMENT_NOT_FOUND", "文档不存在")
+    file_type = match.group("fileType")
+    document_id = match.group("documentId")
+    document_path(file_type, document_id)
+    return file_type, document_id
+
+
+def document_public_origin() -> str:
+    value = os.environ.get(
+        "DOCUMENT_PUBLIC_ORIGIN",
+        "http://localhost:8088",
+    ).strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("DOCUMENT_PUBLIC_ORIGIN 必须是无路径的 HTTP(S) origin")
+    return value
+
+
+def document_editor_url(file_type: str, document_id: str) -> str:
+    return f"{document_public_origin()}/{file_type}/{document_id}"
+
+
+def create_document(file_type: str) -> dict[str, Any]:
+    template = document_template_path(file_type)
+    if not os.path.isfile(template):
+        raise RuntimeError(f"找不到 {file_type.upper()} 空白模板")
+    directory = document_storage_directory()
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+
+    for _ in range(10):
+        document_id = str(uuid.uuid4())
+        destination = document_path(file_type, document_id, must_exist=False)
+        try:
+            descriptor = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o644,
+            )
+        except FileExistsError:
+            continue
+        try:
+            with open(template, "rb") as source, os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                shutil.copyfileobj(source, output)
+                output.flush()
+                os.fsync(output.fileno())
+        except Exception:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(destination)
+            except FileNotFoundError:
+                pass
+            raise
+        return {
+            "documentId": document_id,
+            "fileName": f"{document_id}.{file_type}",
+            "editorUrl": document_editor_url(file_type, document_id),
+        }
+    raise RuntimeError("无法分配唯一文档 ID")
+
+
+def request_client_identity(handler: BaseHTTPRequestHandler) -> str:
+    forwarded = handler.headers.get("X-Forwarded-For", "")
+    candidate = forwarded.split(",", 1)[0].strip() if forwarded else ""
+    if not candidate:
+        candidate = str(handler.client_address[0])
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return str(handler.client_address[0])
+
+
+def enforce_document_creation_rate(
+    client_identity: str,
+    now: float | None = None,
+) -> None:
+    current = time.monotonic() if now is None else float(now)
+    with DOCUMENT_RATE_LIMIT_LOCK:
+        tokens, updated = DOCUMENT_RATE_LIMITS.get(
+            client_identity,
+            (float(DOCUMENT_CREATE_BURST), current),
+        )
+        tokens = min(
+            float(DOCUMENT_CREATE_BURST),
+            tokens + max(0.0, current - updated) * DOCUMENT_CREATE_RATE_PER_SECOND,
+        )
+        if tokens < 1:
+            retry_after = max(
+                1,
+                math.ceil((1 - tokens) / DOCUMENT_CREATE_RATE_PER_SECOND),
+            )
+            DOCUMENT_RATE_LIMITS[client_identity] = (tokens, current)
+            raise BridgeError(
+                429,
+                "DOCUMENT_CREATE_RATE_LIMITED",
+                "新建文档过于频繁，请稍后重试",
+                {"retryAfter": retry_after},
+            )
+        DOCUMENT_RATE_LIMITS[client_identity] = (tokens - 1, current)
+
+
+def list_uuid_documents() -> list[dict[str, Any]]:
+    directory = document_storage_directory()
+    if not os.path.isdir(directory):
+        return []
+    documents = []
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            match = DOCUMENT_FILE_PATTERN.fullmatch(entry.name)
+            if not match:
+                continue
+            metadata = entry.stat(follow_symlinks=False)
+            file_type = match.group("fileType")
+            document_id = match.group("documentId")
+            documents.append(
+                {
+                    "documentId": document_id,
+                    "fileName": entry.name,
+                    "fileType": file_type,
+                    "size": metadata.st_size,
+                    "updatedAt": metadata.st_mtime,
+                    "editorUrl": document_editor_url(file_type, document_id),
+                }
+            )
+    documents.sort(
+        key=lambda item: (float(item["updatedAt"]), str(item["fileName"])),
+        reverse=True,
+    )
+    return documents
+
+
+def require_document_admin(handler: BaseHTTPRequestHandler) -> None:
+    expected_user = os.environ.get("DOCUMENT_ADMIN_USERNAME", "")
+    expected_password = os.environ.get("DOCUMENT_ADMIN_PASSWORD", "")
+    if not expected_user or not expected_password:
+        raise BridgeError(
+            503,
+            "DOCUMENT_ADMIN_NOT_CONFIGURED",
+            "管理员凭证尚未配置",
+        )
+    authorization = handler.headers.get("Authorization", "")
+    if not authorization.startswith("Basic "):
+        raise BridgeError(401, "DOCUMENT_ADMIN_AUTH_REQUIRED", "需要管理员认证")
+    try:
+        decoded = base64.b64decode(
+            authorization.removeprefix("Basic ").strip(),
+            validate=True,
+        ).decode("utf-8")
+        provided_user, provided_password = decoded.split(":", 1)
+    except (binascii.Error, UnicodeDecodeError, ValueError) as error:
+        raise BridgeError(
+            401,
+            "DOCUMENT_ADMIN_AUTH_REQUIRED",
+            "无效的管理员认证",
+        ) from error
+    user_matches = hmac.compare_digest(provided_user, expected_user)
+    password_matches = hmac.compare_digest(provided_password, expected_password)
+    if not (user_matches and password_matches):
+        raise BridgeError(401, "DOCUMENT_ADMIN_AUTH_REQUIRED", "无效的管理员认证")
+
+
+def human_file_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.2f} {unit}"
+        value /= 1024
+    return f"{value:.2f} GB"
+
+
+def admin_documents_html(documents: list[dict[str, Any]]) -> str:
+    rows = []
+    for document in documents:
+        editor_url = html.escape(str(document["editorUrl"]), quote=True)
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(document['documentId']))}</code></td>"
+            f"<td>{html.escape(str(document['fileType']).upper())}</td>"
+            f"<td>{html.escape(human_file_size(int(document['size'])))}</td>"
+            f"<td>{html.escape(time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(float(document['updatedAt']))))}</td>"
+            f'<td><a href="{editor_url}" rel="noreferrer"><code>{editor_url}</code></a></td>'
+            "</tr>"
+        )
+    table_body = "".join(rows) or (
+        '<tr><td class="empty" colspan="5">还没有 UUID 文档。</td></tr>'
+    )
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>文档管理</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #1f2937; background: #f7f8fa; }
+    body { margin: 0; padding: 32px; }
+    main { max-width: 1180px; margin: 0 auto; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; }
+    header { padding: 24px; border-bottom: 1px solid #e5e7eb; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    p { margin: 0; color: #6b7280; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 14px 18px; border-bottom: 1px solid #eef0f2; text-align: left; }
+    th { font-size: 12px; color: #6b7280; text-transform: uppercase; background: #fafafa; }
+    code { font-size: 12px; }
+    a { color: #2563eb; text-decoration: none; font-weight: 600; }
+    a:hover { text-decoration: underline; }
+    .empty { padding: 40px; text-align: center; color: #6b7280; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>UUID 文档管理</h1>
+    <p>仅展示通过公开新建接口创建的 DOCX、XLSX 和 PPTX。</p>
+  </header>
+  <table>
+    <thead><tr><th>文档 ID</th><th>格式</th><th>大小</th><th>更新时间</th><th>编辑 URL</th></tr></thead>
+    <tbody>""" + table_body + """</tbody>
+  </table>
+</main>
+</body>
+</html>"""
+
+
+def html_response(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    body: str,
+    authenticate: bool = False,
+) -> None:
+    encoded = body.encode("utf-8")
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", "text/html; charset=utf-8")
+        handler.send_header("Content-Length", str(len(encoded)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("X-Frame-Options", "DENY")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        )
+        if authenticate:
+            handler.send_header(
+                "WWW-Authenticate",
+                'Basic realm="ONLYOFFICE documents", charset="UTF-8"',
+            )
+        handler.end_headers()
+        handler.wfile.write(encoded)
+    except (BrokenPipeError, ConnectionResetError):
+        return
+
+
+def document_gateway_response(
+    handler: BaseHTTPRequestHandler,
+    file_type: str,
+    document_id: str,
+) -> None:
+    document_path(file_type, document_id)
+    try:
+        handler.send_response(200)
+        handler.send_header(
+            "X-Accel-Redirect",
+            f"/__document_editor/{file_type}/{document_id}",
+        )
+        handler.send_header("Content-Length", "0")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError):
+        return
 
 
 def validate_calls(editor: str, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2229,7 +2572,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed_path = urllib.parse.urlsplit(self.path)
+        public_document = PUBLIC_DOCUMENT_PATH_PATTERN.fullmatch(parsed_path.path)
+        if public_document:
+            try:
+                document_gateway_response(
+                    self,
+                    public_document.group("fileType"),
+                    public_document.group("documentId"),
+                )
+            except BridgeError as error:
+                json_response(self, error.status, error.payload())
+            return
+        if parsed_path.path in ("/admin", "/admin/"):
+            try:
+                require_document_admin(self)
+                html_response(self, 200, admin_documents_html(list_uuid_documents()))
+            except BridgeError as error:
+                html_response(
+                    self,
+                    error.status,
+                    (
+                        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+                        f"<title>文档管理</title><p>{html.escape(error.message)}</p></html>"
+                    ),
+                    authenticate=error.status == 401,
+                )
+            except Exception:  # noqa: BLE001 - 管理入口必须保持 fail-closed
+                html_response(
+                    self,
+                    503,
+                    (
+                        "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\">"
+                        "<title>文档管理</title><p>管理员页面暂不可用</p></html>"
+                    ),
+                )
+            return
         request_path = parsed_path.path.rstrip("/")
+        if request_path == "/documents/editor":
+            try:
+                file_name = urllib.parse.parse_qs(parsed_path.query).get(
+                    "fileName",
+                    [""],
+                )[0]
+                file_type, document_id = document_file_identity(file_name)
+                document_gateway_response(self, file_type, document_id)
+            except BridgeError as error:
+                json_response(self, error.status, error.payload())
+            return
         if request_path == "/health":
             json_response(self, 200, {"ok": True, "modelConfigured": bool(os.environ.get("COPILOT_API_KEY") and os.environ.get("COPILOT_MODEL")), "editors": ["word", "slide", "cell"]})
             return
@@ -2266,7 +2655,37 @@ class Handler(BaseHTTPRequestHandler):
         payload: dict[str, Any] = {}
         request_path = ""
         try:
-            request_path = urllib.parse.urlsplit(self.path).path.rstrip("/")
+            parsed_path = urllib.parse.urlsplit(self.path)
+            new_document = NEW_DOCUMENT_PATH_PATTERN.fullmatch(parsed_path.path)
+            if new_document:
+                try:
+                    enforce_document_creation_rate(request_client_identity(self))
+                    json_response(
+                        self,
+                        201,
+                        create_document(new_document.group("fileType")),
+                    )
+                except BridgeError as error:
+                    retry_after = (
+                        str((error.details or {}).get("retryAfter"))
+                        if error.status == 429 and isinstance(error.details, dict)
+                        else None
+                    )
+                    json_response(
+                        self,
+                        error.status,
+                        error.payload(),
+                        {"Retry-After": retry_after} if retry_after else None,
+                    )
+                except Exception:  # noqa: BLE001 - API boundary
+                    error = BridgeError(
+                        502,
+                        "DOCUMENT_CREATE_FAILED",
+                        "暂时无法创建文档",
+                    )
+                    json_response(self, error.status, error.payload())
+                return
+            request_path = parsed_path.path.rstrip("/")
             max_bytes = (
                 IMAGE_MAX_REQUEST_BYTES
                 if request_path in ("/images/import", "/bridge/execute")

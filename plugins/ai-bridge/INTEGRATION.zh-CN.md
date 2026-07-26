@@ -144,8 +144,10 @@ popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是�
 Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 
 1. 浏览器中的 `host-bridge.js` 使用当前 ONLYOFFICE editor JWT 注册长轮询会话。
-2. HTTPX 先获取用户明确给出的 `/example/editor?...` 页面，把其中短期 editor
-   JWT 保存进自身 state，不能输出或记录该 JWT。
+2. HTTPX 把能力链接中的 UUID 文件名传给
+   `/copilot-api/documents/editor?fileName=<uuid>.<ext>`，由固定绑定助手获取同一
+   编辑页的短期 editor JWT 并保存进自身 state；不能输出或记录该 JWT。真实
+   `/docx|xlsx|pptx/<uuid>` 页面仍必须在浏览器中打开并保持 Relay ready。
 3. 首次 `GET /copilot-api/bridge/sessions` 用短期 editor JWT 换取 12 小时
    `ai-bridge-binding` token；HTTPX 立即用新 token 覆盖临时凭证。
 4. Bridge token 绑定准确的文件名、文件类型、编辑器类型与用户，但不绑定保存后会
@@ -160,9 +162,15 @@ Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 页面必须保持打开。生产系统应换成自身的用户鉴权、权限校验、审计与 WebSocket/HTTP
 投递服务。
 
-为避免回环端口绑定改变 DocumentServer example 按访问地址划分的本地存储目录，
-示例 Nginx 配置固定沿用既有 demo 存储身份 `185.199.108.133`。这只属于本机示例
-数据兼容逻辑，生产系统不得用来源地址代替真实用户或租户身份。
+公开网关通过 `POST /new-docx`、`POST /new-xlsx` 和 `POST /new-pptx`
+原子复制官方空白模板，返回 UUID v4 能力链接。只有知道完整 URL 的调用者才能打开
+对应文档；普通用户没有列举或找回接口。`GET /admin/` 使用 Basic Auth 展示 UUID
+文件，管理员账号来自 `DOCUMENT_ADMIN_USERNAME` 和 `DOCUMENT_ADMIN_PASSWORD`。
+原 `/example*` 路径对外返回 404。
+
+为避免回环端口绑定改变 DocumentServer example 按访问地址划分的内部存储目录，
+Nginx 在内部仍固定沿用 demo 存储身份 `185.199.108.133`，下载和 callback 仅允许
+容器回环访问。生产系统不得用来源地址代替真实用户或租户身份。
 
 ## ai-bridge 怎样知道操作哪个文档
 
@@ -181,10 +189,9 @@ tenantId:documentId:storageVersion
 `document.key`；稳定绑定不能绕过页面级文档校验。生产系统应把这里的文件名替换为
 真实租户 ID 与文档 ID。
 
-`userId` 必须来自当前编辑器签名配置中的 `editorConfig.user.id`。本机示例未指定
-`userid` 或选择 `uid-0` 时，会通过受限重签接口使用浏览器稳定的
-`local-guest:<uuid>`；显式选择 `uid-1`、`uid-2`、`uid-3` 时仍使用 example 后端
-原本签发的测试身份。外部业务系统应使用自己的认证用户，或采用上面的稳定访客
+`userId` 必须来自当前编辑器签名配置中的 `editorConfig.user.id`。本机 UUID
+能力链接不接收 `userid`，而是通过受限重签接口使用浏览器稳定的
+`local-guest:<uuid>`。外部业务系统应使用自己的认证用户，或采用上面的稳定访客
 流程，不能在 JWT 签发之后仅修改未签名的 `editorConfig.user`。
 
 ## Copilot 怎样发命令
