@@ -1644,7 +1644,36 @@ test("editor save failures include a safe diagnostic phase", async () => {
     error => {
       assert.equal(error.code, "EXECUTION_FAILED");
       assert.equal(error.details.phase, "editor-save");
+      assert.equal(error.details.partialMutationPossible, true);
       assert.doesNotMatch(error.message, /敏感正文/);
+      return true;
+    },
+  );
+});
+
+test("force-save failures report persistence phase and possible document mutation", async () => {
+  const harness = createHarness({
+    serviceResponse(path) {
+      if (path === "/copilot-api/forcesave") {
+        return { error: "持久化服务暂时失败" };
+      }
+      return { persisted: true, path };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.word.setDocumentText(
+      { text: "敏感正文" },
+      { timeoutMs: 1000, requestId: "persistence-failure" },
+    ),
+    error => {
+      assert.equal(error.code, "PERSISTENCE_FAILED");
+      assert.equal(error.message, "持久化服务暂时失败");
+      assert.equal(error.details.phase, "persistence");
+      assert.equal(error.details.partialMutationPossible, true);
+      assert.equal(error.details.path, "forcesave");
+      assert.doesNotMatch(JSON.stringify(error.details), /敏感正文/);
       return true;
     },
   );
@@ -2090,6 +2119,114 @@ test("word bridge applies advanced borders and margins to the targeted table row
   assert.deepEqual(calls.filter(call => call[0] === "marginTop").map(call => call[1]), [0, 1]);
   assert.deepEqual(calls.filter(call => call[0] === "borderTop").map(call => call[1]), [0, 1]);
   assert.equal(calls.some(call => call[1] === 2 || call[1] === 3), false);
+});
+
+test("word bridge failures identify the failed batch tool without echoing arguments", async () => {
+  const harness = createWordBridgeHarness({
+    paragraphs: ["第一段"],
+    currentParagraphIndex: 1,
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([
+      {
+        name: "word_replace_text",
+        arguments: { search: "不存在的文本", replace: "不会发生" },
+      },
+      {
+        name: "word_insert_page_break",
+        arguments: {
+          current: true,
+          position: "end",
+          internalNote: "敏感正文",
+        },
+      },
+    ]),
+    error => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(error.message, "word_insert_page_break.position 必须是 before 或 after");
+      assert.equal(error.details.phase, "word-command");
+      assert.equal(error.details.tool, "word_insert_page_break");
+      assert.equal(error.details.toolCallIndex, 1);
+      assert.equal(error.details.completedToolCalls, 1);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.doesNotMatch(JSON.stringify(error.details), /敏感正文|internalNote/);
+      return true;
+    },
+  );
+});
+
+test("word bridge classifies the observed page-break and table argument failures", async () => {
+  const pageBreakHarness = createWordBridgeHarness({ paragraphs: ["第一段"] });
+  await assert.rejects(
+    pageBreakHarness.bridge.execute([{
+      name: "word_insert_page_break",
+      arguments: {},
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(
+        error.message,
+        "必须使用 paragraphIndexes、search、all=true 或 current=true 指定段落",
+      );
+      assert.equal(error.details.tool, "word_insert_page_break");
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    },
+  );
+
+  const cells = [{}, {}];
+  const row = {
+    GetCellsCount() { return cells.length; },
+    GetCell(index) { return cells[index] || null; },
+  };
+  const table = {
+    GetRowsCount() { return 1; },
+    GetRow(index) { return index === 0 ? row : null; },
+    GetAllCells() { return cells; },
+  };
+  const tableHarness = createWordBridgeHarness({
+    paragraphs: ["表格前"],
+    tables: [table],
+  });
+
+  await assert.rejects(
+    tableHarness.bridge.execute([{
+      name: "word_format_table_advanced",
+      arguments: { tableIndex: 1, repeatHeader: true },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(error.message, "设置重复表头时必须提供 row");
+      assert.equal(error.details.tool, "word_format_table_advanced");
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    tableHarness.bridge.execute([{
+      name: "word_edit_table",
+      arguments: {
+        tableIndex: 1,
+        action: "mergeCells",
+        startRow: 1,
+        startColumn: 1,
+        endRow: 1,
+        endColumn: 2,
+      },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_ARGUMENTS");
+      assert.equal(
+        error.message,
+        "word_edit_table mergeCells 需要 rowStart、rowEnd、columnStart、columnEnd",
+      );
+      assert.equal(error.details.tool, "word_edit_table");
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    },
+  );
 });
 
 test("word bridge uses ONLYOFFICE zero-based placeholders for multilevel numbering", async () => {

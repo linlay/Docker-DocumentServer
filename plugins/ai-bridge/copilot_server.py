@@ -8,6 +8,7 @@ import binascii
 import glob
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import math
@@ -31,6 +32,26 @@ from typing import Any
 PORT = int(os.environ.get("COPILOT_PORT", "3001"))
 LOCAL_CONFIG = "/etc/onlyoffice/documentserver/local.json"
 EXAMPLE_FILES = "/var/lib/onlyoffice/documentserver-example/files"
+EXAMPLE_STORAGE_ID = "185.199.108.133"
+DOCUMENT_TEMPLATE_ROOT = (
+    "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
+)
+DOCUMENT_TYPES = {
+    "docx": "word",
+    "xlsx": "cell",
+    "pptx": "slide",
+}
+DOCUMENT_UUID_PATTERN = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+DOCUMENT_FILE_PATTERN = re.compile(
+    r"^(?P<documentId>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?P<fileType>docx|xlsx|pptx)$"
+)
+DOCUMENT_CREATE_RATE_PER_SECOND = 10 / 60
+DOCUMENT_CREATE_BURST = 20
+DOCUMENT_RATE_LIMIT_LOCK = threading.Lock()
+DOCUMENT_RATE_LIMITS: dict[str, tuple[float, float]] = {}
 MAX_VERSION_SNAPSHOTS = 20
 BRIDGE_SESSION_TTL_SECONDS = 180
 BRIDGE_RESUME_TOKEN_TTL_SECONDS = 12 * 60 * 60
@@ -71,6 +92,8 @@ BRIDGE_STARTUP_TIMING_FIELDS = (
     "documentReadyMs",
     "bridgeReadyMs",
 )
+LOCAL_GUEST_DISPLAY_NAME = "访客"
+LOCAL_GUEST_USER_PREFIX = "local-guest:"
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MAX_REQUEST_BYTES = 12_000_000
 IMAGE_MAX_EDGE_PX = 12_000
@@ -380,7 +403,62 @@ class BridgeError(Exception):
         return {"ok": False, "error": error}
 
 
-def verify_editor_jwt(token: str) -> dict[str, Any]:
+EDITOR_ERROR_HTTP_STATUS = {
+    "INVALID_COMMAND": 400,
+    "INVALID_TOOL_CALL": 400,
+    "INVALID_REQUEST_ID": 400,
+    "TOO_MANY_CALLS": 400,
+    "TOOL_NOT_ALLOWED": 400,
+    "METHOD_NOT_ALLOWED": 400,
+    "MESSAGE_NOT_SUPPORTED": 400,
+    "EDITOR_TOKEN_REQUIRED": 401,
+    "INVALID_EDITOR_TOKEN": 401,
+    "EDITOR_TOKEN_EXPIRED": 401,
+    "INVALID_BRIDGE_BINDING_TOKEN": 401,
+    "BRIDGE_BINDING_TOKEN_EXPIRED": 401,
+    "INVALID_BRIDGE_RESUME_TOKEN": 401,
+    "BRIDGE_RESUME_TOKEN_EXPIRED": 401,
+    "INVALID_RELAY_SESSION": 401,
+    "CONTROL_NOT_ALLOWED": 403,
+    "IMAGE_FETCH_BLOCKED": 403,
+    "SESSION_NOT_FOUND": 404,
+    "COMMAND_NOT_FOUND": 404,
+    "IMAGE_ASSET_EXPIRED": 410,
+    "DOCUMENT_MISMATCH": 409,
+    "DOCUMENT_IDENTITY_MISMATCH": 409,
+    "EDITOR_MISMATCH": 409,
+    "SESSION_ID_CONFLICT": 409,
+    "SESSION_NOT_AUTHORITATIVE": 409,
+    "SESSION_SUPERSEDED": 409,
+    "REQUEST_ID_CONFLICT": 409,
+    "REQUEST_IN_FLIGHT": 409,
+    "MULTIPLE_ACTIVE_EDITORS": 409,
+    "ARGUMENTS_TOO_LARGE": 413,
+    "IMAGE_TOO_LARGE": 413,
+    "UNSUPPORTED_IMAGE_FORMAT": 415,
+    "INVALID_ARGUMENTS": 422,
+    "INVALID_TARGET": 422,
+    "INVALID_IMAGE_SOURCE": 422,
+    "EXECUTION_FAILED": 500,
+    "WORD_API_UNSUPPORTED": 501,
+    "IMAGE_API_UNSUPPORTED": 501,
+    "PERSISTENCE_FAILED": 502,
+    "IMAGE_FETCH_FAILED": 502,
+    "HTTP_RELAY_INVALID_RESPONSE": 502,
+    "NOT_READY": 503,
+    "DOCUMENT_NOT_CONFIGURED": 503,
+    "NO_ACTIVE_EDITOR": 503,
+    "TIMEOUT": 504,
+    "CONNECTION_TIMEOUT": 504,
+    "BRIDGE_TIMEOUT": 504,
+}
+
+
+def editor_error_http_status(code: str) -> int:
+    return EDITOR_ERROR_HTTP_STATUS.get(code, 500)
+
+
+def verify_editor_jwt_payload(token: str) -> dict[str, Any]:
     try:
         encoded_header, encoded_payload, encoded_signature = token.split(".")
         unsigned = f"{encoded_header}.{encoded_payload}"
@@ -394,23 +472,91 @@ def verify_editor_jwt(token: str) -> dict[str, Any]:
         if float(payload.get("exp", 0)) < time.time():
             raise BridgeError(401, "EDITOR_TOKEN_EXPIRED", "当前编辑器凭证已过期，请重新绑定当前编辑器")
         document = payload.get("document") if isinstance(payload.get("document"), dict) else {}
-        editor_config = payload.get("editorConfig") if isinstance(payload.get("editorConfig"), dict) else {}
-        user = editor_config.get("user") if isinstance(editor_config.get("user"), dict) else {}
         document_key = str(document.get("key", "")).strip()
         if not document_key:
             raise ValueError("document.key")
-        return {
-            "documentKey": document_key,
-            "fileName": str(document.get("title", "")),
-            "fileType": str(document.get("fileType", "")),
-            "editorType": str(payload.get("documentType", "")),
-            "userId": str(user.get("id", "")),
-            "authKind": "editor",
-        }
+        return payload
     except BridgeError:
         raise
     except Exception as error:
         raise BridgeError(401, "INVALID_EDITOR_TOKEN", "无效的 ONLYOFFICE 当前编辑器凭证") from error
+
+
+def verify_editor_jwt(token: str) -> dict[str, Any]:
+    payload = verify_editor_jwt_payload(token)
+    document = payload.get("document") if isinstance(payload.get("document"), dict) else {}
+    editor_config = payload.get("editorConfig") if isinstance(payload.get("editorConfig"), dict) else {}
+    user = editor_config.get("user") if isinstance(editor_config.get("user"), dict) else {}
+    return {
+        "documentKey": str(document.get("key", "")).strip(),
+        "fileName": str(document.get("title", "")),
+        "fileType": str(document.get("fileType", "")),
+        "editorType": str(payload.get("documentType", "")),
+        "userId": str(user.get("id", "")),
+        "authKind": "editor",
+    }
+
+
+def normalize_local_guest_uuid(value: Any) -> str:
+    candidate = str(value or "").strip().lower()
+    try:
+        parsed = uuid.UUID(candidate)
+    except (AttributeError, ValueError) as error:
+        raise BridgeError(
+            400,
+            "INVALID_ANONYMOUS_ID",
+            "anonymousId 必须是规范的 UUID v4",
+        ) from error
+    if parsed.version != 4 or str(parsed) != candidate:
+        raise BridgeError(
+            400,
+            "INVALID_ANONYMOUS_ID",
+            "anonymousId 必须是规范的 UUID v4",
+        )
+    return candidate
+
+
+def issue_anonymous_editor_config(payload: dict[str, Any]) -> dict[str, Any]:
+    token = str(payload.get("editorToken", "")).strip()
+    if not token:
+        raise BridgeError(
+            400,
+            "EDITOR_TOKEN_REQUIRED",
+            "缺少待重签的 ONLYOFFICE 编辑器凭证",
+        )
+    anonymous_id = normalize_local_guest_uuid(payload.get("anonymousId"))
+    editor_payload = verify_editor_jwt_payload(token)
+    editor_config = editor_payload.get("editorConfig")
+    if not isinstance(editor_config, dict):
+        raise BridgeError(
+            401,
+            "INVALID_EDITOR_TOKEN",
+            "ONLYOFFICE 编辑器凭证缺少 editorConfig",
+        )
+    customization = editor_config.get("customization")
+    if not isinstance(customization, dict):
+        customization = {}
+        editor_config["customization"] = customization
+    anonymous = customization.get("anonymous")
+    if not isinstance(anonymous, dict):
+        anonymous = {}
+        customization["anonymous"] = anonymous
+    anonymous.update({"request": False, "label": LOCAL_GUEST_DISPLAY_NAME})
+    user = {
+        "group": "",
+        "id": f"{LOCAL_GUEST_USER_PREFIX}{anonymous_id}",
+        "image": "",
+        "name": LOCAL_GUEST_DISPLAY_NAME,
+        "roles": [],
+    }
+    editor_config["user"] = user
+    expires_at = int(float(editor_payload["exp"]))
+    return {
+        "ok": True,
+        "user": user,
+        "token": sign_jwt(editor_payload, get_jwt_secret()),
+        "expiresAt": expires_at,
+    }
 
 
 def bridge_identity(claims: dict[str, Any]) -> tuple[str, str, str, str]:
@@ -1550,9 +1696,10 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
         response = command["response"]
         if not response.get("ok"):
             error = response.get("error") if isinstance(response.get("error"), dict) else {}
+            code = str(error.get("code") or "EXECUTION_FAILED")
             raise BridgeError(
-                409,
-                str(error.get("code") or "EXECUTION_FAILED"),
+                editor_error_http_status(code),
+                code,
                 str(error.get("message") or "当前编辑器执行失败"),
                 error.get("details"),
             )
@@ -2147,6 +2294,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if request_path == "/bridge/execute":
                 json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
+                return
+            if request_path == "/editor-config/anonymous":
+                json_response(self, 200, issue_anonymous_editor_config(payload))
                 return
             if request_path == "/chat":
                 editor = str(payload.get("editorType", ""))

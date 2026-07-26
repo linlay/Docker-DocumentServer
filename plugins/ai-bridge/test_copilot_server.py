@@ -14,12 +14,20 @@ import copilot_server
 
 
 class ContractAlignmentTests(unittest.TestCase):
-    def test_example_proxy_does_not_force_user_id(self):
+    def test_example_proxy_defaults_to_stable_guest_without_overriding_explicit_users(self):
         config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
 
-        self.assertNotRegex(config, r"\buid-[0-9]+\b")
+        self.assertIn(
+            """sub_filter '<option value="uid-0">Anonymous</option>' '<option value="uid-0" selected>访客</option>';""",
+            config,
+        )
+        self.assertIn("OnlyOfficeLocalGuest.prepareExample(config)", config)
+        self.assertNotRegex(config, r"editorConfig\.user\s*=")
+        self.assertNotIn("uid-1", config)
+        self.assertNotIn("uid-2", config)
+        self.assertNotIn("uid-3", config)
 
     def test_example_proxy_enables_native_compact_toolbar_before_editor_events(self):
         config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
@@ -47,7 +55,7 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.0-rev28"
+        revision = "0.4.0-rev29"
         paths = [
             "config.json",
             "index.html",
@@ -333,6 +341,123 @@ class ImageImportTests(unittest.TestCase):
         self.assertNotIn("remote response body", raised.exception.message)
 
 
+class LocalGuestTokenTests(unittest.TestCase):
+    def setUp(self):
+        self.jwt_secret = "local-guest-test-secret"
+        self.jwt_patcher = mock.patch.object(
+            copilot_server,
+            "get_jwt_secret",
+            return_value=self.jwt_secret,
+        )
+        self.jwt_patcher.start()
+        self.expires_at = int(time.time()) + 300
+
+    def tearDown(self):
+        self.jwt_patcher.stop()
+
+    def editor_token(self, expires_at=None):
+        return copilot_server.sign_jwt(
+            {
+                "document": {
+                    "key": "document-key-v1",
+                    "title": "demo.docx",
+                    "fileType": "docx",
+                    "permissions": {
+                        "edit": True,
+                        "review": True,
+                        "download": False,
+                    },
+                },
+                "documentType": "word",
+                "editorConfig": {
+                    "callbackUrl": "https://app.test/callback",
+                    "customization": {"compactToolbar": True},
+                    "user": {
+                        "id": "uid-1",
+                        "name": "John Smith",
+                        "roles": ["reviewer"],
+                    },
+                },
+                "iat": int(time.time()),
+                "exp": self.expires_at if expires_at is None else expires_at,
+            },
+            self.jwt_secret,
+        )
+
+    def test_valid_editor_token_is_reissued_for_stable_guest(self):
+        anonymous_id = "123e4567-e89b-42d3-a456-426614174000"
+        response = copilot_server.issue_anonymous_editor_config(
+            {
+                "editorToken": self.editor_token(),
+                "anonymousId": anonymous_id,
+                "name": "Attacker-selected name",
+                "permissions": {"download": True},
+            }
+        )
+        payload = copilot_server.verify_editor_jwt_payload(response["token"])
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["expiresAt"], self.expires_at)
+        self.assertEqual(
+            payload["editorConfig"]["user"],
+            {
+                "group": "",
+                "id": f"local-guest:{anonymous_id}",
+                "image": "",
+                "name": "访客",
+                "roles": [],
+            },
+        )
+        self.assertEqual(payload["editorConfig"]["customization"]["anonymous"], {
+            "request": False,
+            "label": "访客",
+        })
+        self.assertEqual(payload["document"]["key"], "document-key-v1")
+        self.assertEqual(
+            payload["document"]["permissions"],
+            {"edit": True, "review": True, "download": False},
+        )
+        self.assertEqual(payload["editorConfig"]["callbackUrl"], "https://app.test/callback")
+        self.assertEqual(payload["exp"], self.expires_at)
+
+    def test_invalid_guest_uuid_is_rejected(self):
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.issue_anonymous_editor_config(
+                {
+                    "editorToken": self.editor_token(),
+                    "anonymousId": "not-a-uuid",
+                }
+            )
+
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(raised.exception.code, "INVALID_ANONYMOUS_ID")
+
+    def test_expired_editor_token_is_not_extended(self):
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.issue_anonymous_editor_config(
+                {
+                    "editorToken": self.editor_token(int(time.time()) - 1),
+                    "anonymousId": "123e4567-e89b-42d3-a456-426614174000",
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "EDITOR_TOKEN_EXPIRED")
+
+    def test_tampered_editor_token_is_rejected(self):
+        token = self.editor_token()
+        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.issue_anonymous_editor_config(
+                {
+                    "editorToken": tampered,
+                    "anonymousId": "123e4567-e89b-42d3-a456-426614174000",
+                }
+            )
+
+        self.assertEqual(raised.exception.code, "INVALID_EDITOR_TOKEN")
+
+
 class HttpRelayTests(unittest.TestCase):
     def setUp(self):
         self.jwt_secret = "relay-test-secret"
@@ -400,6 +525,103 @@ class HttpRelayTests(unittest.TestCase):
                 "state": self.editor_state(document_key),
             }
         )
+
+    def editor_failure(self, code, message="editor failed", details=None, request_id="failure"):
+        if "http-session:test" not in copilot_server.BRIDGE_SESSIONS:
+            registration = self.register()
+        else:
+            registration = {
+                "relayKey": copilot_server.BRIDGE_SESSIONS["http-session:test"]["relayKey"],
+            }
+        claims = copilot_server.verify_editor_jwt(self.editor_token())
+        holder = {}
+
+        def execute():
+            try:
+                copilot_server.bridge_execute(
+                    {
+                        "method": "executeTool",
+                        "name": "word_inspect",
+                        "arguments": {"maxChars": 1000},
+                        "requestId": request_id,
+                        "timeoutMs": 2000,
+                    },
+                    claims,
+                )
+            except copilot_server.BridgeError as error:
+                holder["error"] = error
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        command = copilot_server.bridge_poll(
+            {
+                "sessionId": "http-session:test",
+                "relayKey": registration["relayKey"],
+                "state": self.editor_state(),
+                "timeoutMs": 1000,
+            }
+        )["command"]
+        copilot_server.bridge_result(
+            {
+                "sessionId": "http-session:test",
+                "relayKey": registration["relayKey"],
+                "commandId": command["commandId"],
+                "state": self.editor_state(),
+                "ok": False,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "details": details,
+                },
+            }
+        )
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        return holder["error"]
+
+    def test_editor_error_status_mapping_is_centralized_and_unknown_is_500(self):
+        cases = {
+            "INVALID_COMMAND": 400,
+            "EDITOR_TOKEN_EXPIRED": 401,
+            "CONTROL_NOT_ALLOWED": 403,
+            "SESSION_NOT_FOUND": 404,
+            "IMAGE_ASSET_EXPIRED": 410,
+            "REQUEST_ID_CONFLICT": 409,
+            "ARGUMENTS_TOO_LARGE": 413,
+            "UNSUPPORTED_IMAGE_FORMAT": 415,
+            "INVALID_ARGUMENTS": 422,
+            "EXECUTION_FAILED": 500,
+            "WORD_API_UNSUPPORTED": 501,
+            "PERSISTENCE_FAILED": 502,
+            "NOT_READY": 503,
+            "BRIDGE_TIMEOUT": 504,
+            "FUTURE_EDITOR_ERROR": 500,
+        }
+        for code, expected_status in cases.items():
+            with self.subTest(code=code):
+                self.assertEqual(
+                    copilot_server.editor_error_http_status(code),
+                    expected_status,
+                )
+
+    def test_editor_failure_uses_status_map_and_preserves_safe_details(self):
+        details = {
+            "phase": "word-command",
+            "tool": "word_format_table_advanced",
+            "toolCallIndex": 0,
+            "completedToolCalls": 0,
+            "partialMutationPossible": False,
+        }
+        error = self.editor_failure(
+            "INVALID_ARGUMENTS",
+            "设置重复表头时必须提供 row",
+            details,
+            request_id="invalid-table-header",
+        )
+        self.assertEqual(error.status, 422)
+        self.assertEqual(error.code, "INVALID_ARGUMENTS")
+        self.assertEqual(error.message, "设置重复表头时必须提供 row")
+        self.assertEqual(error.details, details)
 
     def test_editor_token_binds_registration_to_document_key(self):
         with self.assertRaises(copilot_server.BridgeError) as raised:
@@ -714,6 +936,7 @@ class HttpRelayTests(unittest.TestCase):
         with self.assertRaises(copilot_server.BridgeError) as raised:
             copilot_server.bridge_execute(conflicting, claims)
         self.assertEqual(raised.exception.code, "REQUEST_ID_CONFLICT")
+        self.assertEqual(raised.exception.status, 409)
 
         binding = copilot_server.bridge_sessions(claims)["bindingToken"]
         binding_claims = copilot_server.verify_bridge_binding_token(binding)

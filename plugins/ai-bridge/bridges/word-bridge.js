@@ -7,8 +7,12 @@
     const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
     if (!value || !value.ok) {
       const error = new Error((value && value.error) || "Word Bridge 执行失败");
-      if (value && value.code) error.code = value.code;
-      error.details = { phase: "word-command" };
+      error.code = value && value.code ? value.code : "EXECUTION_FAILED";
+      const details = value && value.details && typeof value.details === "object"
+        ? { ...value.details }
+        : {};
+      if (!details.phase) details.phase = "word-command";
+      error.details = details;
       throw error;
     }
     return value;
@@ -348,9 +352,10 @@
               return date;
             }
 
-            function commandError(code, message) {
+            function commandError(code, message, details) {
               var error = new Error(message);
               error.code = code;
+              error.details = details;
               throw error;
             }
 
@@ -2233,12 +2238,31 @@
                 }
 
                 case "word_insert_page_break": {
-                  var breakEntries = selectParagraphEntries(args, true);
                   var position = String(args.position || "after");
+                  var hasBreakTarget = (
+                    args.all === true
+                    || args.current === true
+                    || (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length > 0)
+                    || (args.search !== undefined && String(args.search) !== "")
+                  );
+                  if (!hasBreakTarget) {
+                    commandError(
+                      "INVALID_ARGUMENTS",
+                      "必须使用 paragraphIndexes、search、all=true 或 current=true 指定段落",
+                      { partialMutationPossible: false },
+                    );
+                  }
+                  if (position !== "before" && position !== "after") {
+                    commandError(
+                      "INVALID_ARGUMENTS",
+                      "word_insert_page_break.position 必须是 before 或 after",
+                      { partialMutationPossible: false },
+                    );
+                  }
+                  var breakEntries = selectParagraphEntries(args, true);
                   for (var breakIndex = 0; breakIndex < breakEntries.length; breakIndex += 1) {
                     if (position === "before") breakEntries[breakIndex].paragraph.SetPageBreakBefore(true);
-                    else if (position === "after") breakEntries[breakIndex].paragraph.AddPageBreak();
-                    else throw new Error("word_insert_page_break.position 必须是 before 或 after");
+                    else breakEntries[breakIndex].paragraph.AddPageBreak();
                   }
                   changed += breakEntries.length;
                   results.push({ name: call.name, position: position, pageBreaks: breakEntries.length });
@@ -2491,11 +2515,29 @@
                     var removeColumn = getCell(table, 1, args.column);
                     table.RemoveColumn(removeColumn.cell);
                   } else if (action === "mergeCells") {
+                    if (
+                      args.rowStart === undefined
+                      || args.rowEnd === undefined
+                      || args.columnStart === undefined
+                      || args.columnEnd === undefined
+                    ) {
+                      commandError(
+                        "INVALID_ARGUMENTS",
+                        "word_edit_table mergeCells 需要 rowStart、rowEnd、columnStart、columnEnd",
+                        { partialMutationPossible: false },
+                      );
+                    }
                     var rowStart = Math.floor(finiteNumber(args.rowStart, "rowStart"));
                     var rowEnd = Math.floor(finiteNumber(args.rowEnd, "rowEnd"));
                     var columnStart = Math.floor(finiteNumber(args.columnStart, "columnStart"));
                     var columnEnd = Math.floor(finiteNumber(args.columnEnd, "columnEnd"));
-                    if (rowStart > rowEnd || columnStart > columnEnd) throw new Error("合并区域起点不能大于终点");
+                    if (rowStart > rowEnd || columnStart > columnEnd) {
+                      commandError(
+                        "INVALID_ARGUMENTS",
+                        "合并区域起点不能大于终点",
+                        { partialMutationPossible: false },
+                      );
+                    }
                     var mergeCells = [];
                     for (var mergeRow = rowStart; mergeRow <= rowEnd; mergeRow += 1) {
                       for (var mergeColumn = columnStart; mergeColumn <= columnEnd; mergeColumn += 1) {
@@ -2523,6 +2565,13 @@
                 case "word_format_table_advanced": {
                   var advancedTableEntry = getTable(args.tableIndex);
                   var advancedTable = advancedTableEntry.table;
+                  if (args.repeatHeader !== undefined && args.row === undefined) {
+                    commandError(
+                      "INVALID_ARGUMENTS",
+                      "设置重复表头时必须提供 row",
+                      { partialMutationPossible: false },
+                    );
+                  }
                   var targetRows = [];
                   var targetCells = [];
                   if (args.row !== undefined) {
@@ -2560,7 +2609,6 @@
                     }
                   }
                   if (args.repeatHeader !== undefined) {
-                    if (args.row === undefined) throw new Error("设置重复表头时必须提供 row");
                     for (var headerRowIndex = 0; headerRowIndex < targetRows.length; headerRowIndex += 1) {
                       if (typeof targetRows[headerRowIndex].SetTableHeader !== "function") commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持跨页重复表头");
                       targetRows[headerRowIndex].SetTableHeader(Boolean(args.repeatHeader));
@@ -3603,10 +3651,44 @@
               results: results,
             });
           } catch (error) {
+            var failedCallIndex = typeof callIndex === "number" && callIndex >= 0
+              ? callIndex
+              : null;
+            var failedCall = failedCallIndex !== null && calls[failedCallIndex]
+              ? calls[failedCallIndex]
+              : null;
+            var priorMutationPossible = false;
+            if (failedCallIndex !== null) {
+              for (var mutationIndex = 0; mutationIndex < failedCallIndex; mutationIndex += 1) {
+                if (calls[mutationIndex] && mutatingNames[calls[mutationIndex].name]) {
+                  priorMutationPossible = true;
+                  break;
+                }
+              }
+            }
+            var currentMutationPossible = Boolean(
+              failedCall
+              && mutatingNames[failedCall.name]
+            );
+            if (
+              error
+              && error.details
+              && typeof error.details.partialMutationPossible === "boolean"
+            ) {
+              currentMutationPossible = error.details.partialMutationPossible;
+            }
+            var details = {
+              phase: "word-command",
+              completedToolCalls: failedCallIndex === null ? 0 : failedCallIndex,
+              partialMutationPossible: priorMutationPossible || currentMutationPossible,
+            };
+            if (failedCall && failedCall.name) details.tool = String(failedCall.name);
+            if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
             return JSON.stringify({
               ok: false,
               code: error && error.code ? error.code : undefined,
               error: error && error.message ? error.message : String(error),
+              details: details,
             });
           }
         },
@@ -3639,26 +3721,96 @@
       ? await detectNativeSearchAndReplace()
       : false;
     let callCommandBatch = [];
+    let callCommandBatchStartIndex = 0;
+
+    function addToolContext(error, call, toolCallIndex, completedToolCalls, priorMutationPossible) {
+      const contextualError = error && typeof error === "object"
+        ? error
+        : new Error(String(error));
+      const existingDetails = contextualError.details && typeof contextualError.details === "object"
+        ? contextualError.details
+        : {};
+      contextualError.details = {
+        phase: existingDetails.phase || "word-command",
+        tool: call && call.name ? String(call.name) : undefined,
+        toolCallIndex,
+        completedToolCalls,
+        partialMutationPossible: Boolean(
+          existingDetails.partialMutationPossible
+          || priorMutationPossible
+        ),
+      };
+      return contextualError;
+    }
 
     async function flushCallCommandBatch() {
       if (!callCommandBatch.length) return;
       const batch = callCommandBatch;
+      const batchStartIndex = callCommandBatchStartIndex;
       callCommandBatch = [];
-      mergeExecutionResult(aggregate, await executeCallCommand(batch));
+      try {
+        mergeExecutionResult(aggregate, await executeCallCommand(batch));
+      } catch (error) {
+        const details = error && error.details && typeof error.details === "object"
+          ? error.details
+          : {};
+        const relativeIndex = Number.isInteger(details.toolCallIndex)
+          ? details.toolCallIndex
+          : 0;
+        const completedInBatch = Number.isInteger(details.completedToolCalls)
+          ? details.completedToolCalls
+          : relativeIndex;
+        const absoluteIndex = batchStartIndex + relativeIndex;
+        throw addToolContext(
+          error,
+          calls[absoluteIndex],
+          absoluteIndex,
+          batchStartIndex + completedInBatch,
+          aggregate.changed > 0,
+        );
+      }
     }
 
-    for (const call of calls) {
-      if (call && call.name === "word_replace_text" && !useNativeSearchAndReplace) {
-        await flushCallCommandBatch();
-        mergeExecutionResult(aggregate, await executeSearchAndReplace(call));
-      } else if (call && call.name === "word_set_protection") {
-        await flushCallCommandBatch();
-        mergeExecutionResult(aggregate, await executeEditingRestrictions(call));
-      } else if (call && (call.name === "word_inspect_macros" || call.name === "word_set_macros")) {
-        await flushCallCommandBatch();
-        mergeExecutionResult(aggregate, await executeMacroTool(call));
-      } else {
-        callCommandBatch.push(call);
+    for (let toolCallIndex = 0; toolCallIndex < calls.length; toolCallIndex += 1) {
+      const call = calls[toolCallIndex];
+      try {
+        if (call && call.name === "word_replace_text" && !useNativeSearchAndReplace) {
+          await flushCallCommandBatch();
+          mergeExecutionResult(aggregate, await executeSearchAndReplace(call));
+        } else if (call && call.name === "word_set_protection") {
+          await flushCallCommandBatch();
+          mergeExecutionResult(aggregate, await executeEditingRestrictions(call));
+        } else if (call && (call.name === "word_inspect_macros" || call.name === "word_set_macros")) {
+          await flushCallCommandBatch();
+          mergeExecutionResult(aggregate, await executeMacroTool(call));
+        } else {
+          if (!callCommandBatch.length) callCommandBatchStartIndex = toolCallIndex;
+          callCommandBatch.push(call);
+        }
+      } catch (error) {
+        if (
+          error
+          && error.details
+          && Number.isInteger(error.details.toolCallIndex)
+          && error.details.toolCallIndex < toolCallIndex
+        ) {
+          throw error;
+        }
+        const currentMutationPossible = Boolean(
+          call
+          && (
+            call.name === "word_replace_text"
+            || call.name === "word_set_protection"
+            || call.name === "word_set_macros"
+          )
+        );
+        throw addToolContext(
+          error,
+          call,
+          toolCallIndex,
+          toolCallIndex,
+          aggregate.changed > 0 || currentMutationPossible,
+        );
       }
     }
     await flushCallCommandBatch();

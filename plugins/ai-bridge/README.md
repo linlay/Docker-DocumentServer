@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev28",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev29",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
     },
@@ -71,16 +71,23 @@ const docEditor = new DocsAPI.DocEditor("editor", editorConfig);
 The bundled example injects this configuration through
 `nginx-ds-example.conf`.
 
-The bundled Nginx injection does not select or rewrite an editor user. The
-example application's `userid` input remains authoritative, and ai-bridge reads
-the resulting signed `editorConfig.user.id`. The injection removes the complete
-left-menu layout container, including its reserved width, and hides the unused
-Collaboration, Plugins, and default AI toolbar tabs in the same-origin demo
-without changing document permissions. It also enables ONLYOFFICE's native
-compact toolbar: the ribbon starts folded, a normal tab click expands it, and
-clicking the active tab folds it again and clears the selected tab. Existing
-ONLYOFFICE toolbar preferences still take precedence. External integrations
-that want the same behavior must set
+The bundled Nginx example selects `uid-0` as the default local visitor. Before
+constructing the editor, `local-guest.js` stores one UUID v4 in
+`onlyoffice.localGuestId.v1`, submits the already-signed editor token to
+`POST /copilot-api/editor-config/anonymous`, and applies the returned
+server-signed user `{ id: "local-guest:<uuid>", name: "访客" }`. The endpoint
+only accepts an existing valid editor JWT and a UUID; it does not accept a
+document config, permissions, or caller-selected name. Explicit `userid`
+choices such as `uid-1`, `uid-2`, and `uid-3` keep the example application's
+original signed identity.
+
+The injection also removes the complete left-menu layout container, including
+its reserved width, and hides the unused Collaboration, Plugins, and default AI
+toolbar tabs in the same-origin demo without changing document permissions. It
+enables ONLYOFFICE's native compact toolbar: the ribbon starts folded, a normal
+tab click expands it, and clicking the active tab folds it again and clears the
+selected tab. Existing ONLYOFFICE toolbar preferences still take precedence.
+External integrations that want the same behavior must set
 `editorConfig.customization.compactToolbar` to `true` before constructing
 `DocsAPI.DocEditor`.
 
@@ -106,7 +113,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -124,6 +131,34 @@ authentication design.
 The bundled Nginx example keeps the pre-existing demo storage identity
 `185.199.108.133` stable after the loopback bind, so previously uploaded local
 example files continue resolving to the same storage directory.
+
+## Stable local guest identity
+
+An external editor host can reuse the browser helper and the same-origin
+re-signing contract. Obtain a normal signed config first, proxy the anonymous
+config endpoint under the editor host's own origin, and prepare the config
+before constructing `DocsAPI.DocEditor`:
+
+```html
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev29"></script>
+<script>
+  const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
+    response => response.json(),
+  );
+
+  await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
+    endpoint: "/api/onlyoffice/editor-config/anonymous",
+  });
+
+  new DocsAPI.DocEditor("editor", editorConfig);
+</script>
+```
+
+The proxy target must implement the bundled
+`POST /copilot-api/editor-config/anonymous` request
+`{ editorToken, anonymousId }` and return `{ ok, user, token, expiresAt }`.
+Do not enable wildcard CORS and never expose `JWT_SECRET` to the page. Clearing
+the browser's site storage intentionally creates a new pseudonymous identity.
 
 ## External Copilot API
 
@@ -340,6 +375,8 @@ the saved file does not depend on the temporary URL.
 
 The localhost example exposes these additional endpoints:
 
+- `POST /copilot-api/editor-config/anonymous`: verifies an existing short-lived
+  editor JWT and reissues it with the browser-stable local guest identity.
 - `POST /copilot-api/bridge/register`: the open editor page registers with its
   signed editor JWT and receives an opaque page relay key.
 - `POST /copilot-api/bridge/poll` and `POST /copilot-api/bridge/result`: the
@@ -375,7 +412,8 @@ docker compose -f docker-compose.copilot.yml up -d
 ```
 
 Open `http://localhost:8088/example/`. The plugin is loaded automatically but
-does not render a user interface.
+does not render a user interface. The first user selector defaults to `访客`;
+the browser is not prompted for a nickname.
 
 ## Files
 
@@ -383,6 +421,7 @@ does not render a user interface.
 - `index.html`: script-only plugin entry point.
 - `plugin.js`: handshake, validation, command queue, save controls.
 - `host-bridge.js`: API exposed to the external Copilot page.
+- `local-guest.js`: stable browser-local guest identity and re-signing helper.
 - `client-sdk.js`: optional cross-origin iframe/popup client.
 - `public-api.d.ts`: TypeScript API declarations.
 - `public-api.json`: machine-readable API and tool contract.

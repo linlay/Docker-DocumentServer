@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev28"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev29"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       },
@@ -40,8 +40,35 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
 ```
+
+#### 固定显示“访客”，不询问昵称
+
+本地版可以让浏览器保存一个不含真实用户信息的 UUID，并在创建编辑器之前把已有
+签名配置重签成稳定访客。`local-guest.js` 默认使用
+`localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
+
+```html
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev29"></script>
+<script>
+  // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
+  await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
+    // 外部宿主页应把此接口反向代理到自己的同源路径，不开放通配 CORS。
+    endpoint: "/api/onlyoffice/editor-config/anonymous",
+  });
+
+  new DocsAPI.DocEditor("editor", editorConfig);
+</script>
+```
+
+接口契约为
+`POST { editorToken, anonymousId } -> { ok, user, token, expiresAt }`。仓库内置
+实现位于 `/copilot-api/editor-config/anonymous`：它先验证原 editor JWT，再只把
+用户改成 `{ id: "local-guest:<uuid>", name: "访客" }`，设置
+`customization.anonymous.request = false`，保留原文档、权限、回调地址和到期时间
+后重新签名。接口不接受客户端提供的显示名、完整用户 ID、文档或权限；前端也不得
+持有 `JWT_SECRET`。清除浏览器站点数据后会生成新的匿名身份。
 
 `customization.compactToolbar: true` 启用 ONLYOFFICE 原生紧凑功能区：首次进入时
 菜单默认收起且没有选中的普通页签；点击 Home、Insert、Layout 等页签会展开完整
@@ -85,13 +112,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev28"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev28"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev29"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -154,9 +181,11 @@ tenantId:documentId:storageVersion
 `document.key`；稳定绑定不能绕过页面级文档校验。生产系统应把这里的文件名替换为
 真实租户 ID 与文档 ID。
 
-`userId` 必须来自当前编辑器签名配置中的 `editorConfig.user.id`。本机示例应用的
-`userid` URL 参数或页面选择是其来源；Nginx 注入和 ai-bridge 均不得固定、覆盖或
-猜测具体用户 ID。
+`userId` 必须来自当前编辑器签名配置中的 `editorConfig.user.id`。本机示例未指定
+`userid` 或选择 `uid-0` 时，会通过受限重签接口使用浏览器稳定的
+`local-guest:<uuid>`；显式选择 `uid-1`、`uid-2`、`uid-3` 时仍使用 example 后端
+原本签发的测试身份。外部业务系统应使用自己的认证用户，或采用上面的稳定访客
+流程，不能在 JWT 签发之后仅修改未签名的 `editorConfig.user`。
 
 ## Copilot 怎样发命令
 
@@ -599,8 +628,18 @@ try {
 - `IMAGE_TOO_LARGE` / `UNSUPPORTED_IMAGE_FORMAT`：图片字节、像素或格式不符合限制。
 - `IMAGE_ASSET_EXPIRED`：签名下载地址已过期。
 - `IMAGE_API_UNSUPPORTED`：当前 ONLYOFFICE 运行时缺少必需图片 API。
+- `WORD_API_UNSUPPORTED`：当前 ONLYOFFICE 运行时缺少对应的 Word API。
 - `PERSISTENCE_FAILED`：Office API 已执行，但示例持久化服务保存失败，应提示用户并核对 callback/force-save。
 - `TIMEOUT` / `CONNECTION_TIMEOUT`：调用或 Relay 握手超时。
+
+HTTP Relay 不再把所有编辑器失败统一映射为 `409`。请求或协议错误使用
+`400`，认证错误使用 `401`，安全策略拒绝使用 `403`，资源不存在或过期使用
+`404/410`，只有文档、编辑器、会话或 `requestId` 的状态冲突使用 `409`。
+参数语义或目标错误使用 `422`，未知编辑器异常使用 `500`，ONLYOFFICE
+能力缺失使用 `501`，下载、Relay 或持久化等下游失败使用 `502`，编辑器未就绪
+使用 `503`，超时使用 `504`。图片或参数体积过大使用 `413`，图片格式不支持
+使用 `415`。无论 HTTP 状态如何，调用方都应优先读取响应
+`error.code`、`error.message` 和经过过滤的 `error.details`。
 
 插件按 `requestId` 缓存最近 100 个响应。对可能修改文档的超时请求，不要换一个新 ID 盲目重试；应复用原 ID，使插件返回已缓存结果而不是重复编辑。
 
@@ -641,5 +680,5 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 ## 版本兼容
 
 当前插件版本为 `0.4.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.4.0-rev28`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+`?v=0.4.0-rev29`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

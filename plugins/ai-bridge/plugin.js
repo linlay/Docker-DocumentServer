@@ -225,12 +225,15 @@
     return error;
   }
 
-  function withErrorPhase(error, phase) {
+  function withErrorPhase(error, phase, extraDetails) {
     const phasedError = error instanceof Error ? error : new Error(String(error));
     const details = phasedError.details && typeof phasedError.details === "object"
       ? { ...phasedError.details }
       : {};
     if (!details.phase) details.phase = phase;
+    if (extraDetails && typeof extraDetails === "object") {
+      Object.assign(details, extraDetails);
+    }
     phasedError.details = details;
     return phasedError;
   }
@@ -480,7 +483,9 @@
         },
       );
     }).catch(function (error) {
-      throw withErrorPhase(error, "editor-save");
+      throw withErrorPhase(error, "editor-save", {
+        partialMutationPossible: true,
+      });
     });
   }
 
@@ -508,12 +513,18 @@
     });
   }
 
-  function forceSave(options) {
-    return apiRequest("forcesave", {
-      key: state.config.documentKey,
-      fileName: state.config.fileName || null,
-      allowNoChanges: Boolean(options && options.allowNoChanges),
-    });
+  async function forceSave(options) {
+    try {
+      return await apiRequest("forcesave", {
+        key: state.config.documentKey,
+        fileName: state.config.fileName || null,
+        allowNoChanges: Boolean(options && options.allowNoChanges),
+      });
+    } catch (error) {
+      throw withErrorPhase(error, "persistence", {
+        partialMutationPossible: true,
+      });
+    }
   }
 
   async function executeTools(toolCalls) {
