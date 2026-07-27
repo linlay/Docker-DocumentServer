@@ -1548,12 +1548,8 @@ def bridge_select_session_locked(
                 if candidate_id == requested:
                     return candidate_id, session
             if candidates:
-                raise BridgeError(
-                    409,
-                    "SESSION_NOT_AUTHORITATIVE",
-                    "指定会话不是当前文档的权威编辑器页面",
-                    {"authoritativeSessionId": candidates[0][0]},
-                )
+                candidates.sort(key=lambda item: int(item[1].get("generation") or 0), reverse=True)
+                return candidates[0]
         elif candidates:
             candidates.sort(key=lambda item: int(item[1].get("generation") or 0), reverse=True)
             return candidates[0]
@@ -1563,7 +1559,7 @@ def bridge_select_session_locked(
             break
         BRIDGE_CONDITION.wait(timeout=remaining)
 
-    if requested:
+    if requested and claims.get("authKind") != "binding":
         raise BridgeError(404, "SESSION_NOT_FOUND", "指定的当前文档编辑器会话不存在或已离线")
     raise BridgeError(503, "NO_ACTIVE_EDITOR", "当前文档没有已就绪的 ai-bridge 编辑器页面")
 
@@ -1722,11 +1718,17 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
                 str(error.get("message") or "当前编辑器执行失败"),
                 error.get("details"),
             )
+        result_session_id = str(command.get("sessionId") or session_id)
+        result_session = (
+            BRIDGE_SESSIONS.get(result_session_id)
+            or BRIDGE_SUPERSEDED.get(result_session_id)
+            or session
+        )
         return {
             "ok": True,
             "cached": cached,
             "requestId": command_data["requestId"],
-            "session": bridge_public_session(session_id, session),
+            "session": bridge_public_session(result_session_id, result_session),
             "result": response.get("result"),
         }
 

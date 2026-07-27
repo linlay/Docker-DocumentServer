@@ -5,6 +5,7 @@
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+  const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
   const EXTERNAL_CLIENT_SOURCE = "ai-bridge-client";
   const EXTERNAL_RELAY_SOURCE = "ai-bridge-relay";
   const currentScript = document.currentScript;
@@ -16,6 +17,7 @@
   if (window.aiBridge && window.aiBridge.version === VERSION) return;
   document.documentElement.dataset.aiBridgeState = "loading";
 
+  const pluginHandshake = configuredPluginHandshake();
   const pending = new Map();
   const readyWaiters = new Set();
   const listeners = new Map();
@@ -264,6 +266,41 @@
     return typeof config === "object" && config ? config : {};
   }
 
+  function configuredPluginHandshake() {
+    const editorConfig = editorConfiguration();
+    const plugins = editorConfig.editorConfig
+      && editorConfig.editorConfig.plugins
+      && typeof editorConfig.editorConfig.plugins === "object"
+      ? editorConfig.editorConfig.plugins
+      : {};
+    const options = plugins.options && typeof plugins.options === "object"
+      ? plugins.options
+      : {};
+    const raw = options[PLUGIN_GUID];
+    if (!raw || typeof raw !== "object") {
+      return { strict: false, valid: true, hostOrigin: null, channelId: null };
+    }
+
+    const hostOrigin = typeof raw.hostOrigin === "string" ? raw.hostOrigin : "";
+    const channelId = typeof raw.channelId === "string" ? raw.channelId : "";
+    let normalizedOrigin = "";
+    try {
+      normalizedOrigin = new URL(hostOrigin).origin;
+    } catch (error) {
+      // Strict mode remains enabled, but no message is accepted.
+    }
+    return {
+      strict: true,
+      valid: (
+        normalizedOrigin === hostOrigin
+        && hostOrigin === window.location.origin
+        && CHANNEL_ID_PATTERN.test(channelId)
+      ),
+      hostOrigin,
+      channelId,
+    };
+  }
+
   function editorToken() {
     const editorConfig = editorConfiguration();
     return typeof editorConfig.token === "string" ? editorConfig.token : "";
@@ -340,17 +377,19 @@
   }
 
   function basePayload(message) {
-    return {
+    const payload = {
       source: "ai-bridge-host",
       protocolVersion: PROTOCOL_VERSION,
       pluginGuid: PLUGIN_GUID,
       sessionId,
       ...message,
     };
+    if (pluginHandshake.strict) payload.channelId = pluginHandshake.channelId;
+    return payload;
   }
 
   function send(message) {
-    if (!pluginWindow) return false;
+    if (!pluginWindow || (pluginHandshake.strict && !pluginHandshake.valid)) return false;
     pluginWindow.postMessage(basePayload(message), pluginOrigin);
     return true;
   }
@@ -393,6 +432,11 @@
     const message = event.data;
     if (!message || message.source !== "ai-bridge-plugin") return;
     if (message.pluginGuid !== PLUGIN_GUID || message.protocolVersion !== PROTOCOL_VERSION) return;
+    if (pluginHandshake.strict) {
+      if (!pluginHandshake.valid || message.channelId !== pluginHandshake.channelId) return;
+    } else if (message.channelId !== undefined) {
+      return;
+    }
 
     if (message.type === "hello") {
       if (pluginWindow && pluginWindow !== event.source) return;

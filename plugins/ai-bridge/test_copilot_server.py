@@ -109,7 +109,7 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.0-rev29"
+        revision = "0.4.0-rev30"
         paths = [
             "config.json",
             "index.html",
@@ -122,7 +122,7 @@ class ContractAlignmentTests(unittest.TestCase):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
                     contents = stream.read()
                 self.assertIn(revision, contents)
-                self.assertNotIn("0.4.0-rev26", contents)
+                self.assertNotIn("0.4.0-rev29", contents)
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
@@ -1095,6 +1095,91 @@ class HttpRelayTests(unittest.TestCase):
         )
         self.assertTrue(second["session"]["authoritative"])
 
+    def test_stale_binding_session_hint_routes_execute_to_latest_page(self):
+        self.register("http-session:first", "document-key-v1")
+        editor_claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
+        binding = copilot_server.bridge_sessions(editor_claims)["bindingToken"]
+        binding_claims = copilot_server.verify_bridge_binding_token(binding)
+        second = self.register("http-session:second", "document-key-v2")
+        holder = {}
+        request = {
+            "sessionId": "http-session:first",
+            "method": "executeTool",
+            "name": "word_inspect",
+            "arguments": {"maxChars": 500},
+            "requestId": "stale-session-hint-1",
+            "timeoutMs": 2000,
+        }
+
+        worker = threading.Thread(
+            target=lambda: holder.update(
+                result=copilot_server.bridge_execute(request, binding_claims)
+            )
+        )
+        worker.start()
+        command = copilot_server.bridge_poll(
+            {
+                "sessionId": "http-session:second",
+                "relayKey": second["relayKey"],
+                "state": self.editor_state("document-key-v2"),
+                "timeoutMs": 1000,
+            }
+        )["command"]
+        copilot_server.bridge_result(
+            {
+                "sessionId": "http-session:second",
+                "relayKey": second["relayKey"],
+                "commandId": command["commandId"],
+                "state": self.editor_state("document-key-v2"),
+                "ok": True,
+                "result": {"text": "latest page"},
+            }
+        )
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(holder["result"]["session"]["sessionId"], "http-session:second")
+        self.assertEqual(holder["result"]["result"]["text"], "latest page")
+
+    def test_latest_page_close_does_not_restore_superseded_page(self):
+        first = self.register("http-session:first", "document-key-v1")
+        editor_claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
+        binding = copilot_server.bridge_sessions(editor_claims)["bindingToken"]
+        binding_claims = copilot_server.verify_bridge_binding_token(binding)
+        second = self.register("http-session:second", "document-key-v2")
+
+        copilot_server.bridge_unregister(
+            {
+                "sessionId": "http-session:second",
+                "relayKey": second["relayKey"],
+                "state": self.editor_state("document-key-v2"),
+            }
+        )
+
+        with (
+            mock.patch.object(copilot_server, "BRIDGE_DISCOVERY_WAIT_SECONDS", 0),
+            copilot_server.BRIDGE_CONDITION,
+            self.assertRaises(copilot_server.BridgeError) as raised,
+        ):
+            copilot_server.bridge_select_session_locked("http-session:first", binding_claims)
+        self.assertEqual(raised.exception.code, "NO_ACTIVE_EDITOR")
+
+        with self.assertRaises(copilot_server.BridgeError) as old_register:
+            self.register("http-session:first", "document-key-v1")
+        self.assertEqual(old_register.exception.code, "SESSION_SUPERSEDED")
+
+        refreshed = self.register("http-session:refreshed", "document-key-v3")
+        with copilot_server.BRIDGE_CONDITION:
+            selected_id, _ = copilot_server.bridge_select_session_locked(
+                "http-session:first",
+                binding_claims,
+            )
+        self.assertEqual(selected_id, "http-session:refreshed")
+        self.assertTrue(refreshed["session"]["authoritative"])
+        self.assertIn("http-session:first", copilot_server.BRIDGE_SUPERSEDED)
+        self.assertNotIn("http-session:first", copilot_server.BRIDGE_SESSIONS)
+        self.assertEqual(first["session"]["sessionId"], "http-session:first")
+
     def test_binding_token_cannot_select_another_stable_document(self):
         self.register()
         foreign_claims = {
@@ -1113,6 +1198,67 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.bridge_select_session_locked("", foreign_claims)
 
         self.assertEqual(raised.exception.code, "NO_ACTIVE_EDITOR")
+
+    def test_undelivered_command_moves_once_to_new_authoritative_page(self):
+        first = self.register("http-session:first", "document-key-v1")
+        claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
+        holder = {}
+        request = {
+            "method": "executeTool",
+            "name": "word_inspect",
+            "arguments": {"maxChars": 500},
+            "requestId": "turn-handoff-undelivered-1",
+            "timeoutMs": 2000,
+        }
+
+        worker = threading.Thread(
+            target=lambda: holder.update(result=copilot_server.bridge_execute(request, claims))
+        )
+        worker.start()
+        deadline = time.time() + 1
+        while not copilot_server.BRIDGE_COMMANDS and time.time() < deadline:
+            time.sleep(0.001)
+
+        second = self.register("http-session:second", "document-key-v2")
+        command = copilot_server.bridge_poll(
+            {
+                "sessionId": "http-session:second",
+                "relayKey": second["relayKey"],
+                "state": self.editor_state("document-key-v2"),
+                "timeoutMs": 1000,
+            }
+        )["command"]
+        self.assertEqual(command["requestId"], "turn-handoff-undelivered-1")
+        copilot_server.bridge_result(
+            {
+                "sessionId": "http-session:second",
+                "relayKey": second["relayKey"],
+                "commandId": command["commandId"],
+                "state": self.editor_state("document-key-v2"),
+                "ok": True,
+                "result": {"text": "moved once"},
+            }
+        )
+        worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(holder["result"]["result"]["text"], "moved once")
+        self.assertEqual(holder["result"]["session"]["sessionId"], "http-session:second")
+        self.assertEqual(len(copilot_server.BRIDGE_COMMANDS), 1)
+        self.assertEqual(
+            next(iter(copilot_server.BRIDGE_COMMANDS.values()))["sessionId"],
+            "http-session:second",
+        )
+        with self.assertRaises(copilot_server.BridgeError) as old_poll:
+            copilot_server.bridge_poll(
+                {
+                    "sessionId": "http-session:first",
+                    "relayKey": first["relayKey"],
+                    "state": self.editor_state("document-key-v1"),
+                    "timeoutMs": 1,
+                }
+            )
+        self.assertEqual(old_poll.exception.code, "SESSION_SUPERSEDED")
 
     def test_delivered_command_finishes_after_new_page_takes_authority(self):
         first = self.register("http-session:first", "document-key-v1")

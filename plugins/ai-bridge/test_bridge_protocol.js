@@ -9,6 +9,7 @@ const hostSource = fs.readFileSync(path.join(__dirname, "host-bridge.js"), "utf8
 const clientSource = fs.readFileSync(path.join(__dirname, "client-sdk.js"), "utf8");
 const wordBridgeSource = fs.readFileSync(path.join(__dirname, "bridges/word-bridge.js"), "utf8");
 const publicContract = JSON.parse(fs.readFileSync(path.join(__dirname, "public-api.json"), "utf8"));
+const TEST_PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
 const docxCapabilityMatrix = fs.readFileSync(
   path.join(__dirname, "DOCX-CAPABILITIES.zh-CN.md"),
   "utf8",
@@ -193,6 +194,17 @@ function createEditorUiHarness(options = {}) {
 
 function createHarness(options = {}) {
   const editorType = options.editorType || "word";
+  const channelId = options.channelId || "11111111-2222-4333-8444-555555555555";
+  const defaultPluginOptions = {
+    hostOrigin: "https://app.test",
+    channelId,
+  };
+  const hostPluginOptions = Object.prototype.hasOwnProperty.call(options, "hostPluginOptions")
+    ? options.hostPluginOptions
+    : (options.strictHandshake || options.nestedHost ? defaultPluginOptions : null);
+  const ascPluginOptions = Object.prototype.hasOwnProperty.call(options, "ascPluginOptions")
+    ? options.ascPluginOptions
+    : (hostPluginOptions || {});
   const editorConfig = {
     documentType: editorType,
     document: { key: "doc-key-v1", title: `demo.${editorType === "word" ? "docx" : editorType === "slide" ? "pptx" : "xlsx"}`, fileType: editorType === "word" ? "docx" : editorType === "slide" ? "pptx" : "xlsx" },
@@ -205,6 +217,13 @@ function createHarness(options = {}) {
     events: options.editorEvents || {},
     token: options.editorToken || "editor-token",
   };
+  if (hostPluginOptions) {
+    editorConfig.editorConfig.plugins = {
+      options: {
+        [TEST_PLUGIN_GUID]: hostPluginOptions,
+      },
+    };
+  }
   const executedToolCalls = [];
   const initializationCommands = [];
   const servicePaths = [];
@@ -256,12 +275,14 @@ function createHarness(options = {}) {
     location: {
       origin: "https://docs.test",
       href: "https://docs.test/sdkjs-plugins/ai-bridge/index.html",
-      ancestorOrigins: ["https://app.test"],
+      ancestorOrigins: options.nestedHost
+        ? ["https://docs.test", "https://app.test", "https://outer.test"]
+        : ["https://app.test"],
     },
     setTimeout,
     clearTimeout,
-    setInterval,
-    clearInterval,
+    setInterval: options.pluginSetInterval || setInterval,
+    clearInterval: options.pluginClearInterval || clearInterval,
     fetch: async path => {
       servicePaths.push(path);
       const configured = typeof options.serviceResponse === "function"
@@ -275,9 +296,35 @@ function createHarness(options = {}) {
     },
   });
 
+  const ancestorMessages = [];
+  const hostMessages = [];
   const topProxy = {
+    parent: null,
     postMessage(message, targetOrigin) {
-      assert.equal(targetOrigin, "https://app.test");
+      ancestorMessages.push({ ancestor: "host", message, targetOrigin });
+      if (targetOrigin !== "https://app.test" || options.dropPluginHello) return;
+      queueMicrotask(() => hostWindow.dispatch("message", {
+        origin: "https://docs.test",
+        source: pluginHandle,
+        data: message,
+      }));
+    },
+  };
+  topProxy.parent = topProxy;
+
+  const outerProxy = {
+    parent: null,
+    postMessage(message, targetOrigin) {
+      ancestorMessages.push({ ancestor: "outer", message, targetOrigin });
+    },
+  };
+  outerProxy.parent = outerProxy;
+
+  const hostProxy = {
+    parent: outerProxy,
+    postMessage(message, targetOrigin) {
+      ancestorMessages.push({ ancestor: "host", message, targetOrigin });
+      if (targetOrigin !== "https://app.test" || options.dropPluginHello) return;
       queueMicrotask(() => hostWindow.dispatch("message", {
         origin: "https://docs.test",
         source: pluginHandle,
@@ -286,18 +333,28 @@ function createHarness(options = {}) {
     },
   };
 
+  const editorProxy = {
+    parent: hostProxy,
+    postMessage(message, targetOrigin) {
+      ancestorMessages.push({ ancestor: "editor", message, targetOrigin });
+    },
+  };
+  const hostSourceProxy = options.nestedHost ? hostProxy : topProxy;
+
   const pluginHandle = {
     postMessage(message, targetOrigin) {
       assert.equal(targetOrigin, "https://docs.test");
+      hostMessages.push({ message, targetOrigin });
       queueMicrotask(() => pluginWindow.dispatch("message", {
         origin: "https://app.test",
-        source: topProxy,
+        source: hostSourceProxy,
         data: message,
       }));
     },
   };
 
-  pluginWindow.top = topProxy;
+  pluginWindow.parent = options.nestedHost ? editorProxy : topProxy;
+  pluginWindow.top = options.nestedHost ? outerProxy : topProxy;
   pluginWindow.AICopilotBridges = {
     [editorType]: {
       execute: async toolCalls => {
@@ -322,7 +379,7 @@ function createHarness(options = {}) {
   const Asc = {
     scope: {},
     plugin: {
-      info: { editorType },
+      info: { editorType, options: ascPluginOptions },
       callCommand(command, close, calc, callback) {
         initializationCommands.push(command.toString());
         callback(JSON.stringify(
@@ -378,8 +435,15 @@ function createHarness(options = {}) {
     documentElement,
     sessionValues,
     localValues,
+    pluginWindow,
+    Asc,
     pluginHandle,
     topProxy,
+    hostProxy,
+    outerProxy,
+    editorProxy,
+    ancestorMessages,
+    hostMessages,
     get reloadCount() { return reloadCount; },
   };
 }
@@ -1034,6 +1098,128 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const result = await hostWindow.aiBridge.word.inspect({}, { timeoutMs: 1000 });
   assert.equal(result.changed, 0);
   assert.equal(result.results[0].name, "word_inspect");
+});
+
+test("strict plugin handshake reaches a document host nested below a cross-origin outer frame", async () => {
+  const harness = createHarness({ nestedHost: true });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  const hellos = harness.ancestorMessages.filter(
+    entry => entry.message && entry.message.type === "hello",
+  );
+  assert.deepEqual(hellos.map(entry => entry.ancestor), ["editor", "host", "outer"]);
+  assert.ok(hellos.every(entry => entry.targetOrigin === "https://app.test"));
+  assert.ok(hellos.every(
+    entry => entry.message.channelId === "11111111-2222-4333-8444-555555555555",
+  ));
+
+  const result = await harness.hostWindow.aiBridge.word.inspect({}, { timeoutMs: 1000 });
+  assert.equal(result.results[0].name, "word_inspect");
+  assert.equal(harness.documentElement.dataset.aiBridgeState, "ready");
+});
+
+test("strict plugin locks the first valid host window for all later commands", async () => {
+  const harness = createHarness({ nestedHost: true });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+  const configure = harness.hostMessages.find(
+    entry => entry.message && entry.message.type === "configure",
+  );
+  assert.ok(configure);
+
+  harness.pluginWindow.dispatch("message", {
+    origin: "https://app.test",
+    source: harness.editorProxy,
+    data: {
+      source: "ai-bridge-host",
+      protocolVersion: 1,
+      pluginGuid: TEST_PLUGIN_GUID,
+      channelId: "11111111-2222-4333-8444-555555555555",
+      sessionId: configure.message.sessionId,
+      type: "execute",
+      requestId: "forged-after-lock",
+      method: "executeTool",
+      params: { name: "word_inspect", arguments: {} },
+    },
+  });
+  await new Promise(resolve => setTimeout(resolve, 5));
+
+  assert.equal(harness.executedToolCalls.length, 0);
+  assert.equal(
+    harness.hostMessages.some(
+      entry => entry.message && entry.message.requestId === "forged-after-lock",
+    ),
+    false,
+  );
+});
+
+test("strict host rejects a legacy channel-less plugin handshake", async () => {
+  const harness = createHarness({
+    strictHandshake: true,
+    ascPluginOptions: {},
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+  });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.ready({ timeoutMs: 20 }),
+    error => error && error.code === "NOT_READY",
+  );
+  assert.notEqual(harness.documentElement.dataset.aiBridgeState, "ready");
+});
+
+test("strict plugin ignores wrong origin, wrong channel, and non-ancestor configuration", async () => {
+  const harness = createHarness({
+    nestedHost: true,
+    dropPluginHello: true,
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+  });
+  const configure = overrides => ({
+    source: "ai-bridge-host",
+    protocolVersion: 1,
+    pluginGuid: TEST_PLUGIN_GUID,
+    type: "configure",
+    sessionId: "session:forged",
+    channelId: "11111111-2222-4333-8444-555555555555",
+    config: { editorType: "word", documentKey: "doc-key-v1" },
+    ...overrides,
+  });
+  const evilMessages = [];
+  const evilWindow = {
+    postMessage(message, targetOrigin) {
+      evilMessages.push({ message, targetOrigin });
+    },
+  };
+  const messagesBefore = harness.ancestorMessages.length;
+
+  harness.pluginWindow.dispatch("message", {
+    origin: "https://evil.test",
+    source: harness.hostProxy,
+    data: configure({}),
+  });
+  harness.pluginWindow.dispatch("message", {
+    origin: "https://app.test",
+    source: harness.hostProxy,
+    data: configure({ channelId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }),
+  });
+  harness.pluginWindow.dispatch("message", {
+    origin: "https://app.test",
+    source: harness.hostProxy,
+    data: configure({ channelId: undefined }),
+  });
+  harness.pluginWindow.dispatch("message", {
+    origin: "https://app.test",
+    source: evilWindow,
+    data: configure({}),
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(harness.ancestorMessages.length, messagesBefore);
+  assert.equal(evilMessages.length, 0);
+  await assert.rejects(
+    harness.hostWindow.aiBridge.ready({ timeoutMs: 20 }),
+    error => error && error.code === "NOT_READY",
+  );
 });
 
 test("simplified Chinese Word editor initializes the document proofing language", async () => {

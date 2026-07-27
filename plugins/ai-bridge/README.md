@@ -58,9 +58,15 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev29",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev30",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
+      options: {
+        "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}": {
+          hostOrigin: window.location.origin,
+          channelId: crypto.randomUUID(),
+        },
+      },
     },
   },
 };
@@ -70,6 +76,15 @@ const docEditor = new DocsAPI.DocEditor("editor", editorConfig);
 
 The bundled example injects this configuration through
 `nginx-ds-example.conf`.
+
+The plugin options bind the hidden plugin frame to the exact editor host page.
+They must be set before `DocsAPI.DocEditor` is constructed. If the editor host
+is itself embedded in a cross-origin iframe, the plugin walks its ancestor
+windows and delivers the handshake only to the ancestor whose origin matches
+`hostOrigin`; the outer page does not need to load a Relay script. Sandboxed
+hosts must allow both scripts and same-origin behavior. An opaque `"null"`
+origin is intentionally unsupported. When options are absent, only the legacy
+top-level-page handshake is used.
 
 The bundled Nginx example selects `uid-0` as the default local visitor. Before
 constructing the editor, `local-guest.js` stores one UUID v4 in
@@ -113,7 +128,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -140,7 +155,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev30"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -385,8 +400,8 @@ The localhost example exposes these additional endpoints:
   token, returns the single authoritative page, and renews the scoped binding
   token.
 - `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
-  requested tool against the authoritative page capabilities, and waits for the
-  live result.
+  requested tool against the authoritative page capabilities, treats a supplied
+  browser `sessionId` as a compatibility hint, and waits for the live result.
 
 The caller passes the UUID file name to
 `/copilot-api/documents/editor?fileName=<uuid>.<ext>` and stores the returned
@@ -397,7 +412,11 @@ exchanges that JWT for a 12-hour `ai-bridge-binding` token scoped to the exact
 file name, file type, editor type, and user. A newly registered page for that
 stable identity supersedes the previous Relay session, so a storage-version
 change does not require another bind. Stable `requestId` values deduplicate
-retries across page handoff. The editor page must remain open.
+retries across page handoff. The most recently registered page is the only
+active Relay. The superseded page stops polling permanently but remains
+available for manual editing. Closing the newest page does not restore an old
+page: Agent calls return `NO_ACTIVE_EDITOR` until a page is refreshed or opened
+and registers a new session. The editor page must remain open.
 
 The Relay writes one sanitized `[bridge-command]` JSON line for the first
 completion, failure, or timeout of each request. It reports the queue wait,

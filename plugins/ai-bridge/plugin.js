@@ -7,6 +7,7 @@
   const MAX_CALLS = 20;
   const MAX_CACHED_REQUESTS = 100;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
+  const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
   const READ_ONLY_TOOLS = new Set([
     "word_inspect",
     "word_inspect_advanced",
@@ -207,7 +208,12 @@
     editorType: null,
     bridge: null,
     hostOrigin: null,
+    expectedHostOrigin: null,
     hostWindow: null,
+    ancestorWindows: [],
+    strictHandshake: false,
+    handshakeValid: true,
+    channelId: null,
     sessionId: null,
     config: {},
     queue: Promise.resolve(),
@@ -259,18 +265,86 @@
     }
   }
 
-  function basePayload(message) {
+  function pluginHandshakeOptions() {
+    const options = Asc.plugin.info
+      && Asc.plugin.info.options
+      && typeof Asc.plugin.info.options === "object"
+      ? Asc.plugin.info.options
+      : {};
+    const strict = (
+      Object.prototype.hasOwnProperty.call(options, "hostOrigin")
+      || Object.prototype.hasOwnProperty.call(options, "channelId")
+    );
+    if (!strict) {
+      return {
+        strict: false,
+        valid: true,
+        hostOrigin: null,
+        channelId: null,
+      };
+    }
+
+    const hostOrigin = typeof options.hostOrigin === "string" ? options.hostOrigin : "";
+    const channelId = typeof options.channelId === "string" ? options.channelId : "";
+    let normalizedOrigin = "";
+    try {
+      normalizedOrigin = new URL(hostOrigin).origin;
+    } catch (error) {
+      // Strict mode remains enabled, but no message is sent or accepted.
+    }
     return {
+      strict: true,
+      valid: normalizedOrigin === hostOrigin && CHANNEL_ID_PATTERN.test(channelId),
+      hostOrigin,
+      channelId,
+    };
+  }
+
+  function ancestorWindows() {
+    const ancestors = [];
+    let current = window.parent;
+    while (current && current !== window && !ancestors.includes(current)) {
+      ancestors.push(current);
+      if (current === window.top) break;
+      try {
+        current = current.parent;
+      } catch (error) {
+        break;
+      }
+    }
+    if (!ancestors.length && window.top && window.top !== window) ancestors.push(window.top);
+    return ancestors;
+  }
+
+  function isAncestorWindow(candidate) {
+    return state.ancestorWindows.includes(candidate);
+  }
+
+  function basePayload(message) {
+    const payload = {
       source: "ai-bridge-plugin",
       protocolVersion: PROTOCOL_VERSION,
       pluginVersion: PLUGIN_VERSION,
       pluginGuid: PLUGIN_GUID,
       ...message,
     };
+    if (state.strictHandshake) payload.channelId = state.channelId;
+    return payload;
   }
 
   function announce() {
     if (!state.initialized || state.configured) return;
+    if (state.strictHandshake) {
+      if (!state.handshakeValid) return;
+      const message = basePayload({
+        type: "hello",
+        editorType: state.editorType,
+      });
+      for (const ancestor of state.ancestorWindows) {
+        ancestor.postMessage(message, state.expectedHostOrigin);
+      }
+      return;
+    }
     const hostOrigin = resolveTopOrigin();
     window.top.postMessage(basePayload({
       type: "hello",
@@ -629,6 +703,7 @@
     if (message.protocolVersion !== PROTOCOL_VERSION) return;
     if (typeof message.sessionId !== "string" || !REQUEST_ID_PATTERN.test(message.sessionId)) return;
     if (state.configured && message.sessionId !== state.sessionId) return;
+    if (state.configured && event.source !== state.hostWindow) return;
 
     const config = normalizeConfig(message.config);
     if (config.editorType && state.editorType && config.editorType !== state.editorType) return;
@@ -648,19 +723,37 @@
   }
 
   window.addEventListener("message", function (event) {
-    if (event.source !== window.top) return;
-    const expectedOrigin = resolveTopOrigin();
-    if (expectedOrigin && event.origin !== expectedOrigin) return;
-
     const message = event.data;
     if (!message || message.source !== "ai-bridge-host") return;
     if (message.pluginGuid !== PLUGIN_GUID) return;
+    if (state.strictHandshake) {
+      if (
+        !state.handshakeValid
+        || !isAncestorWindow(event.source)
+        || event.origin !== state.expectedHostOrigin
+        || message.channelId !== state.channelId
+      ) {
+        return;
+      }
+    } else {
+      if (event.source !== window.top) return;
+      const expectedOrigin = resolveTopOrigin();
+      if (expectedOrigin && event.origin !== expectedOrigin) return;
+      if (message.channelId !== undefined) return;
+    }
 
     if (message.type === "configure") {
       configure(event, message);
       return;
     }
-    if (!state.configured || event.origin !== state.hostOrigin || message.sessionId !== state.sessionId) return;
+    if (
+      !state.configured
+      || event.source !== state.hostWindow
+      || event.origin !== state.hostOrigin
+      || message.sessionId !== state.sessionId
+    ) {
+      return;
+    }
     if (message.type === "host-ready") {
       publishReady();
       return;
@@ -675,6 +768,12 @@
 
     state.editorType = editorType;
     state.bridge = bridge;
+    const handshake = pluginHandshakeOptions();
+    state.strictHandshake = handshake.strict;
+    state.handshakeValid = handshake.valid;
+    state.expectedHostOrigin = handshake.hostOrigin;
+    state.channelId = handshake.channelId;
+    state.ancestorWindows = handshake.strict ? ancestorWindows() : [];
     state.initialized = true;
     state.announceTimer = window.setInterval(announce, 500);
     announce();

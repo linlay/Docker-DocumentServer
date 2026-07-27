@@ -28,9 +28,15 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev29"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev30"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
+        options: {
+          "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}": {
+            hostOrigin: window.location.origin,
+            channelId: crypto.randomUUID(),
+          },
+        },
       },
     },
   };
@@ -40,8 +46,15 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
 ```
+
+`plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
+宿主页源和本次页面加载生成的随机 channel 同时交给 `host-bridge.js` 与隐藏插件。
+当整个文档宿主页又被嵌入跨域外层 iframe 时，插件会逐层检查祖先窗口，只与
+`hostOrigin` 匹配的宿主页握手；外层页面不需要加载任何 Bridge 脚本。sandbox
+iframe 必须至少包含 `allow-scripts allow-same-origin`；来源为 `"null"` 的严格
+sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方式。
 
 #### 固定显示“访客”，不询问昵称
 
@@ -50,7 +63,7 @@
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev30"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -112,13 +125,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev29"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev30"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -155,6 +168,12 @@ Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 5. 新页面注册后会接管旧 Relay；旧页面停止 Relay，但不循环刷新，也不影响手工编辑。
 6. 浏览器页面通过 `/bridge/poll` 取得命令，调用 `window.aiBridge`，再通过
    `/bridge/result` 返回真实执行结果。
+
+同一稳定文档身份始终只有最后注册的一个活跃 Relay。HTTPX 请求携带的
+`sessionId` 只是兼容性提示，服务端以 binding token 为边界，把命令路由到当前
+权威 session；旧 ID 不会导致 `SESSION_NOT_AUTHORITATIVE`。最新页面关闭后不会
+自动恢复旧页面，AI 返回 `NO_ACTIVE_EDITOR`；刷新旧页面会生成新的 session 并
+重新接管。
 
 `bridge/execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、
 `undo`、`redo`、`getState`。写操作仍应先 inspect，并使用稳定 `requestId`；
@@ -687,5 +706,5 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 ## 版本兼容
 
 当前插件版本为 `0.4.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.4.0-rev29`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+`?v=0.4.0-rev30`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。
