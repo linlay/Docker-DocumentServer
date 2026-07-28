@@ -1,4 +1,5 @@
 import base64
+import http.client
 import io
 import json
 import os
@@ -697,6 +698,12 @@ class LocalGuestTokenTests(unittest.TestCase):
 
 class HttpRelayTests(unittest.TestCase):
     def setUp(self):
+        self.storage = tempfile.TemporaryDirectory()
+        self.storage_env = mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_STORAGE_DIR": self.storage.name},
+        )
+        self.storage_env.start()
         self.jwt_secret = "relay-test-secret"
         self.jwt_patcher = mock.patch.object(
             copilot_server,
@@ -721,47 +728,101 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.BRIDGE_REQUESTS.clear()
             copilot_server.BRIDGE_REJECTED_CREDENTIALS.clear()
         self.jwt_patcher.stop()
+        self.storage_env.stop()
+        self.storage.cleanup()
 
-    def editor_token(self, document_key="document-key-v1", expires_in=300):
+    def editor_token(
+        self,
+        document_key="document-key-v1",
+        expires_in=300,
+        *,
+        file_name="demo.docx",
+        file_type="docx",
+        editor_type="word",
+        user_id="uid-1",
+    ):
         return copilot_server.sign_jwt(
             {
                 "document": {
                     "key": document_key,
-                    "title": "demo.docx",
-                    "fileType": "docx",
+                    "title": file_name,
+                    "fileType": file_type,
                 },
-                "documentType": "word",
-                "editorConfig": {"user": {"id": "uid-1"}},
+                "documentType": editor_type,
+                "editorConfig": {"user": {"id": user_id}},
                 "exp": int(time.time()) + expires_in,
             },
             self.jwt_secret,
         )
 
-    def editor_state(self, document_key="document-key-v1"):
+    def editor_state(
+        self,
+        document_key="document-key-v1",
+        *,
+        file_name="demo.docx",
+        file_type="docx",
+        editor_type="word",
+        user_id="uid-1",
+        ready=True,
+    ):
+        tool_name = {
+            "word": "word_inspect",
+            "cell": "sheets_inspect",
+            "slide": "slides_inspect",
+        }[editor_type]
         return {
-            "ready": True,
-            "editorType": "word",
+            "ready": ready,
+            "editorType": editor_type,
             "context": {
                 "documentKey": document_key,
-                "fileName": "demo.docx",
-                "fileType": "docx",
-                "editorType": "word",
-                "userId": "uid-1",
+                "fileName": file_name,
+                "fileType": file_type,
+                "editorType": editor_type,
+                "userId": user_id,
             },
             "capabilities": {
-                "tools": ["word_inspect", "word_replace_text"],
+                "tools": [tool_name],
                 "controls": ["save", "history", "undo", "redo"],
             },
         }
 
-    def register(self, session_id="http-session:test", document_key="document-key-v1"):
+    def register(
+        self,
+        session_id="http-session:test",
+        document_key="document-key-v1",
+        *,
+        file_name="demo.docx",
+        file_type="docx",
+        editor_type="word",
+        user_id="uid-1",
+        ready=True,
+    ):
         return copilot_server.bridge_register(
             {
                 "sessionId": session_id,
-                "editorToken": self.editor_token(document_key),
-                "state": self.editor_state(document_key),
+                "editorToken": self.editor_token(
+                    document_key,
+                    file_name=file_name,
+                    file_type=file_type,
+                    editor_type=editor_type,
+                    user_id=user_id,
+                ),
+                "state": self.editor_state(
+                    document_key,
+                    file_name=file_name,
+                    file_type=file_type,
+                    editor_type=editor_type,
+                    user_id=user_id,
+                    ready=ready,
+                ),
             }
         )
+
+    def create_document_file(self, document_id, file_type):
+        file_name = f"{document_id}.{file_type}"
+        with open(os.path.join(self.storage.name, file_name), "wb") as stream:
+            stream.write(b"test")
+        return file_name
 
     def editor_failure(self, code, message="editor failed", details=None, request_id="failure"):
         if "http-session:test" not in copilot_server.BRIDGE_SESSIONS:
@@ -827,6 +888,7 @@ class HttpRelayTests(unittest.TestCase):
             "ARGUMENTS_TOO_LARGE": 413,
             "UNSUPPORTED_IMAGE_FORMAT": 415,
             "INVALID_ARGUMENTS": 422,
+            "INVALID_TOOL_ARGUMENTS": 422,
             "EXECUTION_FAILED": 500,
             "WORD_API_UNSUPPORTED": 501,
             "PERSISTENCE_FAILED": 502,
@@ -963,6 +1025,91 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
 
+    def test_word_batch_collects_all_argument_errors_before_enqueue(self):
+        self.register()
+        tool_calls = [
+            {
+                "name": "word_manage_section",
+                "arguments": {"action": "create", "internalNote": "敏感正文"},
+            },
+            {
+                "name": "word_format_table_advanced",
+                "arguments": {"tableIndex": 1, "repeatHeader": True},
+            },
+            {
+                "name": "word_manage_fields",
+                "arguments": {"action": "add"},
+            },
+            {
+                "name": "word_insert_page_break",
+                "arguments": {"position": "end"},
+            },
+            {
+                "name": "word_edit_table",
+                "arguments": {
+                    "tableIndex": 1,
+                    "action": "mergeCells",
+                    "startRow": 1,
+                    "endRow": 2,
+                },
+            },
+            {
+                "name": "word_set_header_footer",
+                "arguments": {"kind": "header", "action": "append"},
+            },
+            {
+                "name": "word_add_image",
+                "arguments": {
+                    "source": {"type": "url", "url": "http://blocked.example/image.png"},
+                },
+            },
+            {
+                "name": "word_set_table_cell",
+                "arguments": {
+                    "tableIndex": 1,
+                    "row": 1,
+                    "column": 1,
+                    "color": "not-a-color",
+                },
+            },
+        ]
+        with copilot_server.BRIDGE_CONDITION:
+            session = copilot_server.BRIDGE_SESSIONS["http-session:test"]
+            session["state"]["capabilities"]["tools"] = [
+                call["name"] for call in tool_calls
+            ]
+        claims = copilot_server.verify_editor_jwt(self.editor_token())
+        commands_before = dict(copilot_server.BRIDGE_COMMANDS)
+        requests_before = dict(copilot_server.BRIDGE_REQUESTS)
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_execute(
+                {
+                    "method": "executeBatch",
+                    "requestId": "invalid-word-batch",
+                    "toolCalls": tool_calls,
+                },
+                claims,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.status, 422)
+        self.assertEqual(error.code, "INVALID_TOOL_ARGUMENTS")
+        self.assertEqual(error.details["completedToolCalls"], 0)
+        self.assertFalse(error.details["partialMutationPossible"])
+        self.assertGreaterEqual(len(error.details["validationErrors"]), 10)
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
+        self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
+        encoded = json.dumps(error.details, ensure_ascii=False)
+        self.assertNotIn("敏感正文", encoded)
+        self.assertIn("arguments.paragraphIndex", encoded)
+        self.assertIn("arguments.row", encoded)
+        self.assertIn("arguments.instruction", encoded)
+        self.assertIn("arguments.target", encoded)
+        self.assertIn("arguments.rowStart", encoded)
+        self.assertIn("arguments.source", encoded)
+        self.assertIn("arguments.color", encoded)
+
     def test_resume_token_restores_a_cleaned_session_without_editor_token(self):
         registration = self.register()
         with copilot_server.BRIDGE_CONDITION:
@@ -1021,6 +1168,247 @@ class HttpRelayTests(unittest.TestCase):
         self.assertGreater(response["bindingExpiresAt"], int(time.time()))
         self.assertEqual(len(response["sessions"]), 1)
         self.assertTrue(response["sessions"][0]["authoritative"])
+
+    def test_attach_issues_binding_for_ready_docx_xlsx_and_pptx_relays(self):
+        cases = [
+            (
+                "11111111-1111-4111-8111-111111111111",
+                "docx",
+                "word",
+            ),
+            (
+                "22222222-2222-4222-8222-222222222222",
+                "xlsx",
+                "cell",
+            ),
+            (
+                "33333333-3333-4333-8333-333333333333",
+                "pptx",
+                "slide",
+            ),
+        ]
+        for index, (document_id, file_type, editor_type) in enumerate(cases):
+            with self.subTest(file_type=file_type):
+                file_name = self.create_document_file(document_id, file_type)
+                session_id = f"http-session:attach-{file_type}"
+                user_id = f"uid-{index + 1}"
+                self.register(
+                    session_id,
+                    f"document-key-{file_type}",
+                    file_name=file_name,
+                    file_type=file_type,
+                    editor_type=editor_type,
+                    user_id=user_id,
+                )
+
+                response = copilot_server.bridge_attach(
+                    {
+                        "fileName": file_name,
+                        "editorType": editor_type,
+                    }
+                )
+                claims = copilot_server.verify_bridge_binding_token(
+                    response["bindingToken"]
+                )
+
+                self.assertTrue(response["ok"])
+                self.assertGreater(response["bindingExpiresAt"], int(time.time()))
+                self.assertEqual(response["session"]["sessionId"], session_id)
+                self.assertTrue(response["session"]["ready"])
+                self.assertEqual(response["session"]["editorType"], editor_type)
+                self.assertEqual(claims["fileName"], file_name)
+                self.assertEqual(claims["fileType"], file_type)
+                self.assertEqual(claims["editorType"], editor_type)
+                self.assertEqual(claims["userId"], user_id)
+
+    def test_attach_selects_latest_ready_relay_for_same_file(self):
+        file_name = self.create_document_file(
+            "44444444-4444-4444-8444-444444444444",
+            "docx",
+        )
+        self.register(
+            "http-session:attach-first",
+            "document-key-attach",
+            file_name=file_name,
+            user_id="uid-first",
+        )
+        self.register(
+            "http-session:attach-second",
+            "document-key-attach",
+            file_name=file_name,
+            user_id="uid-second",
+        )
+
+        response = copilot_server.bridge_attach(
+            {"fileName": file_name, "editorType": "word"}
+        )
+        claims = copilot_server.verify_bridge_binding_token(response["bindingToken"])
+
+        self.assertEqual(
+            response["session"]["sessionId"],
+            "http-session:attach-second",
+        )
+        self.assertEqual(claims["userId"], "uid-second")
+
+    def test_attach_rejects_missing_editor_type_mismatch_and_missing_document(self):
+        file_name = self.create_document_file(
+            "55555555-5555-4555-8555-555555555555",
+            "docx",
+        )
+        cases = [
+            (
+                {"fileName": file_name},
+                422,
+                "INVALID_ARGUMENTS",
+            ),
+            (
+                {"fileName": file_name, "editorType": "cell"},
+                409,
+                "EDITOR_MISMATCH",
+            ),
+            (
+                {
+                    "fileName": "66666666-6666-4666-8666-666666666666.docx",
+                    "editorType": "word",
+                },
+                404,
+                "DOCUMENT_NOT_FOUND",
+            ),
+        ]
+        for payload, status, code in cases:
+            with self.subTest(code=code):
+                with (
+                    mock.patch.object(
+                        copilot_server,
+                        "bridge_binding_token",
+                    ) as token_issuer,
+                    self.assertRaises(copilot_server.BridgeError) as raised,
+                ):
+                    copilot_server.bridge_attach(payload)
+                self.assertEqual(raised.exception.status, status)
+                self.assertEqual(raised.exception.code, code)
+                token_issuer.assert_not_called()
+
+    def test_attach_requires_a_ready_active_relay(self):
+        file_name = self.create_document_file(
+            "77777777-7777-4777-8777-777777777777",
+            "docx",
+        )
+        self.register(
+            "http-session:attach-not-ready",
+            "document-key-not-ready",
+            file_name=file_name,
+            ready=False,
+        )
+
+        with (
+            mock.patch.object(copilot_server, "BRIDGE_DISCOVERY_WAIT_SECONDS", 0),
+            self.assertRaises(copilot_server.BridgeError) as raised,
+        ):
+            copilot_server.bridge_attach(
+                {"fileName": file_name, "editorType": "word"}
+            )
+
+        self.assertEqual(raised.exception.status, 503)
+        self.assertEqual(raised.exception.code, "NO_ACTIVE_EDITOR")
+
+    def test_attach_binding_routes_to_refreshed_relay(self):
+        file_name = self.create_document_file(
+            "88888888-8888-4888-8888-888888888888",
+            "docx",
+        )
+        self.register(
+            "http-session:attach-before-refresh",
+            "document-key-before-refresh",
+            file_name=file_name,
+        )
+        response = copilot_server.bridge_attach(
+            {"fileName": file_name, "editorType": "word"}
+        )
+        binding_claims = copilot_server.verify_bridge_binding_token(
+            response["bindingToken"]
+        )
+
+        self.register(
+            "http-session:attach-after-refresh",
+            "document-key-after-refresh",
+            file_name=file_name,
+        )
+        refreshed = copilot_server.bridge_sessions(binding_claims)
+
+        self.assertEqual(
+            refreshed["sessions"][0]["sessionId"],
+            "http-session:attach-after-refresh",
+        )
+
+    def test_attach_http_endpoint_is_post_only_and_no_store(self):
+        file_name = self.create_document_file(
+            "99999999-9999-4999-8999-999999999999",
+            "docx",
+        )
+        self.register(
+            "http-session:attach-http",
+            "document-key-http",
+            file_name=file_name,
+        )
+        server = copilot_server.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            copilot_server.Handler,
+        )
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            server.server_address[1],
+            timeout=2,
+        )
+        self.addCleanup(connection.close)
+        body = json.dumps(
+            {"fileName": file_name, "editorType": "word"}
+        ).encode("utf-8")
+        connection.request(
+            "POST",
+            "/bridge/attach",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Cache-Control"), "no-store")
+        self.assertTrue(payload["bindingToken"])
+        self.assertEqual(payload["session"]["sessionId"], "http-session:attach-http")
+
+        connection.close()
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            server.server_address[1],
+            timeout=2,
+        )
+        connection.request("GET", "/bridge/attach")
+        get_response = connection.getresponse()
+        get_response.read()
+        self.assertEqual(get_response.status, 404)
+
+        connection.request(
+            "POST",
+            "/bridge/attach",
+            body=json.dumps({"fileName": file_name, "editorType": "word"}),
+            headers={"Content-Type": "text/plain"},
+        )
+        content_type_response = connection.getresponse()
+        content_type_payload = json.loads(
+            content_type_response.read().decode("utf-8")
+        )
+        self.assertEqual(content_type_response.status, 415)
+        self.assertEqual(
+            content_type_payload["error"]["code"],
+            "UNSUPPORTED_MEDIA_TYPE",
+        )
 
     def test_editor_jwt_binds_to_the_ready_local_guest_session(self):
         anonymous_id = "123e4567-e89b-42d3-a456-426614174000"

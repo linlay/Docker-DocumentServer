@@ -13,6 +13,7 @@ export type AiBridgeErrorCode =
   | "INVALID_COMMAND"
   | "INVALID_TOOL_CALL"
   | "INVALID_ARGUMENTS"
+  | "INVALID_TOOL_ARGUMENTS"
   | "ARGUMENTS_TOO_LARGE"
   | "TOO_MANY_CALLS"
   | "TOOL_NOT_ALLOWED"
@@ -84,13 +85,28 @@ export interface AiBridgeServiceResult extends Record<string, unknown> {
   fileName?: string;
 }
 
+export interface AiBridgeToolValidationError {
+  toolCallIndex: number;
+  tool: string;
+  path: string;
+  keyword: string;
+  message: string;
+}
+
+export interface AiBridgeToolArgumentsErrorDetails {
+  validationErrors: AiBridgeToolValidationError[];
+  completedToolCalls: 0;
+  partialMutationPossible: false;
+}
+
 export class AiBridgeError extends Error {
   readonly code: AiBridgeErrorCode;
   readonly requestId: string | null;
-  readonly details?: unknown;
+  readonly details?: AiBridgeToolArgumentsErrorDetails | Record<string, unknown>;
 }
 
 export interface BasicTextFormat {
+  /** Font size in points (pt). */
   fontSize?: number;
   fontFamily?: string;
   bold?: boolean;
@@ -109,7 +125,10 @@ export interface TextFormat extends BasicTextFormat {
   caps?: boolean;
   smallCaps?: boolean;
   highlightColor?: string;
+  /** @deprecated Point-valued legacy alias. Prefer characterSpacingPt. Never pass twips. */
   characterSpacing?: number;
+  /** Additional character spacing in points (pt). */
+  characterSpacingPt?: number;
   vertAlign?: "baseline" | "subscript" | "superscript";
 }
 export interface WordParagraphFormat extends TextFormat {
@@ -117,13 +136,29 @@ export interface WordParagraphFormat extends TextFormat {
   styleName?: string;
   headingLevel?: number;
   outlineLevel?: number;
+  /** @deprecated Point-valued legacy alias. Prefer spacingBeforePt. Never pass twips. */
   spacingBefore?: number;
+  /** @deprecated Point-valued legacy alias. Prefer spacingAfterPt. Never pass twips. */
   spacingAfter?: number;
+  /** Paragraph spacing before in points (pt). */
+  spacingBeforePt?: number;
+  /** Paragraph spacing after in points (pt). */
+  spacingAfterPt?: number;
+  /** Line multiplier for auto; points for exact/atLeast. */
   lineSpacing?: number;
   lineRule?: "auto" | "exact" | "atLeast";
+  /** @deprecated Point-valued legacy alias. Prefer firstLineIndentPt. Never pass twips. */
   firstLineIndent?: number;
+  /** @deprecated Point-valued legacy alias. Prefer leftIndentPt. Never pass twips. */
   leftIndent?: number;
+  /** @deprecated Point-valued legacy alias. Prefer rightIndentPt. Never pass twips. */
   rightIndent?: number;
+  /** First-line or hanging indent in points (pt); negative values create a hanging indent. */
+  firstLineIndentPt?: number;
+  /** Left paragraph indent in points (pt). */
+  leftIndentPt?: number;
+  /** Right paragraph indent in points (pt). */
+  rightIndentPt?: number;
   keepLines?: boolean;
   keepNext?: boolean;
   widowControl?: boolean;
@@ -291,8 +326,11 @@ export interface WordSetPageLayoutArgs {
   sectionIndex?: number;
   pageSize?: "A4" | "Letter" | "Legal" | "custom";
   orientation?: "portrait" | "landscape";
+  /** Custom page width in millimetres (mm). */
   widthMm?: number;
+  /** Custom page height in millimetres (mm). */
   heightMm?: number;
+  /** Page and header/footer distances in millimetres (mm). */
   marginLeftMm?: number;
   marginTopMm?: number;
   marginRightMm?: number;
@@ -401,7 +439,9 @@ export interface WordSetNumberingArgs extends WordParagraphTarget {
 export interface WordBorderFormat {
   style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
   color?: string;
+  /** Border width in points (pt). */
   widthPt?: number;
+  /** Space between border and content in points (pt). */
   spacePt?: number;
 }
 export interface WordFormatTableAdvancedArgs {
@@ -632,6 +672,7 @@ export type AiBridgeFill =
 export interface AiBridgeLine {
   type?: "solid" | "none";
   enabled?: boolean;
+  /** Line width in points (pt). */
   widthPt?: number;
   color?: string;
   fill?: AiBridgeFill;
@@ -907,9 +948,11 @@ export interface SlidesSetTemplateBackgroundArgs {
 }
 export interface SlidesParagraphFormat extends TextFormat {
   align?: "left" | "center" | "right" | "both";
+  /** Paragraph indents in millimetres (mm). */
   firstLineIndentMm?: number;
   leftIndentMm?: number;
   rightIndentMm?: number;
+  /** Paragraph spacing in points (pt). */
   spacingBeforePt?: number;
   spacingAfterPt?: number;
   /** Line multiplier for auto, points for exact/atLeast. */
@@ -1245,6 +1288,7 @@ export interface SheetsSetArrayFormulaArgs extends SheetTarget { range: string; 
 export interface SheetsReplaceTextArgs extends SheetTarget { range?: string; search: string; replace: string; }
 export interface SheetsFormatRangeArgs extends SheetTarget {
   range: string;
+  /** Font size in points (pt). */
   fontSize?: number;
   fontName?: string;
   bold?: boolean;
@@ -1257,9 +1301,16 @@ export interface SheetsFormatRangeArgs extends SheetTarget {
   verticalAlign?: string;
   numberFormat?: string;
   wrap?: boolean;
+  /** Text rotation accepted by ONLYOFFICE, commonly degrees or an xl* orientation token. */
   orientation?: string | number;
+  /** @deprecated Native character-width alias. Prefer columnWidthChars. */
   columnWidth?: number;
+  /** @deprecated Point-valued alias. Prefer rowHeightPt. */
   rowHeight?: number;
+  /** Column width in spreadsheet character units (roughly seven pixels per unit). */
+  columnWidthChars?: number;
+  /** Row height in points (pt). */
+  rowHeightPt?: number;
   borders?: Array<{ side: string; style: string; color: string }>;
 }
 export interface SheetsAddSheetArgs { name: string; }
@@ -1527,12 +1578,16 @@ export interface SheetsManageProtectedRangesArgs extends SheetTarget {
 export interface SheetsInspectPageLayoutArgs extends SheetTarget {}
 export type SheetsManagePageLayoutArgs = SheetTarget & {
   orientation?: string;
+  /** @deprecated Point-valued alias. Prefer marginsPt. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
+  /** Printed page margins in points (pt). */
+  marginsPt?: { top?: number; right?: number; bottom?: number; left?: number };
   printGridlines?: boolean;
   printHeadings?: boolean;
 } & (
   | { orientation: string }
   | { margins: { top?: number; right?: number; bottom?: number; left?: number } }
+  | { marginsPt: { top?: number; right?: number; bottom?: number; left?: number } }
   | { printGridlines: boolean }
   | { printHeadings: boolean }
 );

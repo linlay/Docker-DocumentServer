@@ -635,6 +635,12 @@ function createWordBridgeHarness(options = {}) {
       },
       GetElementsCount() { return this.runs.length; },
       GetElement(index) { return this.runs[index] || null; },
+      SetSpacingBefore(value) { this.spacingBefore = value; return true; },
+      SetSpacingAfter(value) { this.spacingAfter = value; return true; },
+      SetSpacingLine(value, rule) { this.spacingLine = { value, rule }; return true; },
+      SetIndFirstLine(value) { this.firstLineIndent = value; return true; },
+      SetIndLeft(value) { this.leftIndent = value; return true; },
+      SetIndRight(value) { this.rightIndent = value; return true; },
       SetNumbering(level) { this.numbering = level; return true; },
       SetPageBreakBefore(value) { this.pageBreakBefore = Boolean(value); return true; },
       AddPageBreak() { this.pageBreakAfter = true; return true; },
@@ -1631,6 +1637,29 @@ test("public Word contract exposes positioned tables and inline content replacem
   assert.equal(controlProperties.tableIndex.minimum, 1);
   assert.equal(controlProperties.row.minimum, 1);
   assert.equal(controlProperties.column.minimum, 1);
+  assert.equal(
+    publicContract.tools.word.word_insert_page_break.properties.all.type,
+    "boolean",
+  );
+});
+
+test("public Word contract makes paragraph point units explicit", () => {
+  for (const tool of [
+    "word_append_paragraph",
+    "word_insert_paragraph",
+    "word_format_document",
+    "word_manage_style",
+    "word_format_paragraphs",
+    "word_set_paragraph_text",
+    "word_set_table_cell",
+  ]) {
+    const properties = publicContract.tools.word[tool].properties;
+    assert.match(properties.leftIndentPt.description, /points \(pt\)/);
+    assert.match(properties.firstLineIndentPt.description, /points \(pt\)/);
+    assert.equal(properties.leftIndent.deprecated, true);
+    assert.match(properties.leftIndent.description, /Never pass twips/);
+  }
+  assert.match(publicContract.unitConventions.word, /Never pass OOXML twips or EMU/);
 });
 
 test("DOCX capability matrix covers D01 through D70 exactly once", () => {
@@ -2141,6 +2170,59 @@ test("word bridge formats only matching text ranges", async () => {
   assert.ok(harness.formattedRanges.every(range => range.bold === true && range.italic === true));
 });
 
+test("word bridge accepts explicit point fields once and rejects ambiguous twips", async () => {
+  const harness = createWordBridgeHarness({ text: "已有正文" });
+
+  await harness.bridge.execute([{
+    name: "word_append_paragraph",
+    arguments: {
+      text: "悬挂缩进",
+      spacingBeforePt: 6,
+      spacingAfterPt: 4,
+      leftIndentPt: 36,
+      firstLineIndentPt: -18,
+      lineSpacing: 1.5,
+      lineRule: "auto",
+    },
+  }]);
+
+  const paragraph = harness.paragraphObjects.at(-1);
+  assert.equal(paragraph.spacingBefore, 120);
+  assert.equal(paragraph.spacingAfter, 80);
+  assert.equal(paragraph.leftIndent, 720);
+  assert.equal(paragraph.firstLineIndent, -360);
+  assert.deepEqual(paragraph.spacingLine, { value: 360, rule: "auto" });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_append_paragraph",
+      arguments: { text: "错误缩进", leftIndent: 720 },
+    }]),
+    /leftIndent 的单位是磅（pt）.*leftIndentPt: 36.*不要传入 twips/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_append_paragraph",
+      arguments: { text: "错误悬挂缩进", firstLineIndent: -360 },
+    }]),
+    /firstLineIndent 的单位是磅（pt）.*firstLineIndentPt: -18.*不要传入 twips/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_append_paragraph",
+      arguments: { text: "字段冲突", leftIndent: 36, leftIndentPt: 36 },
+    }]),
+    /leftIndentPt 与旧字段 leftIndent 不能同时提供/,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_append_paragraph",
+      arguments: { text: "错误行距", lineSpacing: 1.5, lineRule: "multiple" },
+    }]),
+    /lineRule 必须是 auto、exact 或 atLeast；多倍行距使用 auto/,
+  );
+});
+
 test("word bridge creates ONLYOFFICE run styles for public character styles and applies them", async () => {
   const harness = createWordBridgeHarness({ text: "术语 术语" });
 
@@ -2350,16 +2432,18 @@ test("word bridge classifies the observed page-break and table argument failures
       arguments: {},
     }]),
     error => {
-      assert.equal(error.code, "INVALID_ARGUMENTS");
-      assert.equal(
-        error.message,
-        "必须使用 paragraphIndexes、search、all=true 或 current=true 指定段落",
-      );
-      assert.equal(error.details.tool, "word_insert_page_break");
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.message, "Word 工具参数校验失败");
+      assert.equal(error.details.completedToolCalls, 0);
       assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(
+        JSON.stringify(error.details.validationErrors.map(item => item.path)),
+        JSON.stringify(["arguments.target"]),
+      );
       return true;
     },
   );
+  assert.equal(pageBreakHarness.historyPoints, 0);
 
   const cells = [{}, {}];
   const row = {
@@ -2382,10 +2466,13 @@ test("word bridge classifies the observed page-break and table argument failures
       arguments: { tableIndex: 1, repeatHeader: true },
     }]),
     error => {
-      assert.equal(error.code, "INVALID_ARGUMENTS");
-      assert.equal(error.message, "设置重复表头时必须提供 row");
-      assert.equal(error.details.tool, "word_format_table_advanced");
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
       assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(
+        JSON.stringify(error.details.validationErrors.map(item => item.path)),
+        JSON.stringify(["arguments.row"]),
+      );
       return true;
     },
   );
@@ -2403,16 +2490,63 @@ test("word bridge classifies the observed page-break and table argument failures
       },
     }]),
     error => {
-      assert.equal(error.code, "INVALID_ARGUMENTS");
-      assert.equal(
-        error.message,
-        "word_edit_table mergeCells 需要 rowStart、rowEnd、columnStart、columnEnd",
-      );
-      assert.equal(error.details.tool, "word_edit_table");
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
       assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(
+        JSON.stringify(error.details.validationErrors.map(item => item.path)),
+        JSON.stringify([
+          "arguments.rowStart",
+          "arguments.rowEnd",
+          "arguments.columnStart",
+          "arguments.columnEnd",
+        ]),
+      );
       return true;
     },
   );
+  assert.equal(tableHarness.historyPoints, 0);
+});
+
+test("word bridge aggregates all static semantic failures before creating history", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["第一段"] });
+
+  await assert.rejects(
+    harness.bridge.execute([
+      {
+        name: "word_manage_section",
+        arguments: { action: "create" },
+      },
+      {
+        name: "word_manage_fields",
+        arguments: { action: "add" },
+      },
+      {
+        name: "word_insert_page_break",
+        arguments: {},
+      },
+    ]),
+    error => {
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(
+        JSON.stringify(error.details.validationErrors.map(item => [
+          item.toolCallIndex,
+          item.tool,
+          item.path,
+        ])),
+        JSON.stringify([
+          [0, "word_manage_section", "arguments.paragraphIndex"],
+          [1, "word_manage_fields", "arguments.instruction"],
+          [2, "word_insert_page_break", "arguments.target"],
+        ]),
+      );
+      return true;
+    },
+  );
+
+  assert.equal(harness.historyPoints, 0);
 });
 
 test("word bridge uses ONLYOFFICE zero-based placeholders for multilevel numbering", async () => {

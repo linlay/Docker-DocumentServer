@@ -22,6 +22,117 @@
     return (call && (call.arguments || call.args)) || {};
   }
 
+  function collectStaticValidationErrors(toolCalls) {
+    const errors = [];
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+
+    function add(index, name, path, message) {
+      errors.push({
+        toolCallIndex: index,
+        tool: String(name || ""),
+        path: "arguments." + path,
+        keyword: "semantic",
+        message,
+      });
+    }
+
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index] || {};
+      const name = String(call.name || "");
+      const args = getArgs(call);
+      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+
+      if (name === "word_manage_section" && String(args.action || "configure") === "create") {
+        if (args.paragraphIndex === undefined) {
+          add(index, name, "paragraphIndex", "paragraphIndex is required when action is create");
+        }
+      }
+
+      if (name === "word_format_table_advanced") {
+        if (args.repeatHeader !== undefined && args.row === undefined) {
+          add(index, name, "row", "row is required when repeatHeader is provided");
+        }
+      }
+
+      if (name === "word_manage_fields" && String(args.action || "") === "add") {
+        if (typeof args.instruction !== "string" || !args.instruction.trim()) {
+          add(index, name, "instruction", "instruction is required when action is add");
+        }
+      }
+
+      if (name === "word_insert_page_break") {
+        const hasTarget = (
+          args.all === true
+          || args.current === true
+          || (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length > 0)
+          || (typeof args.search === "string" && args.search.length > 0)
+        );
+        if (!hasTarget) {
+          add(index, name, "target", "paragraphIndexes, search, all=true, or current=true is required");
+        }
+      }
+
+      if (name === "word_edit_table") {
+        const action = String(args.action || "");
+        const requiredByAction = {
+          removeRow: ["row"],
+          removeColumn: ["column"],
+          splitCell: ["row", "column"],
+          mergeCells: ["rowStart", "rowEnd", "columnStart", "columnEnd"],
+        };
+        const required = requiredByAction[action] || [];
+        for (const field of required) {
+          if (args[field] === undefined) {
+            add(index, name, field, field + " is required when action is " + action);
+          }
+        }
+        if (
+          action === "mergeCells"
+          && required.every(function (field) { return Number.isInteger(args[field]); })
+        ) {
+          if (args.rowStart > args.rowEnd) {
+            add(index, name, "rowEnd", "rowEnd must be greater than or equal to rowStart");
+          }
+          if (args.columnStart > args.columnEnd) {
+            add(index, name, "columnEnd", "columnEnd must be greater than or equal to columnStart");
+          }
+        }
+      }
+
+      if (name === "word_set_header_footer" && String(args.action || "set") === "set") {
+        const contentFields = [
+          "text",
+          "pageNumber",
+          "pagesCount",
+          "fields",
+          "fontSize",
+          "fontFamily",
+          "bold",
+          "italic",
+          "color",
+          "align",
+        ];
+        if (!contentFields.some(function (field) { return args[field] !== undefined; })) {
+          add(index, name, "action", "set requires text, a page field, fields, or formatting");
+        }
+      }
+    }
+    return errors;
+  }
+
+  function requireStaticValidation(toolCalls) {
+    const validationErrors = collectStaticValidationErrors(toolCalls);
+    if (!validationErrors.length) return;
+    const error = new Error("Word 工具参数校验失败");
+    error.code = "INVALID_TOOL_ARGUMENTS";
+    error.details = {
+      validationErrors,
+      completedToolCalls: 0,
+      partialMutationPossible: false,
+    };
+    throw error;
+  }
+
   let nativeSearchAndReplaceSupported = null;
 
   function detectNativeSearchAndReplace() {
@@ -320,12 +431,13 @@
             var textFormatKeys = [
               "fontSize", "fontFamily", "bold", "italic", "underline", "strikeout",
               "doubleStrikeout", "caps", "smallCaps", "color", "highlightColor",
-              "characterSpacing", "vertAlign", "characterStyleName",
+              "characterSpacing", "characterSpacingPt", "vertAlign", "characterStyleName",
             ];
             var paragraphFormatKeys = textFormatKeys.concat([
               "align", "styleName", "headingLevel", "outlineLevel", "spacingBefore",
-              "spacingAfter", "lineSpacing", "lineRule", "firstLineIndent", "leftIndent",
-              "rightIndent", "keepLines", "keepNext", "widowControl",
+              "spacingAfter", "spacingBeforePt", "spacingAfterPt", "lineSpacing", "lineRule",
+              "firstLineIndent", "leftIndent", "rightIndent", "firstLineIndentPt",
+              "leftIndentPt", "rightIndentPt", "keepLines", "keepNext", "widowControl",
               "contextualSpacing", "pageBreakBefore",
             ]);
 
@@ -434,6 +546,30 @@
 
             function pointsToTwips(value, label) {
               return Math.round(finiteNumber(value, label) * 20);
+            }
+
+            function pointArgument(format, explicitName, legacyName, rejectLikelyTwips) {
+              var hasExplicit = format[explicitName] !== undefined;
+              var hasLegacy = format[legacyName] !== undefined;
+              if (hasExplicit && hasLegacy) {
+                throw new Error(explicitName + " 与旧字段 " + legacyName + " 不能同时提供");
+              }
+              if (hasExplicit) return finiteNumber(format[explicitName], explicitName);
+              if (!hasLegacy) return null;
+              var legacyValue = finiteNumber(format[legacyName], legacyName);
+              if (
+                rejectLikelyTwips
+                && Math.abs(legacyValue) >= 300
+                && Math.abs(legacyValue) <= 2880
+                && Math.abs(legacyValue % 20) < 0.000001
+              ) {
+                throw new Error(
+                  legacyName + " 的单位是磅（pt），值 " + legacyValue
+                  + " 疑似误传 twips；请改用 " + explicitName + ": "
+                  + (legacyValue / 20) + "，不要传入 twips"
+                );
+              }
+              return legacyValue;
             }
 
             function mmToTwips(value, label) {
@@ -554,8 +690,9 @@
               if (format.highlightColor && typeof target.SetHighlight === "function") {
                 target.SetHighlight(Api.Color(String(format.highlightColor)));
               }
-              if (format.characterSpacing !== undefined && typeof target.SetSpacing === "function") {
-                target.SetSpacing(pointsToTwips(format.characterSpacing, "characterSpacing"));
+              var characterSpacingPt = pointArgument(format, "characterSpacingPt", "characterSpacing", false);
+              if (characterSpacingPt !== null && typeof target.SetSpacing === "function") {
+                target.SetSpacing(pointsToTwips(characterSpacingPt, "characterSpacingPt"));
               }
               if (format.vertAlign && typeof target.SetVertAlign === "function") target.SetVertAlign(String(format.vertAlign));
             }
@@ -580,11 +717,19 @@
               }
               if (styleName && typeof paragraph.SetStyle === "function") paragraph.SetStyle(resolveStyle(styleName, "paragraph"));
               if (format.align && typeof paragraph.SetJc === "function") paragraph.SetJc(String(format.align));
-              if (format.spacingBefore !== undefined && typeof paragraph.SetSpacingBefore === "function") {
-                paragraph.SetSpacingBefore(pointsToTwips(format.spacingBefore, "spacingBefore"));
+              var spacingBeforePt = pointArgument(format, "spacingBeforePt", "spacingBefore", false);
+              if (spacingBeforePt !== null && typeof paragraph.SetSpacingBefore === "function") {
+                paragraph.SetSpacingBefore(pointsToTwips(spacingBeforePt, "spacingBeforePt"));
               }
-              if (format.spacingAfter !== undefined && typeof paragraph.SetSpacingAfter === "function") {
-                paragraph.SetSpacingAfter(pointsToTwips(format.spacingAfter, "spacingAfter"));
+              var spacingAfterPt = pointArgument(format, "spacingAfterPt", "spacingAfter", false);
+              if (spacingAfterPt !== null && typeof paragraph.SetSpacingAfter === "function") {
+                paragraph.SetSpacingAfter(pointsToTwips(spacingAfterPt, "spacingAfterPt"));
+              }
+              if (
+                format.lineRule !== undefined
+                && ["auto", "exact", "atLeast"].indexOf(String(format.lineRule)) === -1
+              ) {
+                throw new Error("lineRule 必须是 auto、exact 或 atLeast；多倍行距使用 auto");
               }
               if (format.lineSpacing !== undefined && typeof paragraph.SetSpacingLine === "function") {
                 var lineRule = String(format.lineRule || "auto");
@@ -593,14 +738,17 @@
                   : pointsToTwips(format.lineSpacing, "lineSpacing");
                 paragraph.SetSpacingLine(lineValue, lineRule);
               }
-              if (format.firstLineIndent !== undefined && typeof paragraph.SetIndFirstLine === "function") {
-                paragraph.SetIndFirstLine(pointsToTwips(format.firstLineIndent, "firstLineIndent"));
+              var firstLineIndentPt = pointArgument(format, "firstLineIndentPt", "firstLineIndent", true);
+              if (firstLineIndentPt !== null && typeof paragraph.SetIndFirstLine === "function") {
+                paragraph.SetIndFirstLine(pointsToTwips(firstLineIndentPt, "firstLineIndentPt"));
               }
-              if (format.leftIndent !== undefined && typeof paragraph.SetIndLeft === "function") {
-                paragraph.SetIndLeft(pointsToTwips(format.leftIndent, "leftIndent"));
+              var leftIndentPt = pointArgument(format, "leftIndentPt", "leftIndent", true);
+              if (leftIndentPt !== null && typeof paragraph.SetIndLeft === "function") {
+                paragraph.SetIndLeft(pointsToTwips(leftIndentPt, "leftIndentPt"));
               }
-              if (format.rightIndent !== undefined && typeof paragraph.SetIndRight === "function") {
-                paragraph.SetIndRight(pointsToTwips(format.rightIndent, "rightIndent"));
+              var rightIndentPt = pointArgument(format, "rightIndentPt", "rightIndent", true);
+              if (rightIndentPt !== null && typeof paragraph.SetIndRight === "function") {
+                paragraph.SetIndRight(pointsToTwips(rightIndentPt, "rightIndentPt"));
               }
               if (format.keepLines !== undefined && typeof paragraph.SetKeepLines === "function") paragraph.SetKeepLines(Boolean(format.keepLines));
               if (format.keepNext !== undefined && typeof paragraph.SetKeepNext === "function") paragraph.SetKeepNext(Boolean(format.keepNext));
@@ -3714,6 +3862,7 @@
       results: [],
     };
     const calls = toolCalls || [];
+    requireStaticValidation(calls);
     const hasReplacement = calls.some(function (call) {
       return call && call.name === "word_replace_text";
     });

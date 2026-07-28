@@ -157,12 +157,12 @@ popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是�
 Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 
 1. 浏览器中的 `host-bridge.js` 使用当前 ONLYOFFICE editor JWT 注册长轮询会话。
-2. HTTPX 把能力链接中的 UUID 文件名传给
-   `/copilot-api/documents/editor?fileName=<uuid>.<ext>`，由固定绑定助手获取同一
-   编辑页的短期 editor JWT 并保存进自身 state；不能输出或记录该 JWT。真实
-   `/docx|xlsx|pptx/<uuid>` 页面仍必须在浏览器中打开并保持 Relay ready。
-3. 首次 `GET /copilot-api/bridge/sessions` 用短期 editor JWT 换取 12 小时
-   `ai-bridge-binding` token；HTTPX 立即用新 token 覆盖临时凭证。
+2. 真实 `/docx|xlsx|pptx/<uuid>` 页面在浏览器中打开并保持 Relay ready 后，
+   HTTPX 只把准确 UUID 文件名和配置中固定的 editor type 传给
+   `POST /copilot-api/bridge/attach`。
+3. attach 最多等待 10 秒，选择相同文件名、文件类型和 editor type 的最新 ready
+   权威 Relay，并签发 12 小时 `ai-bridge-binding` token。HTTPX 把它保存到当前
+   Chat state；Agent 不接触 editor JWT、binding token、sessionId 或 documentKey。
 4. Bridge token 绑定准确的文件名、文件类型、编辑器类型与用户，但不绑定保存后会
    变化的 `document.key`。服务端只把命令投递给该稳定身份最后注册的权威页面。
 5. 新页面注册后会接管旧 Relay；旧页面停止 Relay，但不循环刷新，也不影响手工编辑。
@@ -174,6 +174,10 @@ Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 权威 session；旧 ID 不会导致 `SESSION_NOT_AUTHORITATIVE`。最新页面关闭后不会
 自动恢复旧页面，AI 返回 `NO_ACTIVE_EDITOR`；刷新旧页面会生成新的 session 并
 重新接管。
+
+旧的 `/documents/editor` 与 `/bridge/sessions` 继续兼容已有客户端，但不再暴露
+在 Agent HTTPX 配置和技能中。刷新页面或 force-save 后继续复用现有 binding
+token；只有 token 明确过期、无效或目标文档改变时才重新 attach。
 
 `bridge/execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、
 `undo`、`redo`、`getState`。写操作仍应先 inspect，并使用稳定 `requestId`；
@@ -648,7 +652,8 @@ try {
 - `DOCUMENT_MISMATCH`：宿主页的当前 key 已改变，命令被拒绝。
 - `EDITOR_MISMATCH`：把 Word 命令发给了 PPT/表格实例。
 - `TOOL_NOT_ALLOWED`：当前编辑器不允许该工具。
-- `INVALID_ARGUMENTS` / `INVALID_COMMAND`：模型结构化输出不符合契约。
+- `INVALID_TOOL_ARGUMENTS`：整批 `word_*` 参数在修改前校验失败；读取 `details.validationErrors[]` 一次修正全部错误，此时 `completedToolCalls=0` 且 `partialMutationPossible=false`。
+- `INVALID_ARGUMENTS` / `INVALID_COMMAND`：运行期参数语义或命令结构不符合契约。
 - `INVALID_IMAGE_SOURCE`：图片来源类型、Data URL 或内部资源不合法。
 - `IMAGE_FETCH_BLOCKED` / `IMAGE_FETCH_FAILED`：URL 被网络策略拦截或下载失败。
 - `IMAGE_TOO_LARGE` / `UNSUPPORTED_IMAGE_FORMAT`：图片字节、像素或格式不符合限制。

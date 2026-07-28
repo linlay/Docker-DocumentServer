@@ -387,6 +387,389 @@ ALLOWED_BY_EDITOR = {
     editor: {entry["function"]["name"] for entry in entries}
     for editor, entries in TOOLS_BY_EDITOR.items()
 }
+ARGUMENT_SCHEMAS_BY_EDITOR = {
+    editor: {
+        entry["function"]["name"]: entry["function"]["parameters"]
+        for entry in entries
+    }
+    for editor, entries in TOOLS_BY_EDITOR.items()
+}
+
+
+def json_schema_type_matches(value: Any, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return True
+
+
+def json_schema_type_label(expected: Any) -> str:
+    if isinstance(expected, list):
+        return " or ".join(str(item) for item in expected)
+    return str(expected)
+
+
+def append_argument_validation_error(
+    errors: list[dict[str, Any]],
+    path: str,
+    keyword: str,
+    message: str,
+) -> None:
+    errors.append(
+        {
+            "path": path,
+            "keyword": keyword,
+            "message": message,
+        }
+    )
+
+
+def validate_json_schema(
+    value: Any,
+    schema: Any,
+    path: str,
+    errors: list[dict[str, Any]],
+) -> None:
+    if not isinstance(schema, dict):
+        return
+
+    any_of = schema.get("anyOf")
+    if isinstance(any_of, list) and any_of:
+        any_of_matched = False
+        for branch in any_of:
+            branch_errors: list[dict[str, Any]] = []
+            validate_json_schema(value, branch, path, branch_errors)
+            if not branch_errors:
+                any_of_matched = True
+                break
+        if not any_of_matched:
+            append_argument_validation_error(
+                errors,
+                path,
+                "anyOf",
+                f"{path} must match at least one allowed shape",
+            )
+            return
+
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        one_of_matches = 0
+        for branch in one_of:
+            branch_errors = []
+            validate_json_schema(value, branch, path, branch_errors)
+            if not branch_errors:
+                one_of_matches += 1
+        if one_of_matches != 1:
+            append_argument_validation_error(
+                errors,
+                path,
+                "oneOf",
+                f"{path} must match exactly one allowed shape",
+            )
+            return
+
+    expected_type = schema.get("type")
+    if expected_type is not None:
+        expected_types = expected_type if isinstance(expected_type, list) else [expected_type]
+        if not any(
+            isinstance(item, str) and json_schema_type_matches(value, item)
+            for item in expected_types
+        ):
+            append_argument_validation_error(
+                errors,
+                path,
+                "type",
+                f"{path} must be {json_schema_type_label(expected_type)}",
+            )
+            return
+
+    enum_values = schema.get("enum")
+    if isinstance(enum_values, list) and not any(
+        type(value) is type(candidate) and value == candidate
+        for candidate in enum_values
+    ):
+        append_argument_validation_error(
+            errors,
+            path,
+            "enum",
+            f"{path} must be one of the allowed values",
+        )
+
+    if "const" in schema and (
+        type(value) is not type(schema["const"])
+        or value != schema["const"]
+    ):
+        append_argument_validation_error(
+            errors,
+            path,
+            "const",
+            f"{path} must use the required constant value",
+        )
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for name in required:
+                if isinstance(name, str) and name not in value:
+                    append_argument_validation_error(
+                        errors,
+                        f"{path}.{name}",
+                        "required",
+                        f"{name} is required",
+                    )
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            if schema.get("additionalProperties") is False:
+                for name in value:
+                    if name not in properties:
+                        append_argument_validation_error(
+                            errors,
+                            f"{path}.{name}",
+                            "additionalProperties",
+                            f"{name} is not allowed",
+                        )
+            for name, child_schema in properties.items():
+                if name in value:
+                    validate_json_schema(
+                        value[name],
+                        child_schema,
+                        f"{path}.{name}",
+                        errors,
+                    )
+
+    if isinstance(value, list):
+        minimum_items = schema.get("minItems")
+        maximum_items = schema.get("maxItems")
+        if isinstance(minimum_items, int) and len(value) < minimum_items:
+            append_argument_validation_error(
+                errors,
+                path,
+                "minItems",
+                f"{path} must contain at least {minimum_items} items",
+            )
+        if isinstance(maximum_items, int) and len(value) > maximum_items:
+            append_argument_validation_error(
+                errors,
+                path,
+                "maxItems",
+                f"{path} must contain at most {maximum_items} items",
+            )
+        if schema.get("uniqueItems") is True:
+            encoded_items = [
+                json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                for item in value
+            ]
+            if len(encoded_items) != len(set(encoded_items)):
+                append_argument_validation_error(
+                    errors,
+                    path,
+                    "uniqueItems",
+                    f"{path} must not contain duplicate items",
+                )
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                validate_json_schema(item, item_schema, f"{path}[{index}]", errors)
+
+    if isinstance(value, str):
+        minimum_length = schema.get("minLength")
+        maximum_length = schema.get("maxLength")
+        if isinstance(minimum_length, int) and len(value) < minimum_length:
+            append_argument_validation_error(
+                errors,
+                path,
+                "minLength",
+                f"{path} must contain at least {minimum_length} characters",
+            )
+        if isinstance(maximum_length, int) and len(value) > maximum_length:
+            append_argument_validation_error(
+                errors,
+                path,
+                "maxLength",
+                f"{path} must contain at most {maximum_length} characters",
+            )
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            append_argument_validation_error(
+                errors,
+                path,
+                "pattern",
+                f"{path} does not match the required pattern",
+            )
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        exclusive_minimum = schema.get("exclusiveMinimum")
+        exclusive_maximum = schema.get("exclusiveMaximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            append_argument_validation_error(
+                errors,
+                path,
+                "minimum",
+                f"{path} must be greater than or equal to {minimum}",
+            )
+        if isinstance(maximum, (int, float)) and value > maximum:
+            append_argument_validation_error(
+                errors,
+                path,
+                "maximum",
+                f"{path} must be less than or equal to {maximum}",
+            )
+        if isinstance(exclusive_minimum, (int, float)) and value <= exclusive_minimum:
+            append_argument_validation_error(
+                errors,
+                path,
+                "exclusiveMinimum",
+                f"{path} must be greater than {exclusive_minimum}",
+            )
+        if isinstance(exclusive_maximum, (int, float)) and value >= exclusive_maximum:
+            append_argument_validation_error(
+                errors,
+                path,
+                "exclusiveMaximum",
+                f"{path} must be less than {exclusive_maximum}",
+            )
+
+
+def validate_word_semantics(
+    name: str,
+    arguments: Any,
+    errors: list[dict[str, Any]],
+) -> None:
+    if not isinstance(arguments, dict):
+        return
+
+    def semantic_error(path: str, message: str) -> None:
+        append_argument_validation_error(errors, f"arguments.{path}", "semantic", message)
+
+    if name == "word_manage_section" and arguments.get("action", "configure") == "create":
+        if "paragraphIndex" not in arguments:
+            semantic_error("paragraphIndex", "paragraphIndex is required when action is create")
+
+    if name == "word_format_table_advanced":
+        if "repeatHeader" in arguments and "row" not in arguments:
+            semantic_error("row", "row is required when repeatHeader is provided")
+
+    if name == "word_manage_fields" and arguments.get("action") == "add":
+        instruction = arguments.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            semantic_error("instruction", "instruction is required when action is add")
+
+    if name == "word_insert_page_break":
+        has_target = (
+            arguments.get("all") is True
+            or arguments.get("current") is True
+            or (
+                isinstance(arguments.get("paragraphIndexes"), list)
+                and bool(arguments["paragraphIndexes"])
+            )
+            or (
+                isinstance(arguments.get("search"), str)
+                and bool(arguments["search"])
+            )
+        )
+        if not has_target:
+            semantic_error(
+                "target",
+                "paragraphIndexes, search, all=true, or current=true is required",
+            )
+
+    if name == "word_edit_table":
+        action = arguments.get("action")
+        required_by_action = {
+            "removeRow": ("row",),
+            "removeColumn": ("column",),
+            "splitCell": ("row", "column"),
+            "mergeCells": ("rowStart", "rowEnd", "columnStart", "columnEnd"),
+        }
+        for field in required_by_action.get(action, ()):
+            if field not in arguments:
+                semantic_error(field, f"{field} is required when action is {action}")
+        if action == "mergeCells" and all(
+            isinstance(arguments.get(field), int)
+            and not isinstance(arguments.get(field), bool)
+            for field in ("rowStart", "rowEnd", "columnStart", "columnEnd")
+        ):
+            if arguments["rowStart"] > arguments["rowEnd"]:
+                semantic_error("rowEnd", "rowEnd must be greater than or equal to rowStart")
+            if arguments["columnStart"] > arguments["columnEnd"]:
+                semantic_error(
+                    "columnEnd",
+                    "columnEnd must be greater than or equal to columnStart",
+                )
+
+    if name == "word_set_header_footer" and arguments.get("action", "set") == "set":
+        content_fields = {
+            "text",
+            "pageNumber",
+            "pagesCount",
+            "fields",
+            "fontSize",
+            "fontFamily",
+            "bold",
+            "italic",
+            "color",
+            "align",
+        }
+        if not any(field in arguments for field in content_fields):
+            semantic_error(
+                "action",
+                "set requires text, a page field, fields, or formatting",
+            )
+
+
+def validate_word_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    validation_errors: list[dict[str, Any]] = []
+    schemas = ARGUMENT_SCHEMAS_BY_EDITOR["word"]
+    for index, call in enumerate(tool_calls):
+        name = str(call.get("name") or "")
+        arguments = call.get("arguments", {})
+        call_errors: list[dict[str, Any]] = []
+        schema = schemas.get(name)
+        if schema is not None:
+            validate_json_schema(arguments, schema, "arguments", call_errors)
+        validate_word_semantics(name, arguments, call_errors)
+        for error in call_errors:
+            validation_errors.append(
+                {
+                    "toolCallIndex": index,
+                    "tool": name,
+                    **error,
+                }
+            )
+    return validation_errors
+
+
+def require_valid_word_tool_calls(tool_calls: list[dict[str, Any]]) -> None:
+    validation_errors = validate_word_tool_calls(tool_calls)
+    if validation_errors:
+        raise BridgeError(
+            422,
+            "INVALID_TOOL_ARGUMENTS",
+            "Word 工具参数校验失败",
+            {
+                "validationErrors": validation_errors,
+                "completedToolCalls": 0,
+                "partialMutationPossible": False,
+            },
+        )
 
 
 def compact_json(value: Any) -> str:
@@ -443,6 +826,7 @@ EDITOR_ERROR_HTTP_STATUS = {
     "IMAGE_TOO_LARGE": 413,
     "UNSUPPORTED_IMAGE_FORMAT": 415,
     "INVALID_ARGUMENTS": 422,
+    "INVALID_TOOL_ARGUMENTS": 422,
     "INVALID_TARGET": 422,
     "INVALID_IMAGE_SOURCE": 422,
     "EXECUTION_FAILED": 500,
@@ -1488,6 +1872,78 @@ def bridge_authenticate_page_locked(
     return session_id, session
 
 
+def bridge_attach(payload: dict[str, Any]) -> dict[str, Any]:
+    file_name = str(payload.get("fileName", "")).strip()
+    editor_type = str(payload.get("editorType", "")).strip()
+    if editor_type not in DOCUMENT_TYPES.values():
+        raise BridgeError(
+            422,
+            "INVALID_ARGUMENTS",
+            "editorType 必须是 word、cell 或 slide",
+        )
+
+    file_type, _ = document_file_identity(file_name)
+    expected_editor_type = DOCUMENT_TYPES[file_type]
+    if editor_type != expected_editor_type:
+        raise BridgeError(
+            409,
+            "EDITOR_MISMATCH",
+            "文件类型与目标编辑器类型不一致",
+        )
+
+    deadline = time.time() + BRIDGE_DISCOVERY_WAIT_SECONDS
+    selected_id = ""
+    selected: dict[str, Any] | None = None
+    with BRIDGE_CONDITION:
+        while True:
+            bridge_cleanup_locked()
+            candidates = [
+                (session_id, session)
+                for session_id, session in BRIDGE_SESSIONS.items()
+                if session.get("authoritative")
+                and bool((session.get("state") or {}).get("ready"))
+                and session.get("identity")
+                and session["identity"][0] == file_name
+                and session["identity"][1] == file_type
+                and session["identity"][2] == editor_type
+            ]
+            if candidates:
+                candidates.sort(
+                    key=lambda item: int(item[1].get("generation") or 0),
+                    reverse=True,
+                )
+                selected_id, selected = candidates[0]
+                break
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            BRIDGE_CONDITION.wait(timeout=remaining)
+
+        if selected is None:
+            raise BridgeError(
+                503,
+                "NO_ACTIVE_EDITOR",
+                "当前文档没有已就绪的 ai-bridge 编辑器页面",
+            )
+        public_session = bridge_public_session(selected_id, selected)
+        identity = selected["identity"]
+
+    binding_claims = {
+        "fileName": identity[0],
+        "fileType": identity[1],
+        "editorType": identity[2],
+        "userId": identity[3],
+        "authKind": "binding",
+    }
+    binding_token, expires_at = bridge_binding_token(binding_claims)
+    return {
+        "ok": True,
+        "bindingToken": binding_token,
+        "bindingExpiresAt": expires_at,
+        "session": public_session,
+    }
+
+
 def bridge_sessions(claims: dict[str, Any]) -> dict[str, Any]:
     deadline = time.time() + BRIDGE_DISCOVERY_WAIT_SECONDS
     with BRIDGE_CONDITION:
@@ -1608,6 +2064,8 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         argument_limit = IMAGE_MAX_REQUEST_BYTES if name in IMAGE_SOURCE_TOOLS else 250000
         if len(compact_json(arguments)) > argument_limit:
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"arguments 超过 {argument_limit} 字符")
+        if ((session.get("state") or {}).get("editorType")) == "word":
+            require_valid_word_tool_calls([{"name": name, "arguments": arguments}])
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
@@ -1623,6 +2081,8 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         )
         if len(compact_json(tool_calls)) > arguments_limit:
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"toolCalls 超过 {arguments_limit} 字符")
+        if ((session.get("state") or {}).get("editorType")) == "word":
+            require_valid_word_tool_calls(tool_calls)
         params = {"toolCalls": tool_calls}
 
     return {
@@ -2693,6 +3153,21 @@ class Handler(BaseHTTPRequestHandler):
                 if request_path in ("/images/import", "/bridge/execute")
                 else 2_000_000
             )
+            content_type = (
+                self.headers.get("Content-Type", "")
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if (
+                request_path == "/bridge/attach"
+                and content_type != "application/json"
+            ):
+                raise BridgeError(
+                    415,
+                    "UNSUPPORTED_MEDIA_TYPE",
+                    "Content-Type 必须是 application/json",
+                )
             payload = read_json(self, max_bytes)
             if request_path == "/images/import":
                 json_response(
@@ -2712,6 +3187,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if request_path == "/bridge/unregister":
                 json_response(self, 200, bridge_unregister(payload))
+                return
+            if request_path == "/bridge/attach":
+                json_response(self, 200, bridge_attach(payload))
                 return
             if request_path == "/bridge/execute":
                 json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
