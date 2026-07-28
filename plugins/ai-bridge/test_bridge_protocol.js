@@ -580,6 +580,23 @@ function createWordBridgeHarness(options = {}) {
     documentText = documentParagraphs.map(paragraph => paragraph.text).join("\n");
   }
 
+  function createTextRun(value) {
+    return {
+      text: String(value),
+      style: null,
+      GetClassType() { return "run"; },
+      SetStyle(style) { this.style = style; return true; },
+      SetFontSize(size) { this.fontSize = size; return true; },
+      SetFontFamily(family) { this.fontFamily = family; return true; },
+      SetBold(bold) { this.bold = Boolean(bold); return true; },
+      SetItalic(italic) { this.italic = Boolean(italic); return true; },
+      SetUnderline(underline) { this.underline = Boolean(underline); return true; },
+      SetColor(color) { this.color = color; return true; },
+      SetHighlight(color) { this.highlightColor = color; return true; },
+      SetSpacing(spacing) { this.characterSpacing = spacing; return true; },
+    };
+  }
+
   function createParagraph(text = "") {
     const paragraph = {
       text: String(text),
@@ -593,19 +610,14 @@ function createWordBridgeHarness(options = {}) {
       GetParentTable() { return this.parentTable; },
       GetParentContentControl() { return this.parentContentControl; },
       AddText(value) {
-        const run = {
-          text: String(value),
-          style: null,
-          GetClassType() { return "run"; },
-          SetStyle(style) { this.style = style; return true; },
-          GetRange() {
-            return {
-              AddField(instruction) {
-                fieldInstructions.push(String(instruction));
-                return true;
-              },
-            };
-          },
+        const run = createTextRun(value);
+        run.GetRange = function () {
+          return {
+            AddField(instruction) {
+              fieldInstructions.push(String(instruction));
+              return true;
+            },
+          };
         };
         this.runs.push(run);
         this.text += run.text;
@@ -616,12 +628,7 @@ function createWordBridgeHarness(options = {}) {
         this.text = String(value);
         this.runs = [];
         if (this.text) {
-          this.runs.push({
-            text: this.text,
-            style: null,
-            GetClassType() { return "run"; },
-            SetStyle(style) { this.style = style; return true; },
-          });
+          this.runs.push(createTextRun(this.text));
         }
         syncDocumentText();
         return this.runs[0] || {};
@@ -635,6 +642,8 @@ function createWordBridgeHarness(options = {}) {
       },
       GetElementsCount() { return this.runs.length; },
       GetElement(index) { return this.runs[index] || null; },
+      SetJc(value) { this.align = value; return true; },
+      SetStyle(value) { this.style = value; return true; },
       SetSpacingBefore(value) { this.spacingBefore = value; return true; },
       SetSpacingAfter(value) { this.spacingAfter = value; return true; },
       SetSpacingLine(value, rule) { this.spacingLine = { value, rule }; return true; },
@@ -662,12 +671,7 @@ function createWordBridgeHarness(options = {}) {
       paragraph.GetPosInParent = function () { return documentElements.indexOf(this); };
     }
     if (paragraph.text) {
-      paragraph.runs.push({
-        text: paragraph.text,
-        style: null,
-        GetClassType() { return "run"; },
-        SetStyle(style) { this.style = style; return true; },
-      });
+      paragraph.runs.push(createTextRun(paragraph.text));
     }
     return paragraph;
   }
@@ -703,10 +707,19 @@ function createWordBridgeHarness(options = {}) {
         let cellParagraphs = [createParagraph()];
         cellParagraphs[0].parentTable = table;
         const cell = {
+          backgroundColor: null,
+          verticalAlign: null,
+          width: null,
+          nestedTables: [],
           GetContent() {
             return {
               GetAllParagraphs() { return cellParagraphs; },
               GetElement(index) { return cellParagraphs[index] || null; },
+              Push(element) {
+                cell.nestedTables.push(element);
+                element.parentTable = table;
+                return true;
+              },
             };
           },
           SetText(value) {
@@ -716,6 +729,9 @@ function createWordBridgeHarness(options = {}) {
             syncDocumentText();
             return paragraph.runs[0] || {};
           },
+          SetBackgroundColor(value) { this.backgroundColor = value; return true; },
+          SetVerticalAlign(value) { this.verticalAlign = value; return true; },
+          SetWidth(kind, value) { this.width = { kind, value }; return true; },
         };
         row.cells.push(cell);
       }
@@ -1096,7 +1112,7 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const { hostWindow } = createHarness();
   await hostWindow.aiBridge.ready({ timeoutMs: 1000 });
 
-  assert.equal(hostWindow.aiBridge.version, "0.4.0");
+  assert.equal(hostWindow.aiBridge.version, "0.4.1");
   assert.equal(hostWindow.aiBridge.editorType, "word");
   assert.equal(hostWindow.aiBridge.context.documentKey, "doc-key-v1");
   assert.ok(hostWindow.aiBridge.capabilities.tools.includes("word_inspect"));
@@ -1641,6 +1657,34 @@ test("public Word contract exposes positioned tables and inline content replacem
     publicContract.tools.word.word_insert_page_break.properties.all.type,
     "boolean",
   );
+});
+
+test("public table contracts expose scalar and formatted cell inputs", () => {
+  assert.deepEqual(
+    publicContract.$defs.tableCellScalar.type,
+    ["string", "number", "boolean", "null"],
+  );
+  assert.deepEqual(publicContract.$defs.wordTableCell.required, ["text"]);
+  assert.equal(publicContract.$defs.wordTableCell.additionalProperties, false);
+  assert.equal(publicContract.$defs.wordTableCell.properties.text.type, "string");
+  assert.equal(publicContract.$defs.wordTableCell.properties.textColor, undefined);
+  assert.deepEqual(publicContract.$defs.slideTableCell.required, ["text"]);
+
+  const wordCell = publicContract.tools.word.word_add_table
+    .properties.data.items.items.anyOf;
+  const nestedWordCell = publicContract.tools.word.word_add_nested_table
+    .properties.data.items.items.anyOf;
+  const slideCell = publicContract.tools.slide.slides_add_table
+    .properties.data.items.items.anyOf;
+  assert.deepEqual(wordCell, [
+    { $ref: "#/$defs/tableCellScalar" },
+    { $ref: "#/$defs/wordTableCell" },
+  ]);
+  assert.deepEqual(nestedWordCell, wordCell);
+  assert.deepEqual(slideCell, [
+    { $ref: "#/$defs/tableCellScalar" },
+    { $ref: "#/$defs/slideTableCell" },
+  ]);
 });
 
 test("public Word contract makes paragraph point units explicit", () => {
@@ -2787,6 +2831,115 @@ test("word bridge passes a list value as the default selection when creating a c
     ],
     selected: "b",
   }]);
+});
+
+test("word bridge writes scalar and formatted cells in regular and nested tables", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["正文"] });
+  const result = await harness.bridge.execute([
+    {
+      name: "word_add_table",
+      arguments: {
+        rows: 2,
+        cols: 3,
+        fontFamily: "宋体",
+        fontSize: 9,
+        data: [
+          [
+            {
+              text: "指标",
+              fontFamily: "微软雅黑",
+              bold: true,
+              backgroundColor: "#E8EEF5",
+              align: "center",
+              verticalAlign: "center",
+              widthPercent: 40,
+            },
+            42,
+            true,
+          ],
+          [null, "嵌套目标"],
+        ],
+      },
+    },
+    {
+      name: "word_add_nested_table",
+      arguments: {
+        tableIndex: 1,
+        row: 2,
+        column: 1,
+        rows: 1,
+        cols: 2,
+        fontFamily: "宋体",
+        data: [[
+          { text: "子标题", bold: true, color: "#2E74B5" },
+          "子值",
+        ]],
+      },
+    },
+  ]);
+
+  const table = harness.tables[0];
+  const formattedCell = table.GetRow(0).GetCell(0);
+  const formattedParagraph = formattedCell.GetContent().GetAllParagraphs()[0];
+  const formattedRun = formattedParagraph.runs[0];
+  const inheritedRun = table.GetRow(0).GetCell(1).GetContent().GetAllParagraphs()[0].runs[0];
+  const nestedTable = table.GetRow(1).GetCell(0).nestedTables[0];
+  const nestedRun = nestedTable.GetRow(0).GetCell(0).GetContent().GetAllParagraphs()[0].runs[0];
+
+  assert.equal(result.changed, 7);
+  assert.equal(formattedParagraph.text, "指标");
+  assert.equal(formattedRun.fontFamily, "微软雅黑");
+  assert.equal(formattedRun.bold, true);
+  assert.equal(formattedCell.backgroundColor, "#E8EEF5");
+  assert.equal(formattedCell.verticalAlign, "center");
+  assert.deepEqual(formattedCell.width, { kind: "percent", value: 40 });
+  assert.equal(formattedParagraph.align, "center");
+  assert.equal(inheritedRun.fontFamily, "宋体");
+  assert.equal(inheritedRun.fontSize, 18);
+  assert.equal(table.GetRow(0).GetCell(2).GetContent().GetAllParagraphs()[0].text, "true");
+  assert.equal(table.GetRow(1).GetCell(0).GetContent().GetAllParagraphs()[0].text, "");
+  assert.equal(table.GetRow(1).GetCell(2).GetContent().GetAllParagraphs()[0].text, "");
+  assert.equal(nestedRun.text, "子标题");
+  assert.equal(nestedRun.bold, true);
+  assert.equal(nestedRun.color, "#2E74B5");
+  assert.doesNotMatch(harness.text, /\[object Object\]/);
+});
+
+test("word bridge rejects invalid formatted table cells before mutation", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["正文"] });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_add_table",
+      arguments: {
+        rows: 1,
+        cols: 4,
+        data: [[
+          { text: "错误颜色字段", textColor: "#FFFFFF" },
+          { bold: true },
+          { text: { nested: true } },
+          { text: "错误单位", leftIndent: 720 },
+        ]],
+      },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.deepEqual(
+        Array.from(error.details.validationErrors, item => item.path),
+        [
+          "arguments.data[0][0].textColor",
+          "arguments.data[0][1].text",
+          "arguments.data[0][2].text",
+          "arguments.data[0][3].leftIndent",
+        ],
+      );
+      return true;
+    },
+  );
+  assert.equal(harness.historyPoints, 0);
+  assert.equal(harness.createdTables.length, 0);
 });
 
 test("word bridge inserts tables at top-level paragraph, search, table, cursor, and end positions", async () => {

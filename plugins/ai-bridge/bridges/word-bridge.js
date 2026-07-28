@@ -22,16 +22,167 @@
     return (call && (call.arguments || call.args)) || {};
   }
 
+  const WORD_TABLE_CELL_FIELD_TYPES = {
+    text: "string",
+    fontSize: "number",
+    fontFamily: "string",
+    bold: "boolean",
+    italic: "boolean",
+    underline: "boolean",
+    color: "color",
+    highlightColor: "color",
+    characterSpacing: "number",
+    characterSpacingPt: "number",
+    backgroundColor: "color",
+    align: "string",
+    spacingBefore: "number",
+    spacingAfter: "number",
+    spacingBeforePt: "number",
+    spacingAfterPt: "number",
+    lineSpacing: "number",
+    lineRule: "string",
+    firstLineIndent: "number",
+    leftIndent: "number",
+    rightIndent: "number",
+    firstLineIndentPt: "number",
+    leftIndentPt: "number",
+    rightIndentPt: "number",
+    verticalAlign: "string",
+    widthPercent: "number",
+  };
+  const WORD_TABLE_CELL_ENUMS = {
+    align: ["left", "center", "right", "both"],
+    lineRule: ["auto", "exact", "atLeast"],
+    verticalAlign: ["top", "center", "bottom"],
+  };
+
+  function isPlainObject(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function isTableCellScalar(value) {
+    return value === undefined
+      || value === null
+      || typeof value === "string"
+      || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value));
+  }
+
+  function collectTableDataValidationErrors(index, name, data, add) {
+    if (data === undefined) return;
+    if (!Array.isArray(data)) {
+      add(index, name, "data", "data must be an array of rows", "type");
+      return;
+    }
+    for (let rowIndex = 0; rowIndex < data.length; rowIndex += 1) {
+      const row = data[rowIndex];
+      if (!Array.isArray(row)) {
+        add(index, name, "data[" + rowIndex + "]", "table row must be an array", "type");
+        continue;
+      }
+      for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+        const cell = row[columnIndex];
+        const cellPath = "data[" + rowIndex + "][" + columnIndex + "]";
+        if (isTableCellScalar(cell)) continue;
+        if (!isPlainObject(cell)) {
+          add(index, name, cellPath, "table cell must be a scalar or formatting object", "type");
+          continue;
+        }
+        if (!Object.prototype.hasOwnProperty.call(cell, "text")) {
+          add(index, name, cellPath + ".text", "formatted table cell requires text", "required");
+        } else if (typeof cell.text !== "string") {
+          add(index, name, cellPath + ".text", "formatted table cell text must be a string", "type");
+        }
+        for (const field of Object.keys(cell)) {
+          if (field === "text") continue;
+          const expected = WORD_TABLE_CELL_FIELD_TYPES[field];
+          if (!expected) {
+            add(index, name, cellPath + "." + field, field + " is not allowed", "additionalProperties");
+            continue;
+          }
+          const value = cell[field];
+          if (expected === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+            add(index, name, cellPath + "." + field, field + " must be a finite number", "type");
+          } else if (expected === "boolean" && typeof value !== "boolean") {
+            add(index, name, cellPath + "." + field, field + " must be a boolean", "type");
+          } else if (expected === "string" && typeof value !== "string") {
+            add(index, name, cellPath + "." + field, field + " must be a string", "type");
+          } else if (
+            expected === "color"
+            && (typeof value !== "string" || !/^#?[0-9A-Fa-f]{6}$/.test(value))
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be a six-digit hex color", "pattern");
+          }
+          if (
+            WORD_TABLE_CELL_ENUMS[field]
+            && typeof value === "string"
+            && WORD_TABLE_CELL_ENUMS[field].indexOf(value) === -1
+          ) {
+            add(index, name, cellPath + "." + field, field + " has an unsupported value", "enum");
+          }
+          if (
+            field === "widthPercent"
+            && typeof value === "number"
+            && (value < 1 || value > 100)
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be between 1 and 100", "range");
+          }
+        }
+        const pointFieldPairs = [
+          ["characterSpacingPt", "characterSpacing", false],
+          ["spacingBeforePt", "spacingBefore", false],
+          ["spacingAfterPt", "spacingAfter", false],
+          ["firstLineIndentPt", "firstLineIndent", true],
+          ["leftIndentPt", "leftIndent", true],
+          ["rightIndentPt", "rightIndent", true],
+        ];
+        for (const pair of pointFieldPairs) {
+          const explicitField = pair[0];
+          const legacyField = pair[1];
+          if (
+            Object.prototype.hasOwnProperty.call(cell, explicitField)
+            && Object.prototype.hasOwnProperty.call(cell, legacyField)
+          ) {
+            add(
+              index,
+              name,
+              cellPath + "." + explicitField,
+              explicitField + " and " + legacyField + " cannot both be provided",
+              "semantic"
+            );
+          }
+          const legacyValue = cell[legacyField];
+          if (
+            pair[2]
+            && typeof legacyValue === "number"
+            && Number.isFinite(legacyValue)
+            && Math.abs(legacyValue) >= 300
+            && Math.abs(legacyValue) <= 2880
+            && Math.abs(legacyValue % 20) < 0.000001
+          ) {
+            add(
+              index,
+              name,
+              cellPath + "." + legacyField,
+              legacyField + " is point-valued and appears to contain twips",
+              "semantic"
+            );
+          }
+        }
+      }
+    }
+  }
+
   function collectStaticValidationErrors(toolCalls) {
     const errors = [];
     const calls = Array.isArray(toolCalls) ? toolCalls : [];
 
-    function add(index, name, path, message) {
+    function add(index, name, path, message, keyword) {
       errors.push({
         toolCallIndex: index,
         tool: String(name || ""),
         path: "arguments." + path,
-        keyword: "semantic",
+        keyword: keyword || "semantic",
         message,
       });
     }
@@ -41,6 +192,10 @@
       const name = String(call.name || "");
       const args = getArgs(call);
       if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+
+      if (name === "word_add_table" || name === "word_add_nested_table") {
+        collectTableDataValidationErrors(index, name, args.data, add);
+      }
 
       if (name === "word_manage_section" && String(args.action || "configure") === "create") {
         if (args.paragraphIndex === undefined) {
@@ -446,6 +601,31 @@
                 if (args[keys[index]] !== undefined) return true;
               }
               return false;
+            }
+
+            function tableCellSpec(value, tableArgs) {
+              var format = {};
+              var defaultKeys = ["fontSize", "fontFamily", "bold", "italic", "color"];
+              for (var defaultIndex = 0; defaultIndex < defaultKeys.length; defaultIndex += 1) {
+                var defaultKey = defaultKeys[defaultIndex];
+                if (tableArgs[defaultKey] !== undefined) format[defaultKey] = tableArgs[defaultKey];
+              }
+              if (value && typeof value === "object" && !Array.isArray(value)) {
+                for (var cellKey in value) {
+                  if (cellKey !== "text" && Object.prototype.hasOwnProperty.call(value, cellKey)) {
+                    format[cellKey] = value[cellKey];
+                  }
+                }
+                return { text: String(value.text), format: format };
+              }
+              return { text: value === null || value === undefined ? "" : String(value), format: format };
+            }
+
+            function setTableCellValue(cell, value, tableArgs) {
+              var spec = tableCellSpec(value, tableArgs);
+              var run = cell.SetText(spec.text);
+              applyTextFormat(run, spec.format);
+              applyCellFormat(cell, spec.format);
             }
 
             function commandArgs(call) {
@@ -2500,8 +2680,7 @@
                     for (var colIndex = 0; colIndex < cols; colIndex += 1) {
                       if (!data[rowIndex] || data[rowIndex][colIndex] === undefined) continue;
                       var cell = table.GetRow(rowIndex).GetCell(colIndex);
-                      var cellRun = cell.SetText(String(data[rowIndex][colIndex]));
-                      applyTextFormat(cellRun, args);
+                      setTableCellValue(cell, data[rowIndex][colIndex], args);
                     }
                   }
                   if (args.title && typeof table.SetTableTitle === "function") table.SetTableTitle(String(args.title));
@@ -2860,8 +3039,7 @@
                     for (var nestedColumnIndex = 0; nestedColumnIndex < nestedCols; nestedColumnIndex += 1) {
                       if (!nestedData[nestedRowIndex] || nestedData[nestedRowIndex][nestedColumnIndex] === undefined) continue;
                       var nestedCell = nestedTable.GetRow(nestedRowIndex).GetCell(nestedColumnIndex);
-                      var nestedRun = nestedCell.SetText(String(nestedData[nestedRowIndex][nestedColumnIndex]));
-                      applyTextFormat(nestedRun, args);
+                      setTableCellValue(nestedCell, nestedData[nestedRowIndex][nestedColumnIndex], args);
                     }
                   }
                   var parentContent = parentCellEntry.cell.GetContent();

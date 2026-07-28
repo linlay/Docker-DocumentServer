@@ -178,7 +178,7 @@ WORD_TOOL_DESCRIPTIONS = {
     "word_set_tabs": "设置 Word 段落制表位",
     "word_set_numbering": "设置 Word 段落的高级编号属性",
     "word_format_table_advanced": "设置 Word 表格的高级布局、边框、间距和单元格属性",
-    "word_add_nested_table": "在 Word 表格单元格中添加嵌套表格",
+    "word_add_nested_table": "在 Word 表格单元格中添加嵌套表格；data 单元格支持标量或含 text 的格式对象",
     "word_manage_drawing": "定位并更新或删除 Word 绘图对象",
     "word_add_shape": "在 Word 中添加带可选文本的形状并设置尺寸、样式、旋转和环绕",
     "word_add_chart": "在 Word 中添加图表并设置数据和样式",
@@ -202,7 +202,7 @@ WORD_TOOL_DESCRIPTIONS = {
     "word_navigate": "只读跳转到首页、末页、指定页、相对页或搜索命中位置",
     "word_scroll": "只读按页向上或向下滚动 Word 视图",
     "word_scale_font": "按比例缩放 Word 全文字号；0.8 表示缩小 20%",
-    "word_add_table": "在 Word 文末创建并填充表格",
+    "word_add_table": "创建并填充 Word 表格；data 单元格支持标量或含 text 的格式对象",
     "word_set_table_cell": "设置指定 Word 表格单元格的文本和格式",
     "word_format_table": "设置指定 Word 表格的宽度、样式、外观和单元格格式",
     "word_edit_table": "增删 Word 表格行列，或合并、拆分、清空、删除表格",
@@ -314,7 +314,7 @@ SLIDE_TOOL_DESCRIPTIONS = {
     "slides_set_transition": "设置或清除指定幻灯片的切换效果和计时",
     "slides_inspect_animations": "只读检查 PPT 对象动画时间线、序列和计时",
     "slides_manage_animation": "添加、更新、排序、删除或清空 PPT 对象动画",
-    "slides_add_table": "在指定幻灯片添加表格",
+    "slides_add_table": "在指定幻灯片添加表格；data 单元格支持标量或含 text 的格式对象",
     "slides_set_table_cell": "设置 PPT 表格单元格内容和格式",
     "slides_format_table": "设置 PPT 表格整体及单元格格式",
     "slides_edit_table": "增删 PPT 表格行列，或合并、拆分和删除表格",
@@ -447,19 +447,35 @@ def validate_json_schema(
     any_of = schema.get("anyOf")
     if isinstance(any_of, list) and any_of:
         any_of_matched = False
+        any_of_failures: list[tuple[Any, list[dict[str, Any]]]] = []
         for branch in any_of:
             branch_errors: list[dict[str, Any]] = []
             validate_json_schema(value, branch, path, branch_errors)
             if not branch_errors:
                 any_of_matched = True
                 break
+            any_of_failures.append((branch, branch_errors))
         if not any_of_matched:
-            append_argument_validation_error(
-                errors,
-                path,
-                "anyOf",
-                f"{path} must match at least one allowed shape",
-            )
+            matching_type_failures = []
+            for branch, branch_errors in any_of_failures:
+                expected_type = branch.get("type") if isinstance(branch, dict) else None
+                expected_types = (
+                    expected_type if isinstance(expected_type, list) else [expected_type]
+                )
+                if any(
+                    isinstance(item, str) and json_schema_type_matches(value, item)
+                    for item in expected_types
+                ):
+                    matching_type_failures.append(branch_errors)
+            if matching_type_failures:
+                errors.extend(min(matching_type_failures, key=len))
+            else:
+                append_argument_validation_error(
+                    errors,
+                    path,
+                    "anyOf",
+                    f"{path} must match at least one allowed shape",
+                )
             return
 
     one_of = schema.get("oneOf")
@@ -735,17 +751,22 @@ def validate_word_semantics(
             )
 
 
-def validate_word_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def validate_editor_tool_calls(
+    editor: str,
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     validation_errors: list[dict[str, Any]] = []
-    schemas = ARGUMENT_SCHEMAS_BY_EDITOR["word"]
+    schemas = ARGUMENT_SCHEMAS_BY_EDITOR[editor]
     for index, call in enumerate(tool_calls):
         name = str(call.get("name") or "")
         arguments = call.get("arguments", {})
         call_errors: list[dict[str, Any]] = []
         schema = schemas.get(name)
-        if schema is not None:
+        should_validate_schema = editor == "word" or name == "slides_add_table"
+        if schema is not None and should_validate_schema:
             validate_json_schema(arguments, schema, "arguments", call_errors)
-        validate_word_semantics(name, arguments, call_errors)
+        if editor == "word":
+            validate_word_semantics(name, arguments, call_errors)
         for error in call_errors:
             validation_errors.append(
                 {
@@ -757,19 +778,34 @@ def validate_word_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str,
     return validation_errors
 
 
-def require_valid_word_tool_calls(tool_calls: list[dict[str, Any]]) -> None:
-    validation_errors = validate_word_tool_calls(tool_calls)
+def validate_word_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return validate_editor_tool_calls("word", tool_calls)
+
+
+def require_valid_editor_tool_calls(
+    editor: str,
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    validation_errors = validate_editor_tool_calls(editor, tool_calls)
     if validation_errors:
+        editor_label = {"word": "Word", "slide": "Slides", "cell": "Sheets"}.get(
+            editor,
+            editor,
+        )
         raise BridgeError(
             422,
             "INVALID_TOOL_ARGUMENTS",
-            "Word 工具参数校验失败",
+            f"{editor_label} 工具参数校验失败",
             {
                 "validationErrors": validation_errors,
                 "completedToolCalls": 0,
                 "partialMutationPossible": False,
             },
         )
+
+
+def require_valid_word_tool_calls(tool_calls: list[dict[str, Any]]) -> None:
+    require_valid_editor_tool_calls("word", tool_calls)
 
 
 def compact_json(value: Any) -> str:
@@ -2064,8 +2100,12 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         argument_limit = IMAGE_MAX_REQUEST_BYTES if name in IMAGE_SOURCE_TOOLS else 250000
         if len(compact_json(arguments)) > argument_limit:
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"arguments 超过 {argument_limit} 字符")
-        if ((session.get("state") or {}).get("editorType")) == "word":
-            require_valid_word_tool_calls([{"name": name, "arguments": arguments}])
+        editor_type = (session.get("state") or {}).get("editorType")
+        if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
+            require_valid_editor_tool_calls(
+                editor_type,
+                [{"name": name, "arguments": arguments}],
+            )
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
@@ -2081,8 +2121,9 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         )
         if len(compact_json(tool_calls)) > arguments_limit:
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"toolCalls 超过 {arguments_limit} 字符")
-        if ((session.get("state") or {}).get("editorType")) == "word":
-            require_valid_word_tool_calls(tool_calls)
+        editor_type = (session.get("state") or {}).get("editorType")
+        if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
+            require_valid_editor_tool_calls(editor_type, tool_calls)
         params = {"toolCalls": tool_calls}
 
     return {

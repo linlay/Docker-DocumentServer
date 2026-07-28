@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.4.0`
+- Version: `0.4.1`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev30",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.1-rev1",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -128,7 +128,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.1-rev1"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -137,11 +137,13 @@ in `INTEGRATION.zh-CN.md`. A completely unrelated tab or process with no window
 reference must relay its command through the application's authenticated
 WebSocket or HTTP channel. The bundled localhost demo now includes such an HTTP
 Relay for HTTPX: the browser registers with its signed ONLYOFFICE editor JWT,
-while HTTPX exchanges the same short-lived JWT once for a scoped 12-hour bridge
-binding token. The binding follows the authoritative browser session for the
-same file, editor type, and user even when a save rotates `document.key`. The
-compose ports are bound to `127.0.0.1`; this demo Relay is not a production
-authentication design.
+while HTTPX calls the atomic attach endpoint with only the UUID file name and
+fixed editor type. The Relay selects the latest ready authoritative page and
+stores the resulting scoped 12-hour binding token in HTTPX's chat state. HTTPX
+never receives the editor JWT. The binding follows the authoritative browser
+session for the same file, editor type, and user even when a save rotates
+`document.key`. The compose ports are bound to `127.0.0.1`; this demo Relay is
+not a production authentication design.
 
 The bundled Nginx example keeps the pre-existing demo storage identity
 `185.199.108.133` stable after the loopback bind, so previously uploaded local
@@ -155,7 +157,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.1-rev1"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -267,6 +269,14 @@ The versioned public contract is available as:
 - `DOCX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge D01-D70 capability matrix.
 - `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
 - `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
+
+Word, nested Word, and Slides table `data` cells accept
+`string | number | boolean | null` or a formatting object with a required string
+`text`. Use `color` for text color; `textColor` and other unknown fields are
+rejected before mutation. Word cell formatting overrides table-level text
+defaults. Slides applies each cell object first and then applies `header` to the
+first row without replacing text unless `header.text` is present. See the
+integration guide for complete examples and error behavior.
 
 ## Tool names
 
@@ -396,27 +406,31 @@ The localhost example exposes these additional endpoints:
   signed editor JWT and receives an opaque page relay key.
 - `POST /copilot-api/bridge/poll` and `POST /copilot-api/bridge/result`: the
   registered page receives commands and returns `window.aiBridge` results.
+- `POST /copilot-api/bridge/attach`: accepts a UUID `fileName` and fixed
+  `editorType`, waits up to 10 seconds for the latest matching ready
+  authoritative Relay, and issues a scoped 12-hour binding token.
 - `GET /copilot-api/bridge/sessions`: accepts an editor JWT or bridge binding
   token, returns the single authoritative page, and renews the scoped binding
-  token.
+  token. This endpoint remains for compatibility.
 - `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
   requested tool against the authoritative page capabilities, treats a supplied
   browser `sessionId` as a compatibility hint, and waits for the live result.
 
-The caller passes the UUID file name to
-`/copilot-api/documents/editor?fileName=<uuid>.<ext>` and stores the returned
-page's short-lived editor JWT without printing it. The real `/docx/<uuid>`,
-`/xlsx/<uuid>`, or `/pptx/<uuid>` capability page must remain open in a browser
-with its Relay ready. The first `sessions` request
-exchanges that JWT for a 12-hour `ai-bridge-binding` token scoped to the exact
-file name, file type, editor type, and user. A newly registered page for that
-stable identity supersedes the previous Relay session, so a storage-version
-change does not require another bind. Stable `requestId` values deduplicate
-retries across page handoff. The most recently registered page is the only
-active Relay. The superseded page stops polling permanently but remains
-available for manual editing. Closing the newest page does not restore an old
-page: Agent calls return `NO_ACTIVE_EDITOR` until a page is refreshed or opened
-and registers a new session. The editor page must remain open.
+The real `/docx/<uuid>`, `/xlsx/<uuid>`, or `/pptx/<uuid>` capability page must
+remain open in a browser with its Relay ready. The caller then sends the exact
+UUID file name to `bridge/attach`; no editor JWT, session ID, document key, or
+user identity is needed by the Agent. The issued `ai-bridge-binding` token is
+scoped to the exact file name, file type, editor type, and user. The older
+`documents/editor` plus `bridge/sessions` exchange remains available to
+compatible clients but is not part of the HTTPX Agent surface. A newly
+registered page for the stable identity supersedes the previous Relay session,
+so a storage-version change does not require another attach. Stable `requestId`
+values deduplicate retries across page handoff. The most recently registered
+page is the only active Relay. The superseded page stops polling permanently
+but remains available for manual editing. Closing the newest page does not
+restore an old page: Agent calls return `NO_ACTIVE_EDITOR` until a page is
+refreshed or opened and registers a new session. The editor page must remain
+open.
 
 The Relay writes one sanitized `[bridge-command]` JSON line for the first
 completion, failure, or timeout of each request. It reports the queue wait,

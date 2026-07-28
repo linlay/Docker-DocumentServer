@@ -30,6 +30,20 @@ test("all 43 Sheets tools stay aligned across the contract, plugin, SDKs, types,
   }
 });
 
+test("public Sheets contract names non-obvious units explicitly", () => {
+  const format = publicContract.tools.cell.sheets_format_range.properties;
+  assert.match(format.columnWidthChars.description, /character units/);
+  assert.match(format.rowHeightPt.description, /points \(pt\)/);
+  assert.equal(format.columnWidth.deprecated, true);
+  assert.equal(format.rowHeight.deprecated, true);
+
+  const pageLayout = publicContract.tools.cell.sheets_manage_page_layout;
+  assert.ok(pageLayout.anyOf.some(entry => entry.required[0] === "marginsPt"));
+  assert.match(pageLayout.properties.marginsPt.description, /points \(pt\)/);
+  assert.equal(pageLayout.properties.margins.deprecated, true);
+  assert.match(publicContract.unitConventions.sheet, /columnWidthChars in spreadsheet character-width units/);
+});
+
 function loadSheetsBridge(api, macroState) {
   const asc = {
     scope: {},
@@ -598,6 +612,8 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
         range: "A1:B3",
         strikeout: true,
         orientation: "xlUpward",
+        columnWidthChars: 18,
+        rowHeightPt: 24,
         borders: [{ side: "Bottom", style: "Thick", color: "#FF0000" }],
       },
     },
@@ -649,12 +665,26 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
   assert.equal(typedValues[2][0], 0.25);
   assert.equal(typedValues[3][0], true);
   assert.ok(state.events.some(item => item[0] === "range.arrayFormula" && item[2] === "={1;2;3}"));
+  assert.ok(state.events.some(item => item[0] === "range.columnWidth" && item[1] === 18));
+  assert.ok(state.events.some(item => item[0] === "range.rowHeight" && item[1] === 24));
   assert.ok(state.events.some(item => item[0] === "range.border"));
   assert.ok(state.events.some(item => item[0] === "range.sort"));
   assert.ok(state.events.some(item => item[0] === "range.filter"));
   assert.ok(state.events.some(item => item[0] === "table.style" && item[1] === "TableStyleMedium4"));
   assert.ok(state.events.some(item => item[0] === "conditions.unique"));
   assert.ok(state.events.some(item => item[0] === "validation.SetInputMessage"));
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_format_range",
+      arguments: {
+        range: "A1",
+        columnWidth: 18,
+        columnWidthChars: 18,
+      },
+    }]),
+    /columnWidthChars 与旧字段 columnWidth 不能同时提供/,
+  );
 });
 
 test("structured table inspection and lifecycle use ApiListObject", async () => {
@@ -762,7 +792,7 @@ test("advanced Sheets bridge covers pivots, drawings, comments, freeze panes, me
     { name: "sheets_inspect_protected_ranges", arguments: { sheet: "Sheet1" } },
     {
       name: "sheets_manage_page_layout",
-      arguments: { sheet: "Sheet1", orientation: "xlPortrait", margins: { top: 10, bottom: 10 }, printGridlines: true },
+      arguments: { sheet: "Sheet1", orientation: "xlPortrait", marginsPt: { top: 10, bottom: 10 }, printGridlines: true },
     },
     { name: "sheets_inspect_page_layout", arguments: { sheet: "Sheet1" } },
   ]);
@@ -777,9 +807,19 @@ test("advanced Sheets bridge covers pivots, drawings, comments, freeze panes, me
   assert.equal(result.results[10].custom.Department, "Finance");
   assert.equal(result.results[13].sheets[0].protectedRanges[0].users[0].name, "Alex");
   assert.equal(result.results[15].orientation, "xlPortrait");
+  assert.equal(result.results[14].marginsPt.top, 10);
+  assert.equal(result.results[14].marginsPt.bottom, 10);
+  assert.equal(result.results[15].marginsPt.top, 10);
   assert.ok(state.events.some(item => item[0] === "drawing.image"));
   assert.ok(state.events.some(item => item[0] === "pivot.function" && item[1] === "Sum"));
 
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_page_layout",
+      arguments: { margins: { top: 10 }, marginsPt: { top: 10 } },
+    }]),
+    /marginsPt 与旧字段 margins 不能同时提供/,
+  );
   await assert.rejects(
     bridge.execute([{ name: "sheets_manage_page_layout", arguments: {} }]),
     /至少需要一个页面布局属性/,

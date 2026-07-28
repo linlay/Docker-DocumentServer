@@ -1704,6 +1704,99 @@ test("Slides bridge creates, edits, merges, and formats tables", async () => {
   assert.equal(result.results[7].slides[0].objects[0].columns, 3);
 });
 
+test("Slides bridge writes scalar and formatted table cells before applying header defaults", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  const result = await bridge.execute([{
+    name: "slides_add_table",
+    arguments: {
+      slide: 1,
+      rows: 2,
+      columns: 2,
+      data: [
+        [
+          {
+            text: "指标",
+            fontFamily: "微软雅黑",
+            bold: false,
+            color: "#112233",
+            backgroundColor: "#E8EEF5",
+            align: "right",
+          },
+          42,
+        ],
+        [true],
+      ],
+      header: {
+        bold: true,
+        backgroundColor: "#DDEEFF",
+        align: "center",
+      },
+    },
+  }]);
+
+  const table = first.tables[0];
+  const formattedCell = table.GetRow(0).GetCell(0);
+  const formattedParagraph = formattedCell.GetContent().GetAllParagraphs()[0];
+  const formattedRun = formattedParagraph.runs[0];
+
+  assert.equal(result.changed, 1);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(formattedCell.GetText(), "指标");
+  assert.equal(formattedRun.format.fontFamily, "微软雅黑");
+  assert.equal(formattedRun.format.color, "#112233");
+  assert.equal(formattedRun.format.bold, true);
+  assert.deepEqual(formattedCell.fill.color, { r: 221, g: 238, b: 255 });
+  assert.equal(formattedParagraph.align, "center");
+  assert.equal(table.GetRow(0).GetCell(1).GetText(), "42");
+  assert.equal(table.GetRow(1).GetCell(0).GetText(), "true");
+  assert.equal(table.GetRow(1).GetCell(1).GetText(), "");
+  assert.equal(table.GetRow(0).GetCell(1).GetContent().GetAllParagraphs()[0].runs[0].format.bold, true);
+  assert.equal(
+    table.rows.flatMap(row => row.cells).some(cell => cell.GetText().includes("[object Object]")),
+    false,
+  );
+});
+
+test("Slides bridge rejects invalid formatted table cells before mutation", () => {
+  const { bridge, presentation, first } = slidesHarness();
+  let error;
+  try {
+    bridge.execute([{
+      name: "slides_add_table",
+      arguments: {
+        slide: 1,
+        rows: 1,
+        columns: 5,
+        data: [[
+          { text: "错误字段", textColor: "#112233" },
+          { bold: true },
+          { text: { nested: "value" } },
+          { text: "错误嵌套颜色", fill: { type: "solid", color: { nested: "value" } } },
+          { text: "错误边框字段", border: { mystery: true } },
+        ]],
+      },
+    }]);
+  } catch (caught) {
+    error = caught;
+  }
+
+  assert.equal(error && error.code, "INVALID_TOOL_ARGUMENTS");
+  assert.deepEqual(
+    Array.from(error.details.validationErrors, entry => entry.path),
+    [
+      "arguments.data[0][0].textColor",
+      "arguments.data[0][1].text",
+      "arguments.data[0][2].text",
+      "arguments.data[0][3].fill.color",
+      "arguments.data[0][4].border.mystery",
+    ],
+  );
+  assert.equal(error.details.completedToolCalls, 0);
+  assert.equal(error.details.partialMutationPossible, false);
+  assert.equal(presentation.historyPoints, 0);
+  assert.equal(first.tables.length, 0);
+});
+
 test("Slides bridge aligns, distributes, groups, reorders, and creates custom geometry", async () => {
   const { bridge, presentation, first } = slidesHarness();
   first.shapes[0].SetName("A");

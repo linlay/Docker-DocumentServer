@@ -60,7 +60,7 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.4.0";
+  version: "0.4.1";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   ready: boolean;
@@ -113,6 +113,7 @@ export interface BasicTextFormat {
   italic?: boolean;
   color?: string;
 }
+export type AiBridgeTableCellScalar = string | number | boolean | null;
 export type AiBridgeImageSource =
   | { type: "url"; url: string }
   | { type: "dataUrl"; dataUrl: string };
@@ -255,10 +256,36 @@ export interface WordNavigateArgs {
 }
 export interface WordScrollArgs { direction?: "up" | "down"; pages?: number; }
 export interface WordScaleFontArgs { scale: number; }
+export interface WordTableCellInput extends BasicTextFormat {
+  text: string;
+  underline?: boolean;
+  highlightColor?: string;
+  /** @deprecated Point-valued legacy alias. Prefer characterSpacingPt. Never pass twips. */
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  backgroundColor?: string;
+  align?: "left" | "center" | "right" | "both";
+  /** @deprecated Point-valued legacy aliases. Prefer the corresponding *Pt fields. */
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  /** @deprecated Point-valued legacy aliases. Prefer the corresponding *Pt fields. */
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  verticalAlign?: "top" | "center" | "bottom";
+  widthPercent?: number;
+}
 export interface WordAddTableArgs extends BasicTextFormat {
   rows: number;
   cols: number;
-  data?: unknown[][];
+  data?: Array<Array<AiBridgeTableCellScalar | WordTableCellInput>>;
   widthPercent?: number;
   styleName?: string;
   firstRow?: boolean;
@@ -469,7 +496,7 @@ export interface WordAddNestedTableArgs extends BasicTextFormat {
   column: number;
   rows: number;
   cols: number;
-  data?: unknown[][];
+  data?: Array<Array<AiBridgeTableCellScalar | WordTableCellInput>>;
   widthPercent?: number;
   styleName?: string;
 }
@@ -1058,6 +1085,9 @@ export interface SlidesTableCellFormat extends SlidesParagraphFormat {
   verticalAlign?: "top" | "center" | "bottom";
   border?: SlidesTableBorder;
 }
+export interface SlidesTableCellInput extends SlidesTableCellFormat {
+  text: string;
+}
 export interface SlidesTableLook {
   firstColumn?: boolean;
   firstRow?: boolean;
@@ -1070,7 +1100,7 @@ export interface SlidesAddTableArgs {
   slide: number;
   rows: number;
   columns: number;
-  data?: unknown[][];
+  data?: Array<Array<AiBridgeTableCellScalar | SlidesTableCellInput>>;
   xMm?: number;
   yMm?: number;
   widthMm?: number;
@@ -1928,7 +1958,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.4.0";
+  readonly version: "0.4.1";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

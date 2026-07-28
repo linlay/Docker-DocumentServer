@@ -131,6 +131,16 @@
               return isFinite(number) ? number : fallback;
             }
 
+            function unitAlias(args, explicitName, legacyName) {
+              var hasExplicit = hasOwn(args, explicitName);
+              var hasLegacy = hasOwn(args, legacyName);
+              if (hasExplicit && hasLegacy) {
+                throw new Error(explicitName + " 与旧字段 " + legacyName + " 不能同时提供");
+              }
+              if (hasExplicit) return args[explicitName];
+              return hasLegacy ? args[legacyName] : undefined;
+            }
+
             function clamp(value, minimum, maximum) {
               return Math.min(maximum, Math.max(minimum, value));
             }
@@ -920,8 +930,10 @@
                   if (args.numberFormat) formatRange.SetNumberFormat(String(args.numberFormat));
                   if (args.wrap !== undefined) formatRange.SetWrap(Boolean(args.wrap));
                   if (args.orientation !== undefined) requireMethod(formatRange, "SetOrientation", "文本旋转").call(formatRange, args.orientation);
-                  if (args.columnWidth !== undefined) formatRange.SetColumnWidth(Number(args.columnWidth));
-                  if (args.rowHeight !== undefined) formatRange.SetRowHeight(Number(args.rowHeight));
+                  var columnWidthChars = unitAlias(args, "columnWidthChars", "columnWidth");
+                  var rowHeightPt = unitAlias(args, "rowHeightPt", "rowHeight");
+                  if (columnWidthChars !== undefined) formatRange.SetColumnWidth(Number(columnWidthChars));
+                  if (rowHeightPt !== undefined) formatRange.SetRowHeight(Number(rowHeightPt));
                   if (Array.isArray(args.borders)) {
                     for (var borderIndex = 0; borderIndex < args.borders.length; borderIndex += 1) {
                       var border = args.borders[borderIndex] || {};
@@ -1936,16 +1948,18 @@
 
                 case "sheets_inspect_page_layout": {
                   var pageSheet = getSheet(args.sheet);
+                  var inspectedMarginsPt = {
+                    top: safeCall(pageSheet, "GetTopMargin"),
+                    right: safeCall(pageSheet, "GetRightMargin"),
+                    bottom: safeCall(pageSheet, "GetBottomMargin"),
+                    left: safeCall(pageSheet, "GetLeftMargin"),
+                  };
                   results.push({
                     name: call.name,
                     sheet: pageSheet.GetName(),
                     orientation: safeCall(pageSheet, "GetPageOrientation"),
-                    margins: {
-                      top: safeCall(pageSheet, "GetTopMargin"),
-                      right: safeCall(pageSheet, "GetRightMargin"),
-                      bottom: safeCall(pageSheet, "GetBottomMargin"),
-                      left: safeCall(pageSheet, "GetLeftMargin"),
-                    },
+                    marginsPt: inspectedMarginsPt,
+                    margins: inspectedMarginsPt,
                     printGridlines: safeCall(pageSheet, "GetPrintGridlines"),
                     printHeadings: safeCall(pageSheet, "GetPrintHeadings"),
                   });
@@ -1953,9 +1967,10 @@
                 }
 
                 case "sheets_manage_page_layout": {
+                  var managedMarginsPt = unitAlias(args, "marginsPt", "margins");
                   if (
                     args.orientation === undefined
-                    && !isObject(args.margins)
+                    && !isObject(managedMarginsPt)
                     && !hasOwn(args, "printGridlines")
                     && !hasOwn(args, "printHeadings")
                   ) {
@@ -1963,25 +1978,27 @@
                   }
                   var managedPageSheet = getSheet(args.sheet);
                   if (args.orientation !== undefined) requireMethod(managedPageSheet, "SetPageOrientation", "页面方向").call(managedPageSheet, String(args.orientation));
-                  if (isObject(args.margins)) {
-                    if (hasOwn(args.margins, "top")) requireMethod(managedPageSheet, "SetTopMargin", "上页边距").call(managedPageSheet, Number(args.margins.top));
-                    if (hasOwn(args.margins, "right")) requireMethod(managedPageSheet, "SetRightMargin", "右页边距").call(managedPageSheet, Number(args.margins.right));
-                    if (hasOwn(args.margins, "bottom")) requireMethod(managedPageSheet, "SetBottomMargin", "下页边距").call(managedPageSheet, Number(args.margins.bottom));
-                    if (hasOwn(args.margins, "left")) requireMethod(managedPageSheet, "SetLeftMargin", "左页边距").call(managedPageSheet, Number(args.margins.left));
+                  if (isObject(managedMarginsPt)) {
+                    if (hasOwn(managedMarginsPt, "top")) requireMethod(managedPageSheet, "SetTopMargin", "上页边距").call(managedPageSheet, Number(managedMarginsPt.top));
+                    if (hasOwn(managedMarginsPt, "right")) requireMethod(managedPageSheet, "SetRightMargin", "右页边距").call(managedPageSheet, Number(managedMarginsPt.right));
+                    if (hasOwn(managedMarginsPt, "bottom")) requireMethod(managedPageSheet, "SetBottomMargin", "下页边距").call(managedPageSheet, Number(managedMarginsPt.bottom));
+                    if (hasOwn(managedMarginsPt, "left")) requireMethod(managedPageSheet, "SetLeftMargin", "左页边距").call(managedPageSheet, Number(managedMarginsPt.left));
                   }
                   if (hasOwn(args, "printGridlines")) requireMethod(managedPageSheet, "SetPrintGridlines", "打印网格线").call(managedPageSheet, Boolean(args.printGridlines));
                   if (hasOwn(args, "printHeadings")) requireMethod(managedPageSheet, "SetPrintHeadings", "打印标题").call(managedPageSheet, Boolean(args.printHeadings));
                   changed += 1;
+                  var persistedMarginsPt = {
+                    top: safeCall(managedPageSheet, "GetTopMargin"),
+                    right: safeCall(managedPageSheet, "GetRightMargin"),
+                    bottom: safeCall(managedPageSheet, "GetBottomMargin"),
+                    left: safeCall(managedPageSheet, "GetLeftMargin"),
+                  };
                   results.push({
                     name: call.name,
                     sheet: managedPageSheet.GetName(),
                     orientation: safeCall(managedPageSheet, "GetPageOrientation"),
-                    margins: {
-                      top: safeCall(managedPageSheet, "GetTopMargin"),
-                      right: safeCall(managedPageSheet, "GetRightMargin"),
-                      bottom: safeCall(managedPageSheet, "GetBottomMargin"),
-                      left: safeCall(managedPageSheet, "GetLeftMargin"),
-                    },
+                    marginsPt: persistedMarginsPt,
+                    margins: persistedMarginsPt,
                   });
                   break;
                 }

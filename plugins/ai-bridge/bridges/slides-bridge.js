@@ -8,9 +8,322 @@
     if (!value || !value.ok) {
       const error = new Error((value && value.error) || "Slides Bridge 执行失败");
       if (value && value.code) error.code = value.code;
+      if (value && value.details && typeof value.details === "object") error.details = { ...value.details };
       throw error;
     }
     return value;
+  }
+
+  const SLIDE_TABLE_CELL_FIELD_TYPES = {
+    text: "string",
+    fontSize: "number",
+    fontFamily: "string",
+    bold: "boolean",
+    italic: "boolean",
+    underline: "boolean",
+    color: "color",
+    align: "string",
+    firstLineIndentMm: "number",
+    leftIndentMm: "number",
+    rightIndentMm: "number",
+    spacingBeforePt: "number",
+    spacingAfterPt: "number",
+    lineSpacing: "number",
+    lineRule: "string",
+    level: "number",
+    listType: "string",
+    bulletSymbol: "string",
+    numberingType: "string",
+    startAt: "number",
+    fill: "object",
+    backgroundColor: "color",
+    verticalAlign: "string",
+    border: "object",
+  };
+  const SLIDE_TABLE_CELL_ENUMS = {
+    align: ["left", "center", "right", "both"],
+    lineRule: ["auto", "exact", "atLeast"],
+    listType: ["none", "bullet", "number"],
+    verticalAlign: ["top", "center", "bottom"],
+  };
+
+  function isPlainObject(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function isTableCellScalar(value) {
+    return value === undefined
+      || value === null
+      || typeof value === "string"
+      || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value));
+  }
+
+  function isHexColor(value) {
+    return typeof value === "string" && /^#?[0-9A-Fa-f]{6}$/.test(value);
+  }
+
+  function collectSlideFillErrors(index, name, path, fill, add) {
+    if (!isPlainObject(fill)) {
+      add(index, name, path, "fill must be an object", "type");
+      return;
+    }
+    const type = fill.raw !== undefined ? "raw" : String(fill.type || "");
+    const fieldsByType = {
+      none: ["type"],
+      solid: ["type", "color"],
+      linearGradient: ["type", "stops", "angleDeg"],
+      radialGradient: ["type", "stops"],
+      pattern: ["type", "pattern", "backgroundColor", "foregroundColor"],
+      raw: ["type", "raw"],
+    };
+    const requiredByType = {
+      none: ["type"],
+      solid: ["type", "color"],
+      linearGradient: ["type", "stops"],
+      radialGradient: ["type", "stops"],
+      pattern: ["type", "pattern", "backgroundColor", "foregroundColor"],
+      raw: ["raw"],
+    };
+    const allowedFields = fieldsByType[type];
+    if (!allowedFields) {
+      add(index, name, path + ".type", "fill type is not supported", "enum");
+      return;
+    }
+    for (const field of Object.keys(fill)) {
+      if (allowedFields.indexOf(field) === -1) {
+        add(index, name, path + "." + field, field + " is not allowed", "additionalProperties");
+      }
+    }
+    for (const field of requiredByType[type]) {
+      if (!Object.prototype.hasOwnProperty.call(fill, field)) {
+        add(index, name, path + "." + field, field + " is required", "required");
+      }
+    }
+    for (const field of ["color", "backgroundColor", "foregroundColor"]) {
+      if (Object.prototype.hasOwnProperty.call(fill, field) && !isHexColor(fill[field])) {
+        add(index, name, path + "." + field, field + " must be a six-digit hex color", "pattern");
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(fill, "pattern") && typeof fill.pattern !== "string") {
+      add(index, name, path + ".pattern", "pattern must be a string", "type");
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(fill, "angleDeg")
+      && (typeof fill.angleDeg !== "number" || !Number.isFinite(fill.angleDeg))
+    ) {
+      add(index, name, path + ".angleDeg", "angleDeg must be a finite number", "type");
+    }
+    if (type !== "linearGradient" && type !== "radialGradient") return;
+    if (!Array.isArray(fill.stops)) {
+      if (Object.prototype.hasOwnProperty.call(fill, "stops")) {
+        add(index, name, path + ".stops", "stops must be an array", "type");
+      }
+      return;
+    }
+    if (fill.stops.length < 2 || fill.stops.length > 16) {
+      add(index, name, path + ".stops", "stops must contain 2 to 16 items", "range");
+    }
+    for (let stopIndex = 0; stopIndex < fill.stops.length; stopIndex += 1) {
+      const stop = fill.stops[stopIndex];
+      const stopPath = path + ".stops[" + stopIndex + "]";
+      if (!isPlainObject(stop)) {
+        add(index, name, stopPath, "gradient stop must be an object", "type");
+        continue;
+      }
+      for (const field of Object.keys(stop)) {
+        if (field !== "position" && field !== "color") {
+          add(index, name, stopPath + "." + field, field + " is not allowed", "additionalProperties");
+        }
+      }
+      if (!Object.prototype.hasOwnProperty.call(stop, "position")) {
+        add(index, name, stopPath + ".position", "position is required", "required");
+      } else if (
+        typeof stop.position !== "number"
+        || !Number.isFinite(stop.position)
+        || stop.position < 0
+        || stop.position > 100
+      ) {
+        add(index, name, stopPath + ".position", "position must be between 0 and 100", "range");
+      }
+      if (!Object.prototype.hasOwnProperty.call(stop, "color")) {
+        add(index, name, stopPath + ".color", "color is required", "required");
+      } else if (!isHexColor(stop.color)) {
+        add(index, name, stopPath + ".color", "color must be a six-digit hex color", "pattern");
+      }
+    }
+  }
+
+  function collectSlideBorderErrors(index, name, path, border, add) {
+    if (!isPlainObject(border)) {
+      add(index, name, path, "border must be an object", "type");
+      return;
+    }
+    const allowedFields = ["widthMm", "color", "fill", "sides"];
+    for (const field of Object.keys(border)) {
+      if (allowedFields.indexOf(field) === -1) {
+        add(index, name, path + "." + field, field + " is not allowed", "additionalProperties");
+      }
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(border, "widthMm")
+      && (
+        typeof border.widthMm !== "number"
+        || !Number.isFinite(border.widthMm)
+        || border.widthMm < 0
+        || border.widthMm > 20
+      )
+    ) {
+      add(index, name, path + ".widthMm", "widthMm must be between 0 and 20", "range");
+    }
+    if (Object.prototype.hasOwnProperty.call(border, "color") && !isHexColor(border.color)) {
+      add(index, name, path + ".color", "color must be a six-digit hex color", "pattern");
+    }
+    if (Object.prototype.hasOwnProperty.call(border, "fill")) {
+      collectSlideFillErrors(index, name, path + ".fill", border.fill, add);
+    }
+    if (Object.prototype.hasOwnProperty.call(border, "sides")) {
+      if (!Array.isArray(border.sides)) {
+        add(index, name, path + ".sides", "sides must be an array", "type");
+      } else {
+        const supportedSides = ["top", "right", "bottom", "left"];
+        const seenSides = {};
+        for (let sideIndex = 0; sideIndex < border.sides.length; sideIndex += 1) {
+          const side = border.sides[sideIndex];
+          if (supportedSides.indexOf(side) === -1) {
+            add(index, name, path + ".sides[" + sideIndex + "]", "side is not supported", "enum");
+          } else if (seenSides[side]) {
+            add(index, name, path + ".sides[" + sideIndex + "]", "side must not be duplicated", "uniqueItems");
+          }
+          seenSides[side] = true;
+        }
+      }
+    }
+  }
+
+  function collectSlideTableDataErrors(index, name, data, add) {
+    if (data === undefined) return;
+    if (!Array.isArray(data)) {
+      add(index, name, "data", "data must be an array of rows", "type");
+      return;
+    }
+    for (let rowIndex = 0; rowIndex < data.length; rowIndex += 1) {
+      const row = data[rowIndex];
+      if (!Array.isArray(row)) {
+        add(index, name, "data[" + rowIndex + "]", "table row must be an array", "type");
+        continue;
+      }
+      for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+        const cell = row[columnIndex];
+        const cellPath = "data[" + rowIndex + "][" + columnIndex + "]";
+        if (isTableCellScalar(cell)) continue;
+        if (!isPlainObject(cell)) {
+          add(index, name, cellPath, "table cell must be a scalar or formatting object", "type");
+          continue;
+        }
+        if (!Object.prototype.hasOwnProperty.call(cell, "text")) {
+          add(index, name, cellPath + ".text", "formatted table cell requires text", "required");
+        } else if (typeof cell.text !== "string") {
+          add(index, name, cellPath + ".text", "formatted table cell text must be a string", "type");
+        }
+        for (const field of Object.keys(cell)) {
+          if (field === "text") continue;
+          const expected = SLIDE_TABLE_CELL_FIELD_TYPES[field];
+          if (!expected) {
+            add(index, name, cellPath + "." + field, field + " is not allowed", "additionalProperties");
+            continue;
+          }
+          const value = cell[field];
+          if (expected === "number" && (typeof value !== "number" || !Number.isFinite(value))) {
+            add(index, name, cellPath + "." + field, field + " must be a finite number", "type");
+          } else if (expected === "boolean" && typeof value !== "boolean") {
+            add(index, name, cellPath + "." + field, field + " must be a boolean", "type");
+          } else if (expected === "string" && typeof value !== "string") {
+            add(index, name, cellPath + "." + field, field + " must be a string", "type");
+          } else if (expected === "object" && !isPlainObject(value)) {
+            add(index, name, cellPath + "." + field, field + " must be an object", "type");
+          } else if (
+            expected === "color"
+            && (typeof value !== "string" || !/^#?[0-9A-Fa-f]{6}$/.test(value))
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be a six-digit hex color", "pattern");
+          }
+          if (
+            SLIDE_TABLE_CELL_ENUMS[field]
+            && typeof value === "string"
+            && SLIDE_TABLE_CELL_ENUMS[field].indexOf(value) === -1
+          ) {
+            add(index, name, cellPath + "." + field, field + " has an unsupported value", "enum");
+          }
+          if (
+            (field === "fontSize" || field === "lineSpacing")
+            && typeof value === "number"
+            && value <= 0
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be greater than 0", "range");
+          } else if (
+            (field === "spacingBeforePt" || field === "spacingAfterPt")
+            && typeof value === "number"
+            && value < 0
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be at least 0", "range");
+          } else if (
+            field === "level"
+            && typeof value === "number"
+            && (!Number.isInteger(value) || value < 0 || value > 8)
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be an integer from 0 to 8", "range");
+          } else if (
+            field === "startAt"
+            && typeof value === "number"
+            && (!Number.isInteger(value) || value < 1)
+          ) {
+            add(index, name, cellPath + "." + field, field + " must be an integer of at least 1", "range");
+          } else if (
+            field === "bulletSymbol"
+            && typeof value === "string"
+            && (value.length < 1 || value.length > 8)
+          ) {
+            add(index, name, cellPath + "." + field, field + " must contain 1 to 8 characters", "range");
+          }
+          if (field === "fill" && isPlainObject(value)) {
+            collectSlideFillErrors(index, name, cellPath + ".fill", value, add);
+          } else if (field === "border" && isPlainObject(value)) {
+            collectSlideBorderErrors(index, name, cellPath + ".border", value, add);
+          }
+        }
+      }
+    }
+  }
+
+  function requireStaticValidation(toolCalls) {
+    const errors = [];
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+    function add(index, name, path, message, keyword) {
+      errors.push({
+        toolCallIndex: index,
+        tool: String(name || ""),
+        path: "arguments." + path,
+        keyword: keyword || "semantic",
+        message,
+      });
+    }
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index] || {};
+      if (String(call.name || "") !== "slides_add_table") continue;
+      const args = (call && (call.arguments || call.args)) || {};
+      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+      collectSlideTableDataErrors(index, call.name, args.data, add);
+    }
+    if (!errors.length) return;
+    const error = new Error("Slides 工具参数校验失败");
+    error.code = "INVALID_TOOL_ARGUMENTS";
+    error.details = {
+      validationErrors: errors,
+      completedToolCalls: 0,
+      partialMutationPossible: false,
+    };
+    throw error;
   }
 
   function executeOfficeCommands(toolCalls) {
@@ -932,6 +1245,11 @@
                   }
                 }
               }
+            }
+
+            function tableCellSpec(value) {
+              if (value && typeof value === "object" && !Array.isArray(value)) return value;
+              return { text: value === null || value === undefined ? "" : String(value) };
             }
 
             function drawingMatches(drawing, args, objectIndex) {
@@ -2139,11 +2457,10 @@
                     for (var addTableRow = 0; addTableRow < Math.min(tableRows, args.data.length); addTableRow += 1) {
                       var addTableValues = Array.isArray(args.data[addTableRow]) ? args.data[addTableRow] : [args.data[addTableRow]];
                       for (var addTableColumn = 0; addTableColumn < Math.min(tableColumns, addTableValues.length); addTableColumn += 1) {
-                        applyTableCellFormat(getTableCell(addedTable, addTableRow + 1, addTableColumn + 1), {
-                          text: addTableValues[addTableColumn] === null || addTableValues[addTableColumn] === undefined
-                            ? ""
-                            : String(addTableValues[addTableColumn]),
-                        });
+                        applyTableCellFormat(
+                          getTableCell(addedTable, addTableRow + 1, addTableColumn + 1),
+                          tableCellSpec(addTableValues[addTableColumn])
+                        );
                       }
                     }
                   }
@@ -3030,6 +3347,7 @@
   }
 
   function execute(toolCalls) {
+    requireStaticValidation(toolCalls);
     if (toolCalls.some(isPluginTool)) return executePluginTool(toolCalls);
     return executeOfficeCommands(toolCalls);
   }

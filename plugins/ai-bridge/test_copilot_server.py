@@ -110,7 +110,7 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.0-rev30"
+        revision = "0.4.1-rev1"
         paths = [
             "config.json",
             "index.html",
@@ -123,7 +123,7 @@ class ContractAlignmentTests(unittest.TestCase):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
                     contents = stream.read()
                 self.assertIn(revision, contents)
-                self.assertNotIn("0.4.0-rev29", contents)
+                self.assertNotIn("0.4.0-rev30", contents)
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
@@ -142,6 +142,111 @@ class ContractAlignmentTests(unittest.TestCase):
             function = entry["function"]
             self.assertTrue(function["description"])
             self.assertNotIn("$ref", json.dumps(function["parameters"]))
+
+    def test_table_cell_contract_accepts_mixed_values_and_reports_exact_invalid_paths(self):
+        valid_word_calls = [
+            {
+                "name": "word_add_table",
+                "arguments": {
+                    "rows": 2,
+                    "cols": 3,
+                    "data": [
+                        [
+                            "文本",
+                            42,
+                            {
+                                "text": "格式",
+                                "fontFamily": "微软雅黑",
+                                "color": "#112233",
+                                "backgroundColor": "#E8EEF5",
+                                "align": "center",
+                            },
+                        ],
+                        [True, None],
+                    ],
+                },
+            },
+            {
+                "name": "word_add_nested_table",
+                "arguments": {
+                    "tableIndex": 1,
+                    "row": 1,
+                    "column": 1,
+                    "rows": 1,
+                    "cols": 2,
+                    "data": [[{"text": "嵌套", "bold": True}, False]],
+                },
+            },
+        ]
+        valid_slide_calls = [{
+            "name": "slides_add_table",
+            "arguments": {
+                "slide": 1,
+                "rows": 1,
+                "columns": 3,
+                "data": [[
+                    {"text": "格式", "color": "#112233", "align": "center"},
+                    7,
+                    None,
+                ]],
+            },
+        }]
+
+        self.assertEqual(
+            copilot_server.validate_editor_tool_calls("word", valid_word_calls),
+            [],
+        )
+        self.assertEqual(
+            copilot_server.validate_editor_tool_calls("slide", valid_slide_calls),
+            [],
+        )
+
+        invalid_calls = [
+            {
+                "name": "word_add_table",
+                "arguments": {
+                    "rows": 1,
+                    "cols": 1,
+                    "data": [[{"text": "错误", "textColor": "#112233"}]],
+                },
+            },
+            {
+                "name": "word_add_nested_table",
+                "arguments": {
+                    "tableIndex": 1,
+                    "row": 1,
+                    "column": 1,
+                    "rows": 1,
+                    "cols": 1,
+                    "data": [[{"bold": True}]],
+                },
+            },
+        ]
+        word_errors = copilot_server.validate_editor_tool_calls("word", invalid_calls)
+        slide_errors = copilot_server.validate_editor_tool_calls(
+            "slide",
+            [{
+                "name": "slides_add_table",
+                "arguments": {
+                    "slide": 1,
+                    "rows": 1,
+                    "columns": 1,
+                    "data": [[{"text": {"nested": "value"}}]],
+                },
+            }],
+        )
+
+        self.assertEqual(
+            [(error["tool"], error["path"]) for error in word_errors],
+            [
+                ("word_add_table", "arguments.data[0][0].textColor"),
+                ("word_add_nested_table", "arguments.data[0][0].text"),
+            ],
+        )
+        self.assertEqual(
+            [(error["tool"], error["path"]) for error in slide_errors],
+            [("slides_add_table", "arguments.data[0][0].text")],
+        )
 
 
 class DocumentGatewayTests(unittest.TestCase):

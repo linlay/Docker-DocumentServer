@@ -1,4 +1,4 @@
-# ai-bridge 0.4.0 外部工程接入说明
+# ai-bridge 0.4.1 外部工程接入说明
 
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.0-rev30"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.1-rev1"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -46,7 +46,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.1-rev1"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -63,7 +63,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.1-rev1"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -125,13 +125,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.1-rev1"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.0-rev30"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.4.1-rev1"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -297,6 +297,64 @@ inline 内容控件的 `contentMode` 默认为 `append`，与旧调用一致。�
 目标；目标原内容会被清空，再直接写入携带最终 `text` 和属性的 inline SDT。它不承诺
 保留被替换区域的富文本格式，也不提供任意文本范围的原样包裹。
 
+### Word / PPT 表格 `data` 单元格契约
+
+`word_add_table`、`word_add_nested_table` 和 `slides_add_table` 的 `data` 都接受二维
+数组。每个单元格只能是标量 `string | number | boolean | null`，或一个必须包含
+字符串 `text` 的格式对象。标量会统一转成文本，`null` 和行尾缺失的单元格写为空白。
+
+Word 普通表格与嵌套表格使用同一规则。顶层 `fontFamily`、`fontSize`、`bold`、
+`italic`、`color` 是整表文字默认值，单元格对象中的同名字段优先；对象还可使用
+`word_set_table_cell` 的文字、背景、水平/垂直对齐、段落格式和 `widthPercent`
+字段。例如：
+
+```js
+await window.aiBridge.word.addTable({
+  rows: 3,
+  cols: 2,
+  fontFamily: "宋体",
+  fontSize: 10.5,
+  data: [
+    ["项目", "数值"],
+    [
+      {
+        text: "营业收入",
+        fontFamily: "微软雅黑",
+        bold: true,
+        color: "#FFFFFF",
+        backgroundColor: "#2E74B5",
+        align: "center",
+        verticalAlign: "center",
+      },
+      128.6,
+    ],
+    [true, null],
+  ],
+});
+```
+
+PPT 单元格格式对象复用 `SlidesTableCellFormat`。创建时先应用各单元格对象，再用
+`header` 覆盖首行格式；只有 `header.text` 明确存在时才会覆盖首行单元格文字：
+
+```js
+await window.aiBridge.slides.addTable({
+  slide: 1,
+  rows: 2,
+  columns: 2,
+  data: [
+    [{ text: "指标", fontFamily: "微软雅黑", color: "#112233" }, "数值"],
+    [{ text: "毛利率", backgroundColor: "#E8EEF5", align: "right" }, 0.376],
+  ],
+  header: { bold: true, backgroundColor: "#DDEEFF", align: "center" },
+});
+```
+
+文字颜色字段只允许 `color`，不支持 `textColor`。格式对象缺少 `text`、出现未知
+字段、颜色/枚举/嵌套 `fill` 或 `border` 不符合 schema 时，整批会在任何文档变更前
+返回 `INVALID_TOOL_ARGUMENTS`；错误路径精确到对应单元格或字段，例如
+`arguments.data[1][0].textColor`。对象不会再被隐式写成 `[object Object]`。已经写入
+该字符串的旧文档不会自动迁移，需要重写相关单元格或重新生成文档。
+
 `word_replace_text` 的参数与结果没有变化。桥接首次替换时会探测运行时是否支持
 文档级 `SearchAndReplace()`：支持时，多个替换和同批表格、内容控件会按调用顺序留在
 同一个 mutation `callCommand` 与 history point 中；旧运行时自动使用兼容插件方法。
@@ -325,7 +383,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.4.0 的主要方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.4.1 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -373,7 +431,7 @@ sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
 sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.4.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.4.1`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -601,7 +659,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.4.0",
+    "version": "0.4.1",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -652,7 +710,7 @@ try {
 - `DOCUMENT_MISMATCH`：宿主页的当前 key 已改变，命令被拒绝。
 - `EDITOR_MISMATCH`：把 Word 命令发给了 PPT/表格实例。
 - `TOOL_NOT_ALLOWED`：当前编辑器不允许该工具。
-- `INVALID_TOOL_ARGUMENTS`：整批 `word_*` 参数在修改前校验失败；读取 `details.validationErrors[]` 一次修正全部错误，此时 `completedToolCalls=0` 且 `partialMutationPossible=false`。
+- `INVALID_TOOL_ARGUMENTS`：整批 `word_*` 参数或 `slides_add_table.data` 在修改前校验失败；读取 `details.validationErrors[]` 一次修正全部错误，此时 `completedToolCalls=0` 且 `partialMutationPossible=false`。
 - `INVALID_ARGUMENTS` / `INVALID_COMMAND`：运行期参数语义或命令结构不符合契约。
 - `INVALID_IMAGE_SOURCE`：图片来源类型、Data URL 或内部资源不合法。
 - `IMAGE_FETCH_BLOCKED` / `IMAGE_FETCH_FAILED`：URL 被网络策略拦截或下载失败。
@@ -710,6 +768,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.4.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.4.0-rev30`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.4.1`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.4.1-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。
