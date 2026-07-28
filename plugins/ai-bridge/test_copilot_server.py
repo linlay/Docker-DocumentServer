@@ -110,7 +110,7 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.1-rev1"
+        revision = "0.4.2-rev3"
         paths = [
             "config.json",
             "index.html",
@@ -201,7 +201,7 @@ class ContractAlignmentTests(unittest.TestCase):
             [],
         )
 
-        invalid_calls = [
+        compatibility_and_invalid_calls = [
             {
                 "name": "word_add_table",
                 "arguments": {
@@ -222,7 +222,12 @@ class ContractAlignmentTests(unittest.TestCase):
                 },
             },
         ]
-        word_errors = copilot_server.validate_editor_tool_calls("word", invalid_calls)
+        normalized_calls, normalizations = copilot_server.normalize_word_tool_calls(
+            compatibility_and_invalid_calls
+        )
+        word_errors = copilot_server.validate_word_tool_calls(
+            compatibility_and_invalid_calls
+        )
         slide_errors = copilot_server.validate_editor_tool_calls(
             "slide",
             [{
@@ -239,10 +244,14 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertEqual(
             [(error["tool"], error["path"]) for error in word_errors],
             [
-                ("word_add_table", "arguments.data[0][0].textColor"),
                 ("word_add_nested_table", "arguments.data[0][0].text"),
             ],
         )
+        self.assertEqual(
+            normalized_calls[0]["arguments"]["data"][0][0]["color"],
+            "#112233",
+        )
+        self.assertEqual(normalizations[0]["path"], "arguments.data[0][0].textColor")
         self.assertEqual(
             [(error["tool"], error["path"]) for error in slide_errors],
             [("slides_add_table", "arguments.data[0][0].text")],
@@ -1129,6 +1138,200 @@ class HttpRelayTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
+
+    def test_word_arguments_are_normalized_before_validation_and_fingerprinting(self):
+        allowed = [
+            "word_set_document_properties",
+            "word_set_page_layout",
+            "word_manage_section",
+            "word_manage_style",
+            "word_add_table",
+        ]
+        session = {
+            "state": {
+                "editorType": "word",
+                "capabilities": {"tools": allowed},
+            },
+        }
+        compatibility_calls = [
+            {
+                "name": "word_set_document_properties",
+                "arguments": {"author": "兼容作者"},
+            },
+            {
+                "name": "word_set_page_layout",
+                "arguments": {"differentFirstPage": True, "pageSize": "letter"},
+            },
+            {
+                "name": "word_manage_section",
+                "arguments": {"type": "Next Page"},
+            },
+            {
+                "name": "word_manage_style",
+                "arguments": {
+                    "name": "正文",
+                    "align": "justified",
+                    "lineRule": "multiple",
+                },
+            },
+            {
+                "name": "word_add_table",
+                "arguments": {
+                    "rows": 1,
+                    "columns": 1,
+                    "align": "centre",
+                    "data": [[{"text": "值", "textColor": "#112233"}]],
+                },
+            },
+        ]
+        canonical_calls = [
+            {
+                "name": "word_set_document_properties",
+                "arguments": {"creator": "兼容作者"},
+            },
+            {
+                "name": "word_set_page_layout",
+                "arguments": {"titlePage": True, "pageSize": "Letter"},
+            },
+            {
+                "name": "word_manage_section",
+                "arguments": {"type": "nextPage"},
+            },
+            {
+                "name": "word_manage_style",
+                "arguments": {
+                    "name": "正文",
+                    "align": "both",
+                    "lineRule": "auto",
+                },
+            },
+            {
+                "name": "word_add_table",
+                "arguments": {
+                    "rows": 1,
+                    "cols": 1,
+                    "align": "center",
+                    "data": [[{"text": "值", "color": "#112233"}]],
+                },
+            },
+        ]
+
+        compatibility = copilot_server.bridge_build_command(
+            {
+                "method": "executeBatch",
+                "requestId": "normalize-compatible",
+                "toolCalls": compatibility_calls,
+            },
+            session,
+        )
+        canonical = copilot_server.bridge_build_command(
+            {
+                "method": "executeBatch",
+                "requestId": "normalize-canonical",
+                "toolCalls": canonical_calls,
+            },
+            session,
+        )
+
+        self.assertEqual(compatibility["params"], canonical["params"])
+        self.assertGreaterEqual(len(compatibility["argumentNormalizations"]), 9)
+        self.assertEqual(canonical["argumentNormalizations"], [])
+        encoded = json.dumps(
+            compatibility["argumentNormalizations"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("兼容作者", encoded)
+        self.assertNotIn("#112233", encoded)
+
+    def test_word_canonical_property_wins_without_relaxing_unsafe_inputs(self):
+        normalized, normalizations = copilot_server.normalize_word_tool_calls(
+            [{
+                "name": "word_set_document_properties",
+                "arguments": {"author": 42, "creator": "标准作者"},
+            }]
+        )
+        self.assertEqual(normalized[0]["arguments"], {"creator": "标准作者"})
+        self.assertEqual(normalizations[0]["kind"], "canonicalWins")
+
+        invalid_cases = [
+            (
+                {
+                    "name": "word_set_document_properties",
+                    "arguments": {"unknownProperty": "x"},
+                },
+                "arguments.unknownProperty",
+            ),
+            (
+                {
+                    "name": "word_set_page_layout",
+                    "arguments": {"differentFirstPage": "true"},
+                },
+                "arguments.titlePage",
+            ),
+            (
+                {
+                    "name": "word_append_paragraph",
+                    "arguments": {"text": "x", "leftIndent": 720},
+                },
+                "arguments.leftIndent",
+            ),
+        ]
+        for call, expected_path in invalid_cases:
+            with self.subTest(expected_path=expected_path):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.require_valid_word_tool_calls([call])
+                self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
+                self.assertIn(
+                    expected_path,
+                    [
+                        error["path"]
+                        for error in raised.exception.details["validationErrors"]
+                    ],
+                )
+
+    def test_word_validate_batch_is_read_only_and_returns_safe_normalizations(self):
+        self.register()
+        with copilot_server.BRIDGE_CONDITION:
+            session = copilot_server.BRIDGE_SESSIONS["http-session:test"]
+            session["state"]["capabilities"]["tools"] = [
+                "word_set_document_properties",
+                "word_manage_style",
+            ]
+        claims = {
+            "fileName": "demo.docx",
+            "fileType": "docx",
+            "editorType": "word",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+        commands_before = dict(copilot_server.BRIDGE_COMMANDS)
+        requests_before = dict(copilot_server.BRIDGE_REQUESTS)
+
+        result = copilot_server.bridge_validate(
+            {
+                "toolCalls": [
+                    {
+                        "name": "word_set_document_properties",
+                        "arguments": {"author": "预检作者"},
+                    },
+                    {
+                        "name": "word_manage_style",
+                        "arguments": {"name": "正文", "align": "JUSTIFY"},
+                    },
+                ],
+            },
+            claims,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["toolCalls"], 2)
+        self.assertEqual(len(result["argumentNormalizations"]), 2)
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
+        self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
+        self.assertNotIn(
+            "预检作者",
+            json.dumps(result["argumentNormalizations"], ensure_ascii=False),
+        )
 
     def test_word_batch_collects_all_argument_errors_before_enqueue(self):
         self.register()

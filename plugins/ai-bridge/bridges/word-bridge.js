@@ -22,6 +22,208 @@
     return (call && (call.arguments || call.args)) || {};
   }
 
+  const WORD_PROPERTY_ALIASES = {
+    characterSpacing: "characterSpacingPt",
+    spacingBefore: "spacingBeforePt",
+    spacingAfter: "spacingAfterPt",
+    firstLineIndent: "firstLineIndentPt",
+    leftIndent: "leftIndentPt",
+    rightIndent: "rightIndentPt",
+  };
+  const WORD_POINT_ALIAS_TOOLS = new Set([
+    "word_append_paragraph",
+    "word_insert_paragraph",
+    "word_format_document",
+    "word_format_selection",
+    "word_format_matches",
+    "word_format_paragraphs",
+    "word_set_paragraph_text",
+    "word_set_table_cell",
+    "word_manage_style",
+  ]);
+  const WORD_ENUM_FIELDS = new Set([
+    "action",
+    "align",
+    "appearance",
+    "contentMode",
+    "direction",
+    "format",
+    "insertAt",
+    "kind",
+    "legendPosition",
+    "lineRule",
+    "listType",
+    "lock",
+    "matchMode",
+    "mode",
+    "orientation",
+    "pageSize",
+    "position",
+    "referenceKind",
+    "rowHeightRule",
+    "sides",
+    "style",
+    "target",
+    "type",
+    "valueType",
+    "vertAlign",
+    "verticalAlign",
+    "wrapping",
+  ]);
+  const WORD_CANONICAL_ENUM_VALUES = [
+    "A4", "Legal", "Letter", "acceptAll", "add", "addCaption", "addColumn",
+    "addCrossReference", "addEndnote", "addFootnote", "addRow",
+    "addTableOfFigures", "addToc", "after", "any", "append", "around",
+    "atLeast", "auto", "bar", "baseline", "before", "behind", "block",
+    "bookmark", "boolean", "both", "bottom", "boundingBox", "bullet",
+    "caption", "center", "character", "chart", "check", "checkbox", "clear",
+    "clearForms", "comboBox", "comments", "configure", "contains", "content",
+    "continuous", "control", "create", "current", "custom", "date",
+    "datePicker", "decimal", "default", "delete", "deleteAttribute",
+    "deleteBookmark", "deleteElement", "down", "dropDown", "edit", "end",
+    "endnote", "even", "evenPage", "exact", "first", "footer", "footnote",
+    "forms", "header", "heading", "hidden", "image", "inFront", "inline",
+    "insertAttribute", "insertElement", "landscape", "latex", "left",
+    "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
+    "number", "numbered", "numbering", "oddPage", "oleObject", "onlyoffice",
+    "page", "paragraph", "picture", "portrait", "previous", "protect",
+    "readOnly", "rejectAll", "relative", "remove", "removeAll",
+    "removeColumn", "removeRow", "reopen", "replace", "reply", "resolve",
+    "right", "search", "set", "setImage", "setText", "shape", "smartArt",
+    "splitCell", "square", "start", "stop", "string", "subscript",
+    "superscript", "table", "through", "tight", "top", "topAndBottom",
+    "unicode", "unprotect", "up", "update", "updateAll", "updateAttribute",
+    "updateElement", "updateTableOfFigures", "updateToc", "vba",
+  ];
+  const WORD_ENUM_CANONICAL_BY_TOKEN = WORD_CANONICAL_ENUM_VALUES.reduce(
+    function (map, value) {
+      map[enumToken(value)] = value;
+      return map;
+    },
+    {},
+  );
+
+  function enumToken(value) {
+    return String(value).toLowerCase().replace(/[\s_-]+/g, "");
+  }
+
+  function normalizeWordToolCalls(toolCalls) {
+    const calls = JSON.parse(JSON.stringify(Array.isArray(toolCalls) ? toolCalls : []));
+    const argumentNormalizations = [];
+
+    function notice(toolCallIndex, path, canonicalPath, kind) {
+      argumentNormalizations.push({
+        toolCallIndex,
+        path,
+        canonicalPath,
+        kind,
+      });
+    }
+
+    function aliasProperty(target, alias, canonical, path, toolCallIndex) {
+      if (!Object.prototype.hasOwnProperty.call(target, alias)) return;
+      const canonicalWins = Object.prototype.hasOwnProperty.call(target, canonical);
+      if (!canonicalWins) target[canonical] = target[alias];
+      delete target[alias];
+      notice(
+        toolCallIndex,
+        path + "." + alias,
+        path + "." + canonical,
+        canonicalWins ? "canonicalWins" : "propertyAlias",
+      );
+    }
+
+    function normalizeEnums(value, field, path, toolCallIndex, toolName) {
+      if (Array.isArray(value)) {
+        return value.map(function (item, index) {
+          return normalizeEnums(item, field, path + "[" + index + "]", toolCallIndex, toolName);
+        });
+      }
+      if (value && typeof value === "object") {
+        for (const key of Object.keys(value)) {
+          value[key] = normalizeEnums(
+            value[key],
+            key,
+            path + "." + key,
+            toolCallIndex,
+            toolName,
+          );
+        }
+        return value;
+      }
+      if (typeof value !== "string" || !WORD_ENUM_FIELDS.has(field)) return value;
+      const token = enumToken(value);
+      let canonical = null;
+      let kind = "enumCanonicalization";
+      if (field === "align" && token === "centre") {
+        canonical = "center";
+        kind = "enumAlias";
+      } else if (
+        field === "align"
+        && (token === "justify" || token === "justified")
+        && toolName !== "word_add_table"
+        && toolName !== "word_add_nested_table"
+      ) {
+        canonical = "both";
+        kind = "enumAlias";
+      } else if (field === "lineRule" && token === "multiple") {
+        canonical = "auto";
+        kind = "enumAlias";
+      } else {
+        canonical = WORD_ENUM_CANONICAL_BY_TOKEN[token] || null;
+      }
+      if (canonical && canonical !== value) {
+        notice(toolCallIndex, path, path, kind);
+        return canonical;
+      }
+      return value;
+    }
+
+    function normalizeCell(cell, path, toolCallIndex) {
+      if (!cell || typeof cell !== "object" || Array.isArray(cell)) return;
+      aliasProperty(cell, "textColor", "color", path, toolCallIndex);
+      for (const alias of Object.keys(WORD_PROPERTY_ALIASES)) {
+        aliasProperty(cell, alias, WORD_PROPERTY_ALIASES[alias], path, toolCallIndex);
+      }
+    }
+
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index] || {};
+      const toolName = String(call.name || "");
+      const argumentKey = call.arguments ? "arguments" : (call.args ? "args" : "arguments");
+      const args = call[argumentKey] || {};
+      call[argumentKey] = args;
+      if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+      if (toolName === "word_set_document_properties") {
+        aliasProperty(args, "author", "creator", "arguments", index);
+      }
+      if (toolName === "word_set_page_layout" || toolName === "word_manage_section") {
+        aliasProperty(args, "differentFirstPage", "titlePage", "arguments", index);
+      }
+      if (toolName === "word_add_table" || toolName === "word_add_nested_table") {
+        aliasProperty(args, "columns", "cols", "arguments", index);
+        const data = Array.isArray(args.data) ? args.data : [];
+        for (let row = 0; row < data.length; row += 1) {
+          if (!Array.isArray(data[row])) continue;
+          for (let column = 0; column < data[row].length; column += 1) {
+            normalizeCell(
+              data[row][column],
+              "arguments.data[" + row + "][" + column + "]",
+              index,
+            );
+          }
+        }
+      }
+      if (WORD_POINT_ALIAS_TOOLS.has(toolName)) {
+        for (const alias of Object.keys(WORD_PROPERTY_ALIASES)) {
+          aliasProperty(args, alias, WORD_PROPERTY_ALIASES[alias], "arguments", index);
+        }
+      }
+      normalizeEnums(args, "", "arguments", index, toolName);
+    }
+    return { toolCalls: calls, argumentNormalizations };
+  }
+
   const WORD_TABLE_CELL_FIELD_TYPES = {
     text: "string",
     fontSize: "number",
@@ -30,6 +232,7 @@
     italic: "boolean",
     underline: "boolean",
     color: "color",
+    textColor: "color",
     highlightColor: "color",
     characterSpacing: "number",
     characterSpacingPt: "number",
@@ -139,18 +342,6 @@
         for (const pair of pointFieldPairs) {
           const explicitField = pair[0];
           const legacyField = pair[1];
-          if (
-            Object.prototype.hasOwnProperty.call(cell, explicitField)
-            && Object.prototype.hasOwnProperty.call(cell, legacyField)
-          ) {
-            add(
-              index,
-              name,
-              cellPath + "." + explicitField,
-              explicitField + " and " + legacyField + " cannot both be provided",
-              "semantic"
-            );
-          }
           const legacyValue = cell[legacyField];
           if (
             pair[2]
@@ -275,8 +466,10 @@
     return errors;
   }
 
-  function requireStaticValidation(toolCalls) {
-    const validationErrors = collectStaticValidationErrors(toolCalls);
+  function requireStaticValidation(toolCalls, preliminaryErrors) {
+    const validationErrors = collectStaticValidationErrors(toolCalls).concat(
+      preliminaryErrors || [],
+    );
     if (!validationErrors.length) return;
     const error = new Error("Word 工具参数校验失败");
     error.code = "INVALID_TOOL_ARGUMENTS";
@@ -286,6 +479,48 @@
       partialMutationPossible: false,
     };
     throw error;
+  }
+
+  function collectUnsafeLegacyPointUnits(toolCalls) {
+    const validationErrors = [];
+
+    function visit(value, path, toolCallIndex, tool) {
+      if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index += 1) {
+          visit(value[index], path + "[" + index + "]", toolCallIndex, tool);
+        }
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      for (const field of Object.keys(value)) {
+        const childPath = path + "." + field;
+        const child = value[field];
+        if (
+          (field === "firstLineIndent" || field === "leftIndent" || field === "rightIndent")
+          && !Object.prototype.hasOwnProperty.call(value, WORD_PROPERTY_ALIASES[field])
+          && typeof child === "number"
+          && Number.isFinite(child)
+          && Math.abs(child) >= 300
+          && Math.abs(child) <= 2880
+          && Math.abs(child % 20) < 0.000001
+        ) {
+          validationErrors.push({
+            toolCallIndex,
+            tool,
+            path: childPath,
+            keyword: "semantic",
+            message: field + " is point-valued and appears to contain twips",
+          });
+        }
+        visit(child, childPath, toolCallIndex, tool);
+      }
+    }
+
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+    for (let index = 0; index < calls.length; index += 1) {
+      visit(getArgs(calls[index]), "arguments", index, String((calls[index] || {}).name || ""));
+    }
+    return validationErrors;
   }
 
   let nativeSearchAndReplaceSupported = null;
@@ -982,6 +1217,7 @@
                 var matchingIndexes = [];
                 for (var paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
                   var text = paragraphText(paragraphs[paragraphIndex]);
+                  if (matchMode === "exact") text = text.replace(/[\r\n]+$/, "");
                   var haystack = matchCase ? text : text.toLowerCase();
                   if ((matchMode === "exact" && haystack === needle) || (matchMode !== "exact" && haystack.indexOf(needle) !== -1)) {
                     matchingIndexes.push(paragraphIndex);
@@ -1785,6 +2021,12 @@
                         style: style && typeof style.GetName === "function" ? style.GetName() : null,
                         outlineLevel: typeof paragraph.GetOutlineLvl === "function" ? paragraph.GetOutlineLvl() : null,
                         align: typeof paragraph.GetJc === "function" ? paragraph.GetJc() : null,
+                        spacingBeforePt: typeof paragraph.GetSpacingBefore === "function"
+                          ? Number(paragraph.GetSpacingBefore()) / 20
+                          : null,
+                        spacingAfterPt: typeof paragraph.GetSpacingAfter === "function"
+                          ? Number(paragraph.GetSpacingAfter()) / 20
+                          : null,
                         inTable: typeof paragraph.GetParentTable === "function" ? Boolean(paragraph.GetParentTable()) : false,
                       });
                     }
@@ -1796,7 +2038,12 @@
                     var columns = rows && table.GetRow(0) && typeof table.GetRow(0).GetCellsCount === "function"
                       ? table.GetRow(0).GetCellsCount()
                       : 0;
-                    tableDetails.push({ index: tableIndex + 1, rows: rows, columns: columns });
+                    tableDetails.push({
+                      index: tableIndex + 1,
+                      rows: rows,
+                      columns: columns,
+                      align: typeof table.GetJc === "function" ? table.GetJc() : null,
+                    });
                   }
                   var comments = [];
                   if (args.includeComments === true && typeof doc.GetAllComments === "function") {
@@ -2660,6 +2907,12 @@
                   var cols = Math.min(50, Math.max(1, Math.floor(Number(args.cols) || 1)));
                   var table = Api.CreateTable(rows, cols);
                   table.SetWidth("percent", Math.min(100, Math.max(10, Number(args.widthPercent) || 100)));
+                  if (args.align !== undefined) {
+                    requireMethod(table, "SetJc", "设置 Word 表格整体对齐").call(
+                      table,
+                      String(args.align),
+                    );
+                  }
                   if (args.styleName) table.SetStyle(resolveStyle(args.styleName, "table"));
                   else {
                     var borderedStyle = typeof doc.GetStyle === "function" ? doc.GetStyle("Bordered") : null;
@@ -3033,6 +3286,12 @@
                   var nestedCols = Math.min(20, Math.max(1, Math.floor(finiteNumber(args.cols, "cols"))));
                   var nestedTable = Api.CreateTable(nestedRows, nestedCols);
                   if (args.widthPercent !== undefined) nestedTable.SetWidth("percent", Math.min(100, Math.max(1, finiteNumber(args.widthPercent, "widthPercent"))));
+                  if (args.align !== undefined) {
+                    requireMethod(nestedTable, "SetJc", "设置 Word 嵌套表格整体对齐").call(
+                      nestedTable,
+                      String(args.align),
+                    );
+                  }
                   if (args.styleName) nestedTable.SetStyle(resolveStyle(args.styleName, "table"));
                   var nestedData = Array.isArray(args.data) ? args.data : [];
                   for (var nestedRowIndex = 0; nestedRowIndex < nestedRows; nestedRowIndex += 1) {
@@ -4032,6 +4291,9 @@
   }
 
   async function execute(toolCalls) {
+    const originalCalls = Array.isArray(toolCalls) ? toolCalls : [];
+    const unsafeUnitErrors = collectUnsafeLegacyPointUnits(originalCalls);
+    const normalizedInput = normalizeWordToolCalls(originalCalls);
     const aggregate = {
       ok: true,
       editorType: "word",
@@ -4039,8 +4301,11 @@
       needsSave: false,
       results: [],
     };
-    const calls = toolCalls || [];
-    requireStaticValidation(calls);
+    if (normalizedInput.argumentNormalizations.length) {
+      aggregate.argumentNormalizations = normalizedInput.argumentNormalizations;
+    }
+    const calls = normalizedInput.toolCalls;
+    requireStaticValidation(calls, unsafeUnitErrors);
     const hasReplacement = calls.some(function (call) {
       return call && call.name === "word_replace_text";
     });

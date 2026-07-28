@@ -646,6 +646,8 @@ function createWordBridgeHarness(options = {}) {
       SetStyle(value) { this.style = value; return true; },
       SetSpacingBefore(value) { this.spacingBefore = value; return true; },
       SetSpacingAfter(value) { this.spacingAfter = value; return true; },
+      GetSpacingBefore() { return this.spacingBefore === undefined ? 0 : this.spacingBefore; },
+      GetSpacingAfter() { return this.spacingAfter === undefined ? 0 : this.spacingAfter; },
       SetSpacingLine(value, rule) { this.spacingLine = { value, rule }; return true; },
       SetIndFirstLine(value) { this.firstLineIndent = value; return true; },
       SetIndLeft(value) { this.leftIndent = value; return true; },
@@ -689,6 +691,8 @@ function createWordBridgeHarness(options = {}) {
       GetRowsCount() { return this.rows.length; },
       GetRow(index) { return this.rows[index] || null; },
       SetWidth(kind, value) { this.width = { kind, value }; return true; },
+      SetJc(value) { this.align = value; return true; },
+      GetJc() { return this.align || "left"; },
       SetStyle(value) { this.style = value; return true; },
       SetTableLook(...values) { this.tableLook = values; return true; },
       SetTableTitle(value) { this.title = String(value); return true; },
@@ -1112,7 +1116,7 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const { hostWindow } = createHarness();
   await hostWindow.aiBridge.ready({ timeoutMs: 1000 });
 
-  assert.equal(hostWindow.aiBridge.version, "0.4.1");
+  assert.equal(hostWindow.aiBridge.version, "0.4.2");
   assert.equal(hostWindow.aiBridge.editorType, "word");
   assert.equal(hostWindow.aiBridge.context.documentKey, "doc-key-v1");
   assert.ok(hostWindow.aiBridge.capabilities.tools.includes("word_inspect"));
@@ -1667,8 +1671,20 @@ test("public table contracts expose scalar and formatted cell inputs", () => {
   assert.deepEqual(publicContract.$defs.wordTableCell.required, ["text"]);
   assert.equal(publicContract.$defs.wordTableCell.additionalProperties, false);
   assert.equal(publicContract.$defs.wordTableCell.properties.text.type, "string");
-  assert.equal(publicContract.$defs.wordTableCell.properties.textColor, undefined);
+  assert.equal(publicContract.$defs.wordTableCell.properties.textColor.deprecated, true);
+  assert.equal(
+    publicContract.$defs.wordTableCell.properties.textColor["x-canonicalProperty"],
+    "color",
+  );
   assert.deepEqual(publicContract.$defs.slideTableCell.required, ["text"]);
+  assert.deepEqual(
+    publicContract.tools.word.word_add_table.properties.align.enum,
+    ["left", "center", "right"],
+  );
+  assert.deepEqual(
+    publicContract.tools.word.word_add_nested_table.properties.align.enum,
+    ["left", "center", "right"],
+  );
 
   const wordCell = publicContract.tools.word.word_add_table
     .properties.data.items.items.anyOf;
@@ -1704,6 +1720,112 @@ test("public Word contract makes paragraph point units explicit", () => {
     assert.match(properties.leftIndent.description, /Never pass twips/);
   }
   assert.match(publicContract.unitConventions.word, /Never pass OOXML twips or EMU/);
+});
+
+test("Word schema, TypeScript arguments, and runtime paragraph fields stay aligned", () => {
+  const declarations = fs.readFileSync(
+    path.join(__dirname, "public-api.d.ts"),
+    "utf8",
+  );
+  const interfaces = new Map();
+  const declarationPattern = /export interface\s+(\w+)(?:\s+extends\s+([^{]+))?\s*\{/g;
+  let match;
+  while ((match = declarationPattern.exec(declarations))) {
+    let depth = 1;
+    let cursor = declarationPattern.lastIndex;
+    while (cursor < declarations.length && depth) {
+      if (declarations[cursor] === "{") depth += 1;
+      else if (declarations[cursor] === "}") depth -= 1;
+      cursor += 1;
+    }
+    const body = declarations.slice(declarationPattern.lastIndex, cursor - 1);
+    const fields = new Set();
+    let member = "";
+    let memberDepth = 0;
+    for (const character of body) {
+      if (character === "{") memberDepth += 1;
+      if (character === "}") memberDepth -= 1;
+      member += character;
+      if (character === ";" && memberDepth === 0) {
+        const field = member.match(/([A-Za-z]\w*)\??\s*:/);
+        if (field) fields.add(field[1]);
+        member = "";
+      }
+    }
+    interfaces.set(match[1], {
+      extends: String(match[2] || "")
+        .split(",")
+        .map(value => value.trim())
+        .filter(Boolean),
+      fields,
+    });
+    declarationPattern.lastIndex = cursor;
+  }
+
+  function flattenedFields(name, seen = new Set()) {
+    if (seen.has(name)) return new Set();
+    seen.add(name);
+    const declaration = interfaces.get(name);
+    assert.ok(declaration, "missing TypeScript interface " + name);
+    const fields = new Set(declaration.fields);
+    for (const parent of declaration.extends) {
+      for (const field of flattenedFields(parent, seen)) fields.add(field);
+    }
+    return fields;
+  }
+
+  const alignment = {
+    word_append_paragraph: "WordAppendParagraphArgs",
+    word_insert_paragraph: "WordInsertParagraphArgs",
+    word_format_document: "WordFormatDocumentArgs",
+    word_add_bookmark: "WordAddBookmarkArgs",
+    word_manage_style: "WordManageStyleArgs",
+    word_set_tabs: "WordSetTabsArgs",
+    word_set_numbering: "WordSetNumberingArgs",
+    word_format_paragraphs: "WordFormatParagraphsArgs",
+    word_set_paragraph_text: "WordSetParagraphTextArgs",
+    word_set_list: "WordSetListArgs",
+    word_add_table: "WordAddTableArgs",
+    word_set_table_cell: "WordSetTableCellArgs",
+    word_add_nested_table: "WordAddNestedTableArgs",
+  };
+  for (const [tool, interfaceName] of Object.entries(alignment)) {
+    assert.deepEqual(
+      [...flattenedFields(interfaceName)].sort(),
+      Object.keys(publicContract.tools.word[tool].properties || {}).sort(),
+      tool + " must expose the same fields in JSON schema and TypeScript",
+    );
+  }
+
+  const wordBridgeSource = fs.readFileSync(
+    path.join(__dirname, "bridges", "word-bridge.js"),
+    "utf8",
+  );
+  const runtimeTextMatch = wordBridgeSource.match(
+    /var textFormatKeys = \[([\s\S]*?)\];/,
+  );
+  const runtimeParagraphMatch = wordBridgeSource.match(
+    /var paragraphFormatKeys = textFormatKeys\.concat\(\[([\s\S]*?)\]\);/,
+  );
+  assert.ok(runtimeTextMatch);
+  assert.ok(runtimeParagraphMatch);
+  const runtimeFields = [
+    ...runtimeTextMatch[1].matchAll(/"([^"]+)"/g),
+    ...runtimeParagraphMatch[1].matchAll(/"([^"]+)"/g),
+  ].map(value => value[1]);
+  for (const tool of [
+    "word_append_paragraph",
+    "word_insert_paragraph",
+    "word_format_document",
+    "word_format_paragraphs",
+    "word_set_paragraph_text",
+    "word_set_table_cell",
+  ]) {
+    const schemaFields = publicContract.tools.word[tool].properties;
+    for (const field of runtimeFields) {
+      assert.ok(schemaFields[field], tool + " schema is missing runtime field " + field);
+    }
+  }
 });
 
 test("DOCX capability matrix covers D01 through D70 exactly once", () => {
@@ -2214,7 +2336,7 @@ test("word bridge formats only matching text ranges", async () => {
   assert.ok(harness.formattedRanges.every(range => range.bold === true && range.italic === true));
 });
 
-test("word bridge accepts explicit point fields once and rejects ambiguous twips", async () => {
+test("word bridge normalizes safe point aliases, lets canonical fields win, and rejects ambiguous twips", async () => {
   const harness = createWordBridgeHarness({ text: "已有正文" });
 
   await harness.bridge.execute([{
@@ -2242,29 +2364,37 @@ test("word bridge accepts explicit point fields once and rejects ambiguous twips
       name: "word_append_paragraph",
       arguments: { text: "错误缩进", leftIndent: 720 },
     }]),
-    /leftIndent 的单位是磅（pt）.*leftIndentPt: 36.*不要传入 twips/,
+    error => error.code === "INVALID_TOOL_ARGUMENTS"
+      && error.details.validationErrors[0].path === "arguments.leftIndent",
   );
   await assert.rejects(
     harness.bridge.execute([{
       name: "word_append_paragraph",
       arguments: { text: "错误悬挂缩进", firstLineIndent: -360 },
     }]),
-    /firstLineIndent 的单位是磅（pt）.*firstLineIndentPt: -18.*不要传入 twips/,
+    error => error.code === "INVALID_TOOL_ARGUMENTS"
+      && error.details.validationErrors[0].path === "arguments.firstLineIndent",
   );
-  await assert.rejects(
-    harness.bridge.execute([{
-      name: "word_append_paragraph",
-      arguments: { text: "字段冲突", leftIndent: 36, leftIndentPt: 36 },
-    }]),
-    /leftIndentPt 与旧字段 leftIndent 不能同时提供/,
-  );
-  await assert.rejects(
-    harness.bridge.execute([{
-      name: "word_append_paragraph",
-      arguments: { text: "错误行距", lineSpacing: 1.5, lineRule: "multiple" },
-    }]),
-    /lineRule 必须是 auto、exact 或 atLeast；多倍行距使用 auto/,
-  );
+  const canonicalWins = await harness.bridge.execute([{
+    name: "word_append_paragraph",
+    arguments: { text: "字段兼容", leftIndent: 720, leftIndentPt: 36 },
+  }]);
+  assert.equal(harness.paragraphObjects.at(-1).leftIndent, 720);
+  assert.deepEqual(JSON.parse(JSON.stringify(canonicalWins.argumentNormalizations)), [{
+    toolCallIndex: 0,
+    path: "arguments.leftIndent",
+    canonicalPath: "arguments.leftIndentPt",
+    kind: "canonicalWins",
+  }]);
+  const legacyLineRule = await harness.bridge.execute([{
+    name: "word_append_paragraph",
+    arguments: { text: "兼容行距", lineSpacing: 1.5, lineRule: "multiple" },
+  }]);
+  assert.deepEqual(harness.paragraphObjects.at(-1).spacingLine, {
+    value: 360,
+    rule: "auto",
+  });
+  assert.equal(legacyLineRule.argumentNormalizations[0].kind, "enumAlias");
 });
 
 test("word bridge creates ONLYOFFICE run styles for public character styles and applies them", async () => {
@@ -2550,6 +2680,50 @@ test("word bridge classifies the observed page-break and table argument failures
     },
   );
   assert.equal(tableHarness.historyPoints, 0);
+});
+
+test("word bridge exact paragraph targets ignore the terminal paragraph mark", async () => {
+  const harness = createWordBridgeHarness({
+    paragraphs: ["内部测试材料\r\n", "下一页"],
+  });
+
+  const result = await harness.bridge.execute([{
+    name: "word_insert_page_break",
+    arguments: {
+      search: "内部测试材料",
+      matchMode: "exact",
+      occurrence: 1,
+      position: "after",
+    },
+  }]);
+
+  assert.equal(result.changed, 1);
+  assert.equal(result.results[0].pageBreaks, 1);
+  assert.equal(harness.paragraphObjects[0].pageBreakAfter, true);
+  assert.equal(harness.paragraphObjects[1].pageBreakAfter, undefined);
+});
+
+test("word inspection reports paragraph spacing and whole-table alignment", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["表格前"] });
+
+  const result = await harness.bridge.execute([
+    {
+      name: "word_format_paragraphs",
+      arguments: { paragraphIndexes: [1], spacingAfterPt: 6 },
+    },
+    {
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1, align: "center", data: [["值"]] },
+    },
+    {
+      name: "word_inspect",
+      arguments: { includeStructure: true },
+    },
+  ]);
+
+  const inspection = result.results[2];
+  assert.equal(inspection.paragraphDetails[0].spacingAfterPt, 6);
+  assert.equal(inspection.tableDetails[0].align, "center");
 });
 
 test("word bridge aggregates all static semantic failures before creating history", async () => {
@@ -2841,6 +3015,7 @@ test("word bridge writes scalar and formatted cells in regular and nested tables
       arguments: {
         rows: 2,
         cols: 3,
+        align: "Centre",
         fontFamily: "宋体",
         fontSize: 9,
         data: [
@@ -2869,9 +3044,10 @@ test("word bridge writes scalar and formatted cells in regular and nested tables
         column: 1,
         rows: 1,
         cols: 2,
+        align: "RIGHT",
         fontFamily: "宋体",
         data: [[
-          { text: "子标题", bold: true, color: "#2E74B5" },
+          { text: "子标题", bold: true, textColor: "#2E74B5" },
           "子值",
         ]],
       },
@@ -2887,6 +3063,8 @@ test("word bridge writes scalar and formatted cells in regular and nested tables
   const nestedRun = nestedTable.GetRow(0).GetCell(0).GetContent().GetAllParagraphs()[0].runs[0];
 
   assert.equal(result.changed, 7);
+  assert.equal(table.align, "center");
+  assert.equal(nestedTable.align, "right");
   assert.equal(formattedParagraph.text, "指标");
   assert.equal(formattedRun.fontFamily, "微软雅黑");
   assert.equal(formattedRun.bold, true);
@@ -2929,7 +3107,6 @@ test("word bridge rejects invalid formatted table cells before mutation", async 
       assert.deepEqual(
         Array.from(error.details.validationErrors, item => item.path),
         [
-          "arguments.data[0][0].textColor",
           "arguments.data[0][1].text",
           "arguments.data[0][2].text",
           "arguments.data[0][3].leftIndent",

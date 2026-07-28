@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.4.1`
+- Version: `0.4.2`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.1-rev1",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.2-rev3",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -128,7 +128,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.1-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.2-rev3"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -157,7 +157,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.1-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.2-rev3"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -415,6 +415,17 @@ The localhost example exposes these additional endpoints:
 - `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
   requested tool against the authoritative page capabilities, treats a supplied
   browser `sessionId` as a compatibility hint, and waits for the live result.
+- `POST /copilot-api/bridge/validate`: accepts a Word `toolCalls` batch and runs
+  the same normalization, schema, and semantic validation as execution without
+  polling the editor or creating a history point.
+
+Word arguments are normalized before validation and idempotency fingerprinting.
+The machine-readable policy is `inputNormalization.word` in `public-api.json`;
+canonical fields win over deprecated aliases, and known enum spelling/case
+variants are converted to the contract value. Responses may include
+`argumentNormalizations` with paths and conversion kinds only. Unknown fields,
+implicit string-to-number/boolean coercion, suspicious twips-as-points values,
+and targetless destructive or pagination operations remain errors.
 
 The real `/docx/<uuid>`, `/xlsx/<uuid>`, or `/pptx/<uuid>` capability page must
 remain open in a browser with its Relay ready. The caller then sends the exact

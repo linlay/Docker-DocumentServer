@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.4.1";
+  const VERSION = "0.4.2";
   const PROTOCOL_VERSION = 1;
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;

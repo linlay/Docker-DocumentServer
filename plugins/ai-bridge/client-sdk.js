@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.4.1";
+  const VERSION = "0.4.2";
   const PROTOCOL_VERSION = 1;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CLIENT_SOURCE = "ai-bridge-client";

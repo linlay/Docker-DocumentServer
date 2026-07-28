@@ -60,13 +60,21 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.4.1";
+  version: "0.4.2";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   ready: boolean;
   editorType: AiBridgeEditorType | null;
   context: AiBridgeContext;
   capabilities: AiBridgeCapabilities | null;
+}
+
+export interface AiBridgeArgumentNormalization {
+  toolCallIndex: number;
+  /** Source path only; parameter values are never echoed. */
+  path: string;
+  canonicalPath: string;
+  kind: "propertyAlias" | "canonicalWins" | "enumAlias" | "enumCanonicalization";
 }
 
 export interface AiBridgeExecutionResult {
@@ -77,6 +85,15 @@ export interface AiBridgeExecutionResult {
   results: Array<Record<string, unknown>>;
   persisted: boolean;
   forceSave?: Record<string, unknown>;
+  argumentNormalizations?: AiBridgeArgumentNormalization[];
+}
+
+export interface AiBridgeWordValidationResult {
+  ok: true;
+  valid: true;
+  editorType: "word";
+  toolCalls: number;
+  argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
 
 export interface AiBridgeServiceResult extends Record<string, unknown> {
@@ -216,9 +233,11 @@ export interface WordAddCommentArgs extends WordSearchTarget {
   author?: string;
   userId?: string;
 }
-export interface WordAddBookmarkArgs extends WordSearchTarget {
+export interface WordAddBookmarkArgs {
+  search: string;
   occurrence: number;
   name: string;
+  matchCase?: boolean;
 }
 export interface WordAddImageArgs {
   source: AiBridgeImageSource;
@@ -258,6 +277,8 @@ export interface WordScrollArgs { direction?: "up" | "down"; pages?: number; }
 export interface WordScaleFontArgs { scale: number; }
 export interface WordTableCellInput extends BasicTextFormat {
   text: string;
+  /** @deprecated Compatibility alias for color. Prefer color. */
+  textColor?: string;
   underline?: boolean;
   highlightColor?: string;
   /** @deprecated Point-valued legacy alias. Prefer characterSpacingPt. Never pass twips. */
@@ -285,8 +306,12 @@ export interface WordTableCellInput extends BasicTextFormat {
 export interface WordAddTableArgs extends BasicTextFormat {
   rows: number;
   cols: number;
+  /** @deprecated Compatibility alias for cols. Prefer cols. */
+  columns?: number;
   data?: Array<Array<AiBridgeTableCellScalar | WordTableCellInput>>;
   widthPercent?: number;
+  /** Whole-table alignment; cell paragraph alignment belongs in data cell objects. */
+  align?: "left" | "center" | "right";
   styleName?: string;
   firstRow?: boolean;
   lastRow?: boolean;
@@ -365,6 +390,8 @@ export interface WordSetPageLayoutArgs {
   headerDistanceMm?: number;
   footerDistanceMm?: number;
   titlePage?: boolean;
+  /** @deprecated Compatibility alias for titlePage. Prefer titlePage. */
+  differentFirstPage?: boolean;
 }
 export interface WordSetHeaderFooterArgs extends BasicTextFormat {
   kind: "header" | "footer";
@@ -400,6 +427,8 @@ export interface WordSetDocumentPropertiesArgs {
   title?: string;
   subject?: string;
   creator?: string;
+  /** @deprecated Compatibility alias for creator. Prefer creator. */
+  author?: string;
   description?: string;
   keywords?: string;
   category?: string;
@@ -428,6 +457,8 @@ export interface WordManageSectionArgs {
   type?: "continuous" | "nextPage" | "evenPage" | "oddPage";
   startPageNumber?: number;
   titlePage?: boolean;
+  /** @deprecated Compatibility alias for titlePage. Prefer titlePage. */
+  differentFirstPage?: boolean;
   evenAndOddHeaders?: boolean;
   columns?: {
     count?: number;
@@ -435,11 +466,40 @@ export interface WordManageSectionArgs {
     entries?: WordSectionColumn[];
   };
 }
-export interface WordManageStyleArgs extends WordParagraphFormat {
+export interface WordManageStyleArgs {
   action?: "create" | "update";
   name: string;
   type?: "paragraph" | "character" | "table" | "numbering";
   basedOn?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  color?: string;
+  highlightColor?: string;
+  /** @deprecated Point-valued legacy alias. Prefer characterSpacingPt. */
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  align?: "left" | "center" | "right" | "both";
+  /** @deprecated Point-valued legacy aliases. Prefer the corresponding *Pt fields. */
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  /** @deprecated Point-valued legacy aliases. Prefer the corresponding *Pt fields. */
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  pageBreakBefore?: boolean;
 }
 export interface WordTabStop {
   positionMm: number;
@@ -496,8 +556,12 @@ export interface WordAddNestedTableArgs extends BasicTextFormat {
   column: number;
   rows: number;
   cols: number;
+  /** @deprecated Compatibility alias for cols. Prefer cols. */
+  columns?: number;
   data?: Array<Array<AiBridgeTableCellScalar | WordTableCellInput>>;
   widthPercent?: number;
+  /** Whole-table alignment; cell paragraph alignment belongs in data cell objects. */
+  align?: "left" | "center" | "right";
   styleName?: string;
 }
 export interface WordDrawingTarget {
@@ -1958,7 +2022,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.4.1";
+  readonly version: "0.4.2";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

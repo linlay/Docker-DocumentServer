@@ -231,7 +231,7 @@ def resolve_contract_schema(value: Any, definitions: dict[str, Any]) -> Any:
     }
 
 
-def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[str, Any]]:
+def load_public_contract() -> dict[str, Any]:
     configured_path = os.environ.get("COPILOT_PUBLIC_API")
     candidates = [
         configured_path,
@@ -243,7 +243,14 @@ def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[
     if not contract_path:
         raise RuntimeError("找不到 ai-bridge public-api.json")
     with open(contract_path, encoding="utf-8") as stream:
-        contract = json.load(stream)
+        return json.load(stream)
+
+
+PUBLIC_API_CONTRACT = load_public_contract()
+
+
+def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[str, Any]]:
+    contract = PUBLIC_API_CONTRACT
     schemas = contract.get("tools", {}).get(editor)
     if not isinstance(schemas, dict) or not schemas:
         raise RuntimeError(f"public-api.json 缺少 {editor} 工具契约")
@@ -394,6 +401,205 @@ ARGUMENT_SCHEMAS_BY_EDITOR = {
     }
     for editor, entries in TOOLS_BY_EDITOR.items()
 }
+WORD_NORMALIZATION_POLICY = (
+    (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get("word") or {}
+)
+WORD_PROPERTY_ALIASES = dict(WORD_NORMALIZATION_POLICY.get("propertyAliases") or {})
+WORD_ENUM_ALIASES = dict(WORD_NORMALIZATION_POLICY.get("enumAliases") or {})
+WORD_SUSPICIOUS_TWIPS_ALIASES = {
+    "firstLineIndent",
+    "leftIndent",
+    "rightIndent",
+}
+
+
+def normalized_enum_token(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", value).casefold()
+
+
+def schema_branches_for_value(schema: dict[str, Any], value: Any) -> list[dict[str, Any]]:
+    branches: list[dict[str, Any]] = []
+    for keyword in ("anyOf", "oneOf"):
+        candidates = schema.get(keyword)
+        if not isinstance(candidates, list):
+            continue
+        typed = [
+            branch
+            for branch in candidates
+            if isinstance(branch, dict)
+            and (
+                branch.get("type") is None
+                or (
+                    isinstance(branch.get("type"), list)
+                    and any(
+                        isinstance(item, str) and json_schema_type_matches(value, item)
+                        for item in branch["type"]
+                    )
+                )
+                or (
+                    isinstance(branch.get("type"), str)
+                    and json_schema_type_matches(value, branch["type"])
+                )
+            )
+        ]
+        branches.extend(typed or [branch for branch in candidates if isinstance(branch, dict)])
+    return branches
+
+
+def normalize_word_value(
+    value: Any,
+    schema: dict[str, Any],
+    path: str,
+    tool_call_index: int,
+    normalizations: list[dict[str, Any]],
+) -> Any:
+    for branch in schema_branches_for_value(schema, value):
+        value = normalize_word_value(
+            value,
+            branch,
+            path,
+            tool_call_index,
+            normalizations,
+        )
+
+    if isinstance(value, dict):
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return value
+        normalized = dict(value)
+        for alias, canonical in WORD_PROPERTY_ALIASES.items():
+            if alias not in normalized or canonical not in properties:
+                continue
+            alias_path = f"{path}.{alias}"
+            canonical_path = f"{path}.{canonical}"
+            kind = "canonicalWins" if canonical in normalized else "propertyAlias"
+            if canonical not in normalized:
+                normalized[canonical] = normalized[alias]
+            del normalized[alias]
+            normalizations.append(
+                {
+                    "toolCallIndex": tool_call_index,
+                    "path": alias_path,
+                    "canonicalPath": canonical_path,
+                    "kind": kind,
+                }
+            )
+        for name, child_schema in properties.items():
+            if name in normalized and isinstance(child_schema, dict):
+                normalized[name] = normalize_word_value(
+                    normalized[name],
+                    child_schema,
+                    f"{path}.{name}",
+                    tool_call_index,
+                    normalizations,
+                )
+        return normalized
+
+    if isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            return [
+                normalize_word_value(
+                    item,
+                    item_schema,
+                    f"{path}[{index}]",
+                    tool_call_index,
+                    normalizations,
+                )
+                for index, item in enumerate(value)
+            ]
+        return value
+
+    enum_values = schema.get("enum")
+    if isinstance(value, str) and isinstance(enum_values, list):
+        string_values = [item for item in enum_values if isinstance(item, str)]
+        source_token = normalized_enum_token(value)
+        explicit_target = WORD_ENUM_ALIASES.get(source_token)
+        if explicit_target in string_values and value != explicit_target:
+            normalizations.append(
+                {
+                    "toolCallIndex": tool_call_index,
+                    "path": path,
+                    "canonicalPath": path,
+                    "kind": "enumAlias",
+                }
+            )
+            return explicit_target
+        matches = [
+            candidate
+            for candidate in string_values
+            if normalized_enum_token(candidate) == source_token
+        ]
+        if len(matches) == 1 and matches[0] != value:
+            normalizations.append(
+                {
+                    "toolCallIndex": tool_call_index,
+                    "path": path,
+                    "canonicalPath": path,
+                    "kind": "enumCanonicalization",
+                }
+            )
+            return matches[0]
+    return value
+
+
+def suspicious_word_unit_errors(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+
+    def visit(value: Any, path: str, index: int, name: str) -> None:
+        if isinstance(value, dict):
+            for field, child in value.items():
+                child_path = f"{path}.{field}"
+                if (
+                    field in WORD_SUSPICIOUS_TWIPS_ALIASES
+                    and WORD_PROPERTY_ALIASES.get(field) not in value
+                    and isinstance(child, (int, float))
+                    and not isinstance(child, bool)
+                    and 300 <= abs(child) <= 2880
+                    and abs(child % 20) < 0.000001
+                ):
+                    errors.append(
+                        {
+                            "toolCallIndex": index,
+                            "tool": name,
+                            "path": child_path,
+                            "keyword": "semantic",
+                            "message": (
+                                f"{field} is point-valued and appears to contain twips"
+                            ),
+                        }
+                    )
+                visit(child, child_path, index, name)
+        elif isinstance(value, list):
+            for child_index, child in enumerate(value):
+                visit(child, f"{path}[{child_index}]", index, name)
+
+    for index, call in enumerate(tool_calls):
+        name = str(call.get("name") or "")
+        visit(call.get("arguments", {}), "arguments", index, name)
+    return errors
+
+
+def normalize_word_tool_calls(
+    tool_calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_calls = json.loads(json.dumps(tool_calls, ensure_ascii=False))
+    normalizations: list[dict[str, Any]] = []
+    schemas = ARGUMENT_SCHEMAS_BY_EDITOR["word"]
+    for index, call in enumerate(normalized_calls):
+        name = str(call.get("name") or "")
+        schema = schemas.get(name)
+        if not isinstance(schema, dict):
+            continue
+        arguments = call.get("arguments", {})
+        call["arguments"] = normalize_word_value(
+            arguments,
+            schema,
+            "arguments",
+            index,
+            normalizations,
+        )
+    return normalized_calls, normalizations
 
 
 def json_schema_type_matches(value: Any, expected: str) -> bool:
@@ -779,14 +985,25 @@ def validate_editor_tool_calls(
 
 
 def validate_word_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return validate_editor_tool_calls("word", tool_calls)
+    normalized_calls, _ = normalize_word_tool_calls(tool_calls)
+    return validate_editor_tool_calls(
+        "word",
+        normalized_calls,
+    ) + suspicious_word_unit_errors(tool_calls)
 
 
 def require_valid_editor_tool_calls(
     editor: str,
     tool_calls: list[dict[str, Any]],
-) -> None:
-    validation_errors = validate_editor_tool_calls(editor, tool_calls)
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    normalized_calls = tool_calls
+    normalizations: list[dict[str, Any]] = []
+    validation_errors: list[dict[str, Any]] = []
+    if editor == "word":
+        normalized_calls, normalizations = normalize_word_tool_calls(tool_calls)
+    validation_errors.extend(validate_editor_tool_calls(editor, normalized_calls))
+    if editor == "word":
+        validation_errors.extend(suspicious_word_unit_errors(tool_calls))
     if validation_errors:
         editor_label = {"word": "Word", "slide": "Slides", "cell": "Sheets"}.get(
             editor,
@@ -802,10 +1019,13 @@ def require_valid_editor_tool_calls(
                 "partialMutationPossible": False,
             },
         )
+    return normalized_calls, normalizations
 
 
-def require_valid_word_tool_calls(tool_calls: list[dict[str, Any]]) -> None:
-    require_valid_editor_tool_calls("word", tool_calls)
+def require_valid_word_tool_calls(
+    tool_calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    return require_valid_editor_tool_calls("word", tool_calls)
 
 
 def compact_json(value: Any) -> str:
@@ -2091,6 +2311,7 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
     timeout_ms = min(300000, max(100, timeout_ms))
 
     params: dict[str, Any] = {}
+    argument_normalizations: list[dict[str, Any]] = []
     allowed_tools = set(((session.get("state") or {}).get("capabilities") or {}).get("tools") or [])
     if method == "executeTool":
         name = str(payload.get("name", "")).strip()
@@ -2102,10 +2323,11 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"arguments 超过 {argument_limit} 字符")
         editor_type = (session.get("state") or {}).get("editorType")
         if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
-            require_valid_editor_tool_calls(
+            normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
                 editor_type,
                 [{"name": name, "arguments": arguments}],
             )
+            arguments = normalized_calls[0]["arguments"]
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
@@ -2123,7 +2345,10 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
             raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"toolCalls 超过 {arguments_limit} 字符")
         editor_type = (session.get("state") or {}).get("editorType")
         if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
-            require_valid_editor_tool_calls(editor_type, tool_calls)
+            tool_calls, argument_normalizations = require_valid_editor_tool_calls(
+                editor_type,
+                tool_calls,
+            )
         params = {"toolCalls": tool_calls}
 
     return {
@@ -2131,7 +2356,57 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         "method": method,
         "params": params,
         "timeoutMs": timeout_ms,
+        "argumentNormalizations": argument_normalizations,
     }
+
+
+def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
+    if claims.get("authKind") != "binding":
+        raise BridgeError(
+            401,
+            "INVALID_BRIDGE_BINDING_TOKEN",
+            "Word 批量预检必须使用 attach 返回的 ai-bridge 绑定凭证",
+        )
+    with BRIDGE_CONDITION:
+        session_id, session = bridge_select_session_locked(payload.get("sessionId"), claims)
+        editor_type = str((session.get("state") or {}).get("editorType") or "")
+        if editor_type != "word":
+            raise BridgeError(
+                400,
+                "EDITOR_MISMATCH",
+                "validate_word_batch 只支持当前 Word 编辑器会话",
+            )
+        tool_calls = bridge_parse_json_parameter(
+            payload,
+            "toolCalls",
+            "toolCallsJson",
+            list,
+            [],
+        )
+        if not tool_calls or len(tool_calls) > 20:
+            raise BridgeError(400, "INVALID_TOOL_CALL", "toolCalls 数量必须为 1 到 20")
+        allowed_tools = set(
+            ((session.get("state") or {}).get("capabilities") or {}).get("tools") or []
+        )
+        for call in tool_calls:
+            if not isinstance(call, dict) or call.get("name") not in allowed_tools:
+                raise BridgeError(
+                    400,
+                    "TOOL_NOT_ALLOWED",
+                    "批量调用包含当前编辑器不允许的工具",
+                )
+        if len(compact_json(tool_calls)) > 250000:
+            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", "toolCalls 超过 250000 字符")
+        normalized_calls, argument_normalizations = require_valid_word_tool_calls(
+            tool_calls
+        )
+        return {
+            "ok": True,
+            "valid": True,
+            "editorType": "word",
+            "toolCalls": len(normalized_calls),
+            "argumentNormalizations": argument_normalizations,
+        }
 
 
 def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str, Any]:
@@ -2231,6 +2506,7 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
             "requestId": command_data["requestId"],
             "session": bridge_public_session(result_session_id, result_session),
             "result": response.get("result"),
+            "argumentNormalizations": command.get("argumentNormalizations", []),
         }
 
 
@@ -3234,6 +3510,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if request_path == "/bridge/execute":
                 json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
+                return
+            if request_path == "/bridge/validate":
+                json_response(self, 200, bridge_validate(payload, bridge_authorization(self)))
                 return
             if request_path == "/editor-config/anonymous":
                 json_response(self, 200, issue_anonymous_editor_config(payload))
