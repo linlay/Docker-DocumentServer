@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.4.2";
+  const VERSION = "0.6.0";
   const PROTOCOL_VERSION = 1;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CLIENT_SOURCE = "ai-bridge-client";
@@ -138,6 +138,7 @@
         inspectThemes: "slides_inspect_themes",
         inspectBuiltinThemes: "slides_inspect_builtin_themes",
         inspectObjects: "slides_inspect_objects",
+        validateLayout: "slides_validate_layout",
         replaceText: "slides_replace_text",
         scaleFont: "slides_scale_font",
         formatText: "slides_format_text",

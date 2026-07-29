@@ -18,6 +18,21 @@ function sheetsToolNames(source) {
   return [...new Set(source.match(/sheets_[a-z_]+/g) || [])].sort();
 }
 
+function a1Shape(address) {
+  const match = String(address).match(/^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i);
+  if (!match) return { rows: 1, columns: 1 };
+  const columnNumber = letters => [...letters.toUpperCase()]
+    .reduce((value, letter) => (value * 26) + letter.charCodeAt(0) - 64, 0);
+  const startColumn = columnNumber(match[1]);
+  const endColumn = columnNumber(match[3] || match[1]);
+  const startRow = Number(match[2]);
+  const endRow = Number(match[4] || match[2]);
+  return {
+    rows: Math.abs(endRow - startRow) + 1,
+    columns: Math.abs(endColumn - startColumn) + 1,
+  };
+}
+
 test("all 43 Sheets tools stay aligned across the contract, plugin, SDKs, types, and adapter", () => {
   const expected = Object.keys(publicContract.tools.cell).sort();
   assert.equal(expected.length, 43);
@@ -38,13 +53,43 @@ test("public Sheets contract names non-obvious units explicitly", () => {
   assert.equal(format.rowHeight.deprecated, true);
 
   const pageLayout = publicContract.tools.cell.sheets_manage_page_layout;
+  const freezePanes = publicContract.tools.cell.sheets_manage_freeze_panes;
   assert.ok(pageLayout.anyOf.some(entry => entry.required[0] === "marginsPt"));
   assert.match(pageLayout.properties.marginsPt.description, /points \(pt\)/);
   assert.equal(pageLayout.properties.margins.deprecated, true);
   assert.match(publicContract.unitConventions.sheet, /columnWidthChars in spreadsheet character-width units/);
+
+  assert.equal(
+    publicContract.tools.cell.sheets_set_formula.properties.formula.$ref,
+    "#/$defs/sheetFormula",
+  );
+  assert.equal(
+    publicContract.tools.cell.sheets_manage_conditional_format.properties.operator.$ref,
+    "#/$defs/sheetComparisonOperator",
+  );
+  assert.ok(pageLayout.anyOf.some(entry => entry.required[0] === "displayGridlines"));
+  assert.match(pageLayout.properties.printGridlines.description, /printed output only/);
+  assert.match(pageLayout.properties.displayGridlines.description, /screen view/);
+  assert.equal(freezePanes.properties.count.minimum, 1);
+  assert.match(freezePanes.properties.range.description, /Exact/);
+  assert.match(freezePanes.description, /verified:true/);
+  assert.match(
+    publicContract.tools.cell.sheets_inspect_freeze_panes.description,
+    /frozenRows.*verified:true/,
+  );
+  assert.match(pageLayout.description, /verified:true/);
+  assert.match(
+    publicContract.tools.cell.sheets_inspect_page_layout.description,
+    /真实布尔值.*verified:true/,
+  );
+  assert.ok(freezePanes.oneOf.some(entry => entry.required && entry.required[0] === "count"));
+  assert.equal(
+    publicContract.inputNormalization.sheet.formulaScalarMultiCellPolicy,
+    "reject-scalar-multi-cell",
+  );
 });
 
-function loadSheetsBridge(api, macroState) {
+function loadSheetsBridge(api, macroState, bridgeOptions = {}) {
   const asc = {
     scope: {},
     plugin: {
@@ -63,7 +108,21 @@ function loadSheetsBridge(api, macroState) {
       },
     },
   };
-  const window = { Asc: asc };
+  if (!bridgeOptions.withoutAscEditor) {
+    asc.editor = {
+      SetDocumentModified(value) {
+        if (typeof bridgeOptions.onDocumentModified === "function") {
+          bridgeOptions.onDocumentModified(value);
+        }
+      },
+    };
+  }
+  const window = {
+    Asc: asc,
+    setTimeout,
+    AICopilotSheetsViewVerificationIntervalMs: bridgeOptions.verifyIntervalMs,
+    AICopilotSheetsViewVerificationTimeoutMs: bridgeOptions.verifyTimeoutMs,
+  };
   const sandbox = {
     window,
     Asc: asc,
@@ -82,16 +141,19 @@ function loadSheetsBridge(api, macroState) {
     isFinite,
     isNaN,
     parseInt,
+    setTimeout,
   };
   vm.runInNewContext(sheetsSource, sandbox);
   return window.AICopilotBridges.cell;
 }
 
-function createHarness() {
+function createHarness(options = {}) {
   const state = {
     events: [],
     sheets: [],
     names: [],
+    freezeDelayMs: Number(options.freezeDelayMs) || 0,
+    freezeNeverApplies: options.freezeNeverApplies === true,
     pivots: [],
     core: {},
     custom: {},
@@ -156,6 +218,10 @@ function createHarness() {
     const value = {
       items: [],
       GetCount: () => value.items.length,
+      GetItem: index => {
+        event("conditions.getItem", index);
+        return value.items[index - 1];
+      },
       Delete: () => { value.items = []; event("conditions.delete"); },
     };
     for (const [method, kind] of [
@@ -169,7 +235,10 @@ function createHarness() {
       value[method] = (...args) => {
         const item = {
           GetFont: font,
-          SetFillColor: color => event("condition.fill", color),
+          fillColor: null,
+          GetType: () => kind,
+          GetFillColor: () => item.fillColor,
+          SetFillColor: color => { item.fillColor = color; event("condition.fill", color); },
           SetDupeUnique: type => event("condition.unique", type),
         };
         value.items.push(item);
@@ -178,7 +247,16 @@ function createHarness() {
       };
     }
     value.Add = (...args) => {
-      const item = { GetFont: font, SetFillColor: color => event("condition.fill", color) };
+      const item = {
+        fillColor: null,
+        GetType: () => args[0],
+        GetOperator: () => args[1],
+        GetFormula1: () => args[2],
+        GetFormula2: () => args[3],
+        GetFillColor: () => item.fillColor,
+        GetFont: font,
+        SetFillColor: color => { item.fillColor = color; event("condition.fill", color); },
+      };
       value.items.push(item);
       event("conditions.add", ...args);
       return item;
@@ -187,12 +265,70 @@ function createHarness() {
   }
 
   function validation() {
-    const value = {};
-    for (const method of [
-      "Add", "Modify", "Delete", "SetIgnoreBlank", "SetShowInput", "SetShowError",
-      "SetInputTitle", "SetInputMessage", "SetErrorTitle", "SetErrorMessage",
+    const value = {
+      type: null,
+      alertStyle: null,
+      operator: null,
+      formula1: null,
+      formula2: null,
+      ignoreBlank: null,
+      inCellDropdown: null,
+      showInput: null,
+      showError: null,
+      inputTitle: null,
+      inputMessage: null,
+      errorTitle: null,
+      errorMessage: null,
+      GetType: () => value.type,
+      GetAlertStyle: () => value.alertStyle,
+      GetOperator: () => value.operator,
+      GetFormula1: () => value.formula1,
+      GetFormula2: () => value.formula2,
+      GetIgnoreBlank: () => value.ignoreBlank,
+      GetInCellDropdown: () => value.inCellDropdown,
+      GetShowInput: () => value.showInput,
+      GetShowError: () => value.showError,
+      GetInputTitle: () => value.inputTitle,
+      GetInputMessage: () => value.inputMessage,
+      GetErrorTitle: () => value.errorTitle,
+      GetErrorMessage: () => value.errorMessage,
+    };
+    for (const method of ["Add", "Modify"]) {
+      value[method] = (type, alertStyle, operator, formula1, formula2) => {
+        Object.assign(value, { type, alertStyle, operator, formula1, formula2 });
+        event(`validation.${method}`, type, alertStyle, operator, formula1, formula2);
+        return value;
+      };
+    }
+    value.Delete = () => {
+      Object.assign(value, {
+        type: null,
+        alertStyle: null,
+        operator: null,
+        formula1: null,
+        formula2: null,
+        inputTitle: null,
+        inputMessage: null,
+        errorTitle: null,
+        errorMessage: null,
+      });
+      event("validation.Delete");
+      return true;
+    };
+    for (const [method, field] of [
+      ["SetIgnoreBlank", "ignoreBlank"],
+      ["SetShowInput", "showInput"],
+      ["SetShowError", "showError"],
+      ["SetInputTitle", "inputTitle"],
+      ["SetInputMessage", "inputMessage"],
+      ["SetErrorTitle", "errorTitle"],
+      ["SetErrorMessage", "errorMessage"],
     ]) {
-      value[method] = (...args) => event(`validation.${method}`, ...args);
+      value[method] = next => {
+        value[field] = next;
+        event(`validation.${method}`, next);
+        return true;
+      };
     }
     return value;
   }
@@ -207,37 +343,62 @@ function createHarness() {
       conditionSet: conditions(),
       validation: validation(),
       cellComment: null,
+      format: {
+        fontName: "Arial",
+        fontSize: 11,
+        bold: false,
+        italic: false,
+        underline: false,
+        strikeout: false,
+        fontColor: null,
+        fillColor: null,
+        horizontal: "left",
+        vertical: "bottom",
+        numberFormat: "General",
+        wrap: false,
+        orientation: 0,
+      },
       GetAddress: () => value.address,
       GetValue: () => value.values,
       GetValue2: () => value.values,
       GetText: () => value.values,
       GetFormula: () => value.formula,
       GetFormulaArray: () => value.arrayFormula,
-      GetNumberFormat: () => "General",
+      GetNumberFormat: () => value.format.numberFormat,
       GetRowHeight: () => 15,
       GetColumnWidth: () => 10,
       GetHidden: () => false,
-      GetWrapText: () => false,
-      GetOrientation: () => 0,
-      GetRowsCount: () => value.values.length,
-      GetColumnsCount: () => value.values[0].length,
+      GetWrapText: () => value.format.wrap,
+      GetOrientation: () => value.format.orientation,
+      GetFontName: () => value.format.fontName,
+      GetFontSize: () => value.format.fontSize,
+      GetBold: () => value.format.bold,
+      GetItalic: () => value.format.italic,
+      GetUnderline: () => value.format.underline,
+      GetStrikeout: () => value.format.strikeout,
+      GetFontColor: () => value.format.fontColor,
+      GetFillColor: () => value.format.fillColor,
+      GetAlignHorizontal: () => value.format.horizontal,
+      GetAlignVertical: () => value.format.vertical,
+      GetRowsCount: () => a1Shape(value.address).rows,
+      GetColumnsCount: () => a1Shape(value.address).columns,
       SetValue: next => { value.values = next; event("range.value", address, next); return true; },
       SetFormula: next => { value.formula = next; event("range.formula", address, next); return true; },
       SetFormulaArray: next => { value.arrayFormula = next; event("range.arrayFormula", address, next); return true; },
       Replace: (search, replacement) => { event("range.replace", search, replacement); return true; },
-      SetFontSize: next => event("range.fontSize", next),
-      SetFontName: next => event("range.fontName", next),
-      SetBold: next => event("range.bold", next),
-      SetItalic: next => event("range.italic", next),
-      SetUnderline: next => event("range.underline", next),
-      SetStrikeout: next => event("range.strikeout", next),
-      SetFontColor: next => event("range.fontColor", next),
-      SetFillColor: next => event("range.fillColor", next),
-      SetAlignHorizontal: next => event("range.horizontal", next),
-      SetAlignVertical: next => event("range.vertical", next),
-      SetNumberFormat: next => event("range.numberFormat", next),
-      SetWrap: next => event("range.wrap", next),
-      SetOrientation: next => event("range.orientation", next),
+      SetFontSize: next => { value.format.fontSize = next; event("range.fontSize", next); },
+      SetFontName: next => { value.format.fontName = next; event("range.fontName", next); },
+      SetBold: next => { value.format.bold = next; event("range.bold", next); },
+      SetItalic: next => { value.format.italic = next; event("range.italic", next); },
+      SetUnderline: next => { value.format.underline = next; event("range.underline", next); },
+      SetStrikeout: next => { value.format.strikeout = next; event("range.strikeout", next); },
+      SetFontColor: next => { value.format.fontColor = next; event("range.fontColor", next); },
+      SetFillColor: next => { value.format.fillColor = next; event("range.fillColor", next); },
+      SetAlignHorizontal: next => { value.format.horizontal = next; event("range.horizontal", next); },
+      SetAlignVertical: next => { value.format.vertical = next; event("range.vertical", next); },
+      SetNumberFormat: next => { value.format.numberFormat = next; event("range.numberFormat", next); },
+      SetWrap: next => { value.format.wrap = next; event("range.wrap", next); },
+      SetOrientation: next => { value.format.orientation = next; event("range.orientation", next); },
       SetColumnWidth: next => event("range.columnWidth", next),
       SetRowHeight: next => event("range.rowHeight", next),
       SetBorders: (...args) => event("range.border", ...args),
@@ -315,11 +476,34 @@ function createHarness() {
     const value = {
       location: null,
       GetLocation: () => value.location,
-      FreezeAt: target => { value.location = target; event("freeze.at", target.address); },
-      FreezeRows: count => { value.location = sheet.GetRange(`A${count + 1}`); event("freeze.rows", count); },
-      FreezeColumns: count => { value.location = sheet.GetRange(`${String.fromCharCode(65 + count)}1`); event("freeze.columns", count); },
-      Unfreeze: () => { value.location = null; event("freeze.unfreeze"); },
+      FreezeAt: target => {
+        const lastCell = String(target.address).split(":").pop();
+        apply(sheet.GetRange(`A1:${lastCell}`), "freeze.at", target.address);
+      },
+      FreezeRows: count => apply(sheet.GetRange(`A1:XFD${count}`), "freeze.rows", count),
+      FreezeColumns: count => apply(sheet.GetRange(`A1:${columnName(count)}1048576`), "freeze.columns", count),
+      Unfreeze: () => apply(null, "freeze.unfreeze"),
     };
+
+    function columnName(number) {
+      let remaining = number;
+      let name = "";
+      while (remaining > 0) {
+        name = String.fromCharCode(65 + ((remaining - 1) % 26)) + name;
+        remaining = Math.floor((remaining - 1) / 26);
+      }
+      return name;
+    }
+
+    function apply(location, eventName, eventValue) {
+      event(eventName, eventValue);
+      const update = () => {
+        if (!state.freezeNeverApplies) value.location = location;
+      };
+      if (state.freezeDelayMs > 0) setTimeout(update, state.freezeDelayMs);
+      else update();
+    }
+
     return value;
   }
 
@@ -409,7 +593,17 @@ function createHarness() {
       tables: [],
       comments: [],
       protectedRanges: [],
-      page: { orientation: "xlLandscape", top: 20, right: 20, bottom: 20, left: 20, gridlines: false, headings: false },
+      page: {
+        orientation: "xlLandscape",
+        top: 20,
+        right: 20,
+        bottom: 20,
+        left: 20,
+        printGridlines: false,
+        printHeadings: false,
+        displayGridlines: true,
+        displayHeadings: true,
+      },
       GetName: () => value.name,
       SetName: next => { value.name = next; },
       GetIndex: () => state.sheets.indexOf(value),
@@ -439,7 +633,7 @@ function createHarness() {
         event("table.create", address);
         return item;
       },
-      FormatAsTable: address => { event("table.format", address); return table(value, address); },
+      FormatAsTable: address => { event("table.format", address); return true; },
       AddImage: () => { const item = drawing(value, "image"); value.drawings.push(item); event("drawing.image"); return item; },
       AddShape: () => { const item = drawing(value, "shape"); value.drawings.push(item); event("drawing.shape"); return item; },
       AddOleObject: () => { const item = drawing(value, "ole"); value.drawings.push(item); event("drawing.ole"); return item; },
@@ -463,11 +657,19 @@ function createHarness() {
       SetRightMargin: next => { value.page.right = next; },
       SetBottomMargin: next => { value.page.bottom = next; },
       SetLeftMargin: next => { value.page.left = next; },
-      GetPrintGridlines: () => value.page.gridlines,
-      SetPrintGridlines: next => { value.page.gridlines = next; },
-      GetPrintHeadings: () => value.page.headings,
-      SetPrintHeadings: next => { value.page.headings = next; },
+      GetPrintGridlines: () => value.page.printGridlines,
+      SetPrintGridlines: next => { value.page.printGridlines = next; },
+      GetPrintHeadings: () => value.page.printHeadings,
+      SetPrintHeadings: next => { value.page.printHeadings = next; },
+      SetDisplayGridlines: next => { value.page.displayGridlines = next; event("page.displayGridlines", next); },
+      SetDisplayHeadings: next => { value.page.displayHeadings = next; event("page.displayHeadings", next); },
       Delete: () => { state.sheets.splice(state.sheets.indexOf(value), 1); return true; },
+    };
+    value.worksheet = {
+      getSheetViewSettings: () => ({
+        showGridLines: value.page.displayGridlines,
+        showRowColHeaders: value.page.displayHeadings,
+      }),
     };
     value.freeze = freezePanes(value);
     value.autoFilter = {
@@ -525,6 +727,13 @@ function createHarness() {
   const sheet2 = sheet("Sheet2");
   state.sheets.push(sheet1, sheet2);
   state.activeSheet = sheet1;
+  for (const item of state.sheets) {
+    item.worksheet.workbook = {
+      oApi: {
+        SetDocumentModified: value => event("workbook.document.modified", value),
+      },
+    };
+  }
 
   const coreNames = [
     "Category", "ContentStatus", "Created", "Creator", "Description", "Identifier", "Keywords",
@@ -552,7 +761,8 @@ function createHarness() {
       state.sheets.push(item);
       return item;
     },
-    CreateColorFromRGB: (r, g, b) => ({ r, g, b }),
+    CreateColorFromRGB: (r, g, b) => ({ kind: "ApiColor", r, g, b }),
+    CreateRGBColor: (r, g, b) => ({ kind: "ApiRGBColor", r, g, b }),
     CreateSolidFill: color => ({ type: "solid", color }),
     CreateNoFill: () => ({ type: "none" }),
     CreateStroke: (width, fill) => ({ width, fill }),
@@ -584,7 +794,15 @@ function createHarness() {
     GetCustomProperties: () => custom,
   };
 
-  return { bridge: loadSheetsBridge(api, state.macros), state, sheet1, sheet2 };
+  return {
+    bridge: loadSheetsBridge(api, state.macros, {
+      ...options,
+      onDocumentModified: value => event("document.modified", value),
+    }),
+    state,
+    sheet1,
+    sheet2,
+  };
 }
 
 test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tables", async () => {
@@ -597,10 +815,10 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
         sheet: "Sheet1",
         range: "C2:C5",
         values: [
-          [{ type: "date", value: "2026-07-23" }],
-          [{ type: "time", value: "12:30:00" }],
-          [{ type: "percent", value: "25%" }],
-          [{ type: "boolean", value: "true" }],
+          ["2026-07-23"],
+          ["12:30:00"],
+          [0.25],
+          [true],
         ],
       },
     },
@@ -659,11 +877,17 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
   assert.equal(state.historyPoints, 1);
   assert.equal(result.results[0].range.address, "A1:B3");
   assert.equal(result.results[7].names[0].name, "SalesData");
-  const typedValues = state.events.find(item => item[0] === "range.value" && item[1] === "C2:C5")[2];
-  assert.ok(typedValues[0][0] instanceof Date);
-  assert.equal(typedValues[1][0], 12.5 / 24);
-  assert.equal(typedValues[2][0], 0.25);
-  assert.equal(typedValues[3][0], true);
+  const writtenValues = state.events.find(item => item[0] === "range.value" && item[1] === "C2:C5")[2];
+  assert.deepEqual(Array.from(writtenValues, row => Array.from(row)), [
+    ["2026-07-23"],
+    ["12:30:00"],
+    [0.25],
+    [true],
+  ]);
+  assert.deepEqual(
+    Array.from(result.results[1].readback, row => Array.from(row)),
+    Array.from(writtenValues, row => Array.from(row)),
+  );
   assert.ok(state.events.some(item => item[0] === "range.arrayFormula" && item[2] === "={1;2;3}"));
   assert.ok(state.events.some(item => item[0] === "range.columnWidth" && item[1] === 18));
   assert.ok(state.events.some(item => item[0] === "range.rowHeight" && item[1] === 24));
@@ -685,6 +909,498 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
     }]),
     /columnWidthChars 与旧字段 columnWidth 不能同时提供/,
   );
+});
+
+test("Sheets bridge normalizes public enum aliases, preserves formula matrices, and exposes readback", async () => {
+  const { bridge, state, sheet1 } = createHarness();
+  const result = await bridge.execute([
+    {
+      name: "sheets_set_formula",
+      arguments: {
+        sheet: "Sheet1",
+        range: "D1:E3",
+        formula: [
+          ["=A1+1", "=B1+1"],
+          ["=A2+1", "=B2+1"],
+          ["=A3+1", "=B3+1"],
+        ],
+      },
+    },
+    {
+      name: "sheets_set_formula",
+      arguments: { sheet: "Sheet1", range: "F1", formula: "=A1+1" },
+    },
+    {
+      name: "sheets_format_range",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        fillColor: "#17365D",
+        fontColor: "#FFFFFF",
+        bold: true,
+      },
+    },
+    {
+      name: "sheets_manage_conditional_format",
+      arguments: {
+        action: "add",
+        sheet: "Sheet1",
+        range: "B2:B3",
+        type: "cellValue",
+        operator: "lessThan",
+        formula1: 0,
+        fillColor: "#FFF2CC",
+      },
+    },
+    {
+      name: "sheets_manage_validation",
+      arguments: {
+        action: "add",
+        sheet: "Sheet1",
+        range: "A2:A3",
+        type: "list",
+        alertStyle: "warning",
+        operator: "equal",
+        formula1: "A,B",
+      },
+    },
+    {
+      name: "sheets_sort",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        keys: [{ range: "B2:B3" }],
+        header: true,
+        orientation: "rows",
+      },
+    },
+    {
+      name: "sheets_filter",
+      arguments: {
+        action: "set",
+        sheet: "Sheet1",
+        range: "A1:B3",
+        field: 1,
+        criteria1: ">0",
+        operator: "and",
+      },
+    },
+    {
+      name: "sheets_inspect_range",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        includeFormat: true,
+        includeValidation: true,
+      },
+    },
+    {
+      name: "sheets_inspect_range",
+      arguments: {
+        sheet: "Sheet1",
+        range: "B2:B3",
+        includeConditionalFormats: true,
+      },
+    },
+  ]);
+
+  assert.deepEqual(
+    sheet1.GetRange("D1:E3").formula,
+    [
+      ["=A1+1", "=B1+1"],
+      ["=A2+1", "=B2+1"],
+      ["=A3+1", "=B3+1"],
+    ],
+  );
+  assert.deepEqual(result.results[0].inputShape, { rows: 3, columns: 2 });
+  assert.deepEqual(result.results[0].targetShape, { rows: 3, columns: 2 });
+  assert.deepEqual(
+    Array.from(result.results[0].readback, row => Array.from(row)),
+    [
+      ["=A1+1", "=B1+1"],
+      ["=A2+1", "=B2+1"],
+      ["=A3+1", "=B3+1"],
+    ],
+  );
+  assert.deepEqual(result.results[1].inputShape, { rows: 1, columns: 1 });
+  assert.deepEqual(result.results[1].targetShape, { rows: 1, columns: 1 });
+  assert.equal(result.results[2].readback.bold, true);
+  assert.deepEqual(result.results[2].readback.fillColor, { r: 23, g: 54, b: 93 });
+  assert.equal(result.results[3].rule.operator, "xlLess");
+  assert.deepEqual(result.results[3].rule.fillColor, { r: 255, g: 242, b: 204 });
+  assert.equal(result.results[4].rule.type, "xlValidateList");
+  assert.equal(result.results[4].rule.alertStyle, "xlValidAlertWarning");
+  assert.equal(result.results[4].rule.operator, "xlEqual");
+  assert.equal(result.results[4].rule.formula1, "A,B");
+  assert.ok(state.events.some(item => item[0] === "conditions.add" && item[2] === "xlLess"));
+  assert.ok(state.events.some(item => item[0] === "range.fillColor" && item[1].kind === "ApiColor"));
+  assert.ok(state.events.some(item => item[0] === "condition.fill" && item[1].kind === "ApiColor"));
+  assert.ok(state.events.some(item => item[0] === "validation.Add"
+    && item[1] === "xlValidateList"
+    && item[2] === "xlValidAlertWarning"
+    && item[3] === "xlEqual"));
+  assert.ok(state.events.some(item => item[0] === "range.sort"
+    && item.at(-2) === "xlYes"
+    && item.at(-1) === "xlSortRows"));
+  assert.ok(state.events.some(item => item[0] === "range.filter" && item[3] === "xlAnd"));
+  assert.deepEqual(result.results[7].range.format.fillColor, { r: 23, g: 54, b: 93 });
+  assert.equal(result.results[8].range.conditionalFormats.rules[0].operator, "xlLess");
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_set_formula",
+      arguments: { range: "H1:I3", formula: [["=1"]] },
+    }]),
+    /formula 尺寸 1x1 与目标区域 3x2 不一致/,
+  );
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_conditional_format",
+      arguments: { action: "add", range: "A1", type: "cellValue", operator: "smallerMaybe" },
+    }]),
+    /条件格式运算符 不支持/,
+  );
+});
+
+test("Sheets bridge does not report rejected or empty mutations as changed", async () => {
+  const { bridge, sheet1 } = createHarness();
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_format_range",
+      arguments: { sheet: "Sheet1", range: "A1" },
+    }]),
+    /至少需要一个格式属性/,
+  );
+
+  sheet1.GetRange("B1").SetFillColor = () => false;
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_format_range",
+      arguments: { sheet: "Sheet1", range: "B1", fillColor: "#17365D" },
+    }]),
+    /ONLYOFFICE 拒绝设置单元格填充/,
+  );
+
+  sheet1.GetRange("C1").SetValue = () => false;
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_set_values",
+      arguments: { sheet: "Sheet1", range: "C1", values: 1 },
+    }]),
+    /ONLYOFFICE 拒绝写入单元格值/,
+  );
+
+  sheet1.GetRange("D1:D2").SetFormulaArray = () => false;
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_set_array_formula",
+      arguments: { sheet: "Sheet1", range: "D1:D2", formula: "=ROW()" },
+    }]),
+    /ONLYOFFICE 拒绝设置数组公式/,
+  );
+
+  sheet1.GetRange("E1:E2").conditionSet.AddUniqueValues = () => null;
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_conditional_format",
+      arguments: {
+        action: "add",
+        sheet: "Sheet1",
+        range: "E1:E2",
+        type: "duplicateValues",
+      },
+    }]),
+    /ONLYOFFICE 未创建添加重复值条件格式/,
+  );
+
+  sheet1.SetDisplayGridlines = () => false;
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_page_layout",
+      arguments: { sheet: "Sheet1", displayGridlines: false },
+    }]),
+    /ONLYOFFICE 拒绝设置屏幕网格线/,
+  );
+});
+
+test("Sheets bridge rejects invalid value and formula shapes before mutation", async () => {
+  const invalidCalls = [
+    { name: "sheets_set_values", arguments: { range: "A1:B2", values: 1 } },
+    { name: "sheets_set_values", arguments: { range: "A1:B2", values: [1, 2] } },
+    { name: "sheets_set_values", arguments: { range: "A1:B2", values: [] } },
+    { name: "sheets_set_values", arguments: { range: "A1:B2", values: [[1, 2], [3]] } },
+    { name: "sheets_set_values", arguments: { range: "A1:B2", values: [[1], [2]] } },
+    { name: "sheets_set_formula", arguments: { range: "A1:B2", formula: "=A1" } },
+    { name: "sheets_set_formula", arguments: { range: "A1:B2", formula: [["=1"], ["=2"]] } },
+  ];
+
+  for (const call of invalidCalls) {
+    const { bridge, state } = createHarness();
+    let caught;
+    try {
+      await bridge.execute([call]);
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(caught && caught.code, "INVALID_TOOL_ARGUMENTS");
+    assert.equal(caught.details.completedToolCalls, 0);
+    assert.equal(caught.details.partialMutationPossible, false);
+    assert.equal(
+      state.events.some(item => item[0] === "range.value" || item[0] === "range.formula"),
+      false,
+    );
+  }
+});
+
+test("Sheets bridge reports partial batch mutation without retrying failed calls", async () => {
+  const { bridge, state } = createHarness();
+  let caught;
+  try {
+    await bridge.execute([
+      {
+        name: "sheets_set_values",
+        arguments: { sheet: "Sheet1", range: "A1", values: "committed" },
+      },
+      {
+        name: "sheets_set_values",
+        arguments: { sheet: "Sheet1", range: "B1:B2", values: "invalid" },
+      },
+    ]);
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught && caught.code, "INVALID_TOOL_ARGUMENTS");
+  assert.equal(caught.details.phase, "sheets-command");
+  assert.equal(caught.details.tool, "sheets_set_values");
+  assert.equal(caught.details.toolCallIndex, 1);
+  assert.equal(caught.details.completedToolCalls, 1);
+  assert.equal(caught.details.partialMutationPossible, true);
+  assert.equal(state.events.filter(item => item[0] === "range.value").length, 1);
+});
+
+test("Sheets bridge reads validation getters and rejects null validation mutations", async () => {
+  const { bridge, sheet1 } = createHarness();
+  const added = await bridge.execute([{
+    name: "sheets_manage_validation",
+    arguments: {
+      action: "add",
+      sheet: "Sheet1",
+      range: "A2:A3",
+      type: "list",
+      formula1: "Red,Amber,Green",
+      ignoreBlank: true,
+      showInput: true,
+      showError: true,
+      inputTitle: "Status",
+      inputMessage: "Choose one",
+      errorTitle: "Invalid",
+      errorMessage: "Use the list",
+    },
+  }]);
+  const inspected = await bridge.execute([{
+    name: "sheets_inspect_range",
+    arguments: {
+      sheet: "Sheet1",
+      range: "A2:A3",
+      includeValidation: true,
+    },
+  }]);
+
+  assert.equal(added.results[0].validation.type, "xlValidateList");
+  assert.equal(added.results[0].validation.formula1, "Red,Amber,Green");
+  assert.equal(added.results[0].validation.ignoreBlank, true);
+  assert.equal(added.results[0].validation.inputTitle, "Status");
+  assert.equal(added.results[0].validation.errorMessage, "Use the list");
+  assert.deepEqual(
+    inspected.results[0].range.validation,
+    added.results[0].validation,
+  );
+
+  sheet1.GetRange("B2:B3").validation.Add = () => null;
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_manage_validation",
+      arguments: {
+        action: "add",
+        sheet: "Sheet1",
+        range: "B2:B3",
+        type: "list",
+        formula1: "A,B",
+      },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught && caught.code, "EXECUTION_FAILED");
+  assert.equal(caught.details.completedToolCalls, 0);
+  assert.equal(caught.details.partialMutationPossible, true);
+});
+
+test("Sheets bridge uses one-based conditional format GetItem indices", async () => {
+  const { bridge, state } = createHarness();
+  const result = await bridge.execute([{
+    name: "sheets_manage_conditional_format",
+    arguments: {
+      action: "add",
+      sheet: "Sheet1",
+      range: "A1:A2",
+      type: "duplicateValues",
+    },
+  }]);
+
+  assert.equal(result.results[0].rule.index, 0);
+  assert.equal(result.results[0].conditionalFormats.rules[0].index, 0);
+  assert.ok(state.events.some(item => item[0] === "conditions.getItem" && item[1] === 1));
+});
+
+test("Sheets bridge rejects null from every conditional-format Add API", async () => {
+  const cases = [
+    ["Add", "cellValue"],
+    ["AddColorScale", "colorScale"],
+    ["AddDatabar", "dataBar"],
+    ["AddIconSetCondition", "iconSet"],
+    ["AddTop10", "top10"],
+    ["AddAboveAverage", "aboveAverage"],
+    ["AddUniqueValues", "duplicateValues"],
+  ];
+
+  for (const [method, type] of cases) {
+    const { bridge, sheet1 } = createHarness();
+    const range = sheet1.GetRange("A1:A2");
+    range.conditionSet[method] = () => null;
+    let caught;
+    try {
+      await bridge.execute([{
+        name: "sheets_manage_conditional_format",
+        arguments: {
+          action: "add",
+          sheet: "Sheet1",
+          range: "A1:A2",
+          type,
+          operator: "lessThan",
+          formula1: 0,
+        },
+      }]);
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(caught && caught.code, "EXECUTION_FAILED", method);
+    assert.equal(caught.details.completedToolCalls, 0, method);
+  }
+});
+
+test("Sheets bridge verifies conditional-format deleteAll empties the collection", async () => {
+  const { bridge, sheet1 } = createHarness();
+  const range = sheet1.GetRange("A1:A2");
+  range.conditionSet.items.push({ GetType: () => "xlCellValue" });
+  range.conditionSet.Delete = () => true;
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_conditional_format",
+      arguments: {
+        action: "deleteAll",
+        sheet: "Sheet1",
+        range: "A1:A2",
+      },
+    }]),
+    /删除条件格式后规则数量仍为 1/,
+  );
+});
+
+test("Sheets bridge rejects null from validation Add and Modify", async () => {
+  for (const action of ["add", "modify"]) {
+    const { bridge, sheet1 } = createHarness();
+    sheet1.GetRange("A1:A2").validation[
+      action === "add" ? "Add" : "Modify"
+    ] = () => null;
+    let caught;
+    try {
+      await bridge.execute([{
+        name: "sheets_manage_validation",
+        arguments: {
+          action,
+          sheet: "Sheet1",
+          range: "A1:A2",
+          type: "list",
+          formula1: "A,B",
+        },
+      }]);
+    } catch (error) {
+      caught = error;
+    }
+    assert.equal(caught && caught.code, "EXECUTION_FAILED", action);
+    assert.equal(caught.details.completedToolCalls, 0, action);
+  }
+});
+
+test("Sheets bridge safely degrades table creation in community editions", async () => {
+  const { bridge, state, sheet1 } = createHarness();
+  sheet1.AddListObject = () => null;
+
+  const basic = await bridge.execute([{
+    name: "sheets_manage_table",
+    arguments: {
+      action: "create",
+      sheet: "Sheet1",
+      range: "A1:B3",
+    },
+  }]);
+  assert.equal(basic.results[0].tableKind, "basic");
+  assert.equal(basic.results[0].degraded, true);
+  assert.equal(basic.results[0].formatted, true);
+  assert.equal(basic.results[0].table, null);
+  assert.equal(basic.results[0].range.address, "A1:B3");
+
+  let structuredError;
+  try {
+    await bridge.execute([{
+      name: "sheets_manage_table",
+      arguments: {
+        action: "create",
+        tableMode: "structured",
+        sheet: "Sheet1",
+        range: "A1:B3",
+      },
+    }]);
+  } catch (error) {
+    structuredError = error;
+  }
+  assert.equal(structuredError && structuredError.code, "SHEETS_API_UNSUPPORTED");
+
+  let autoStructuredError;
+  try {
+    await bridge.execute([{
+      name: "sheets_manage_table",
+      arguments: {
+        action: "create",
+        sheet: "Sheet1",
+        range: "A1:B3",
+        name: "MustNotBeDropped",
+      },
+    }]);
+  } catch (error) {
+    autoStructuredError = error;
+  }
+  assert.equal(autoStructuredError && autoStructuredError.code, "SHEETS_API_UNSUPPORTED");
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "sheets_manage_table",
+      arguments: {
+        action: "create",
+        tableMode: "basic",
+        sheet: "Sheet1",
+        range: "A1:B3",
+        name: "NotSupported",
+      },
+    }]),
+    /基础格式表格不支持结构化属性/,
+  );
+  assert.equal(state.events.filter(item => item[0] === "table.format").length, 1);
 });
 
 test("structured table inspection and lifecycle use ApiListObject", async () => {
@@ -792,7 +1508,14 @@ test("advanced Sheets bridge covers pivots, drawings, comments, freeze panes, me
     { name: "sheets_inspect_protected_ranges", arguments: { sheet: "Sheet1" } },
     {
       name: "sheets_manage_page_layout",
-      arguments: { sheet: "Sheet1", orientation: "xlPortrait", marginsPt: { top: 10, bottom: 10 }, printGridlines: true },
+      arguments: {
+        sheet: "Sheet1",
+        orientation: "portrait",
+        marginsPt: { top: 10, bottom: 10 },
+        printGridlines: true,
+        displayGridlines: false,
+        displayHeadings: false,
+      },
     },
     { name: "sheets_inspect_page_layout", arguments: { sheet: "Sheet1" } },
   ]);
@@ -802,16 +1525,27 @@ test("advanced Sheets bridge covers pivots, drawings, comments, freeze panes, me
   assert.equal(result.results[1].pivots[0].name, "SalesPivot");
   assert.equal(result.results[3].drawingCount, 1);
   assert.equal(result.results[6].sheets[0].comments[0].text, "Review");
-  assert.equal(result.results[8].location.address, "B2");
+  assert.equal(result.results[7].location.address, "A1:B2");
+  assert.equal(result.results[7].frozenRows, 2);
+  assert.equal(result.results[7].frozenColumns, 2);
+  assert.equal(result.results[7].topLeftCell, "C3");
+  assert.equal(result.results[7].verified, true);
+  assert.equal(result.results[8].location.address, "A1:B2");
   assert.equal(result.results[10].core.title, "Quarterly report");
   assert.equal(result.results[10].custom.Department, "Finance");
   assert.equal(result.results[13].sheets[0].protectedRanges[0].users[0].name, "Alex");
   assert.equal(result.results[15].orientation, "xlPortrait");
+  assert.equal(result.results[14].printGridlines, true);
+  assert.equal(result.results[14].displayGridlines, false);
+  assert.equal(result.results[14].verified, true);
+  assert.equal(result.results[15].displayGridlines, false);
+  assert.equal(result.results[15].displayHeadings, false);
   assert.equal(result.results[14].marginsPt.top, 10);
   assert.equal(result.results[14].marginsPt.bottom, 10);
   assert.equal(result.results[15].marginsPt.top, 10);
   assert.ok(state.events.some(item => item[0] === "drawing.image"));
   assert.ok(state.events.some(item => item[0] === "pivot.function" && item[1] === "Sum"));
+  assert.ok(state.events.some(item => item[0] === "page.displayGridlines" && item[1] === false));
 
   await assert.rejects(
     bridge.execute([{
@@ -824,6 +1558,165 @@ test("advanced Sheets bridge covers pivots, drawings, comments, freeze panes, me
     bridge.execute([{ name: "sheets_manage_page_layout", arguments: {} }]),
     /至少需要一个页面布局属性/,
   );
+});
+
+test("Sheets bridge waits for asynchronous freeze panes before reporting success", async () => {
+  const { bridge, state } = createHarness({
+    freezeDelayMs: 20,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 250,
+  });
+
+  const result = await bridge.execute([
+    {
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeRows", sheet: "Sheet1", count: 2 },
+    },
+    {
+      name: "sheets_inspect_freeze_panes",
+      arguments: { sheet: "Sheet1" },
+    },
+  ]);
+
+  assert.equal(result.results[0].location.address, "A1:XFD2");
+  assert.equal(result.results[0].frozenRows, 2);
+  assert.equal(result.results[0].frozenColumns, 0);
+  assert.equal(result.results[0].topLeftCell, "A3");
+  assert.equal(result.results[0].verified, true);
+  assert.equal(result.results[1].location.address, "A1:XFD2");
+  assert.equal(result.results[1].frozenRows, 2);
+  assert.equal(result.results[1].topLeftCell, "A3");
+  assert.equal(result.results[1].verified, true);
+  assert.ok(state.events.some(item => (
+    item[0] === "document.modified" && item[1] === true
+  )));
+});
+
+test("Sheets bridge marks verified view changes through the workbook model fallback", async () => {
+  const { bridge, state } = createHarness({
+    withoutAscEditor: true,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 100,
+  });
+
+  const result = await bridge.execute([{
+    name: "sheets_manage_page_layout",
+    arguments: { sheet: "Sheet1", displayGridlines: false },
+  }]);
+
+  assert.equal(result.results[0].verified, true);
+  assert.equal(result.results[0].displayGridlines, false);
+  assert.ok(state.events.some(item => (
+    item[0] === "workbook.document.modified" && item[1] === true
+  )));
+});
+
+test("Sheets bridge rejects unverified worksheet view mutations", async () => {
+  const frozen = createHarness({
+    freezeNeverApplies: true,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 20,
+  });
+  await assert.rejects(
+    frozen.bridge.execute([{
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeRows", sheet: "Sheet1", count: 2 },
+    }]),
+    error => (
+      error.code === "SHEETS_VIEW_STATE_NOT_APPLIED"
+      && error.details.phase === "sheets-view-verification"
+      && error.details.partialMutationPossible === true
+    ),
+  );
+
+  const gridlines = createHarness({
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 20,
+  });
+  gridlines.sheet1.SetDisplayGridlines = () => true;
+  await assert.rejects(
+    gridlines.bridge.execute([{
+      name: "sheets_manage_page_layout",
+      arguments: { sheet: "Sheet1", displayGridlines: false },
+    }]),
+    error => (
+      error.code === "SHEETS_VIEW_STATE_NOT_APPLIED"
+      && error.details.expected.displayGridlines === false
+      && error.details.observed.displayGridlines === true
+    ),
+  );
+});
+
+test("Sheets bridge requires explicit positive freeze counts and unfreeze action", async () => {
+  const { bridge } = createHarness();
+  for (const argumentsValue of [
+    { action: "freezeRows", count: 0 },
+    { action: "freezeRows", count: 1.5 },
+    { action: "freezeColumns", count: -1 },
+    { action: "freezeAt" },
+    { action: "unfreeze", count: 0 },
+  ]) {
+    await assert.rejects(
+      bridge.execute([{
+        name: "sheets_manage_freeze_panes",
+        arguments: argumentsValue,
+      }]),
+      error => error.code === "INVALID_TOOL_ARGUMENTS" || /freezeAt 需要 range/.test(error.message),
+    );
+  }
+});
+
+test("Sheets bridge unfreezes and restores screen gridlines without changing print gridlines", async () => {
+  const { bridge } = createHarness({
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 100,
+  });
+  await bridge.execute([
+    {
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeRows", sheet: "Sheet1", count: 2 },
+    },
+    {
+      name: "sheets_manage_page_layout",
+      arguments: {
+        sheet: "Sheet1",
+        displayGridlines: false,
+        printGridlines: true,
+      },
+    },
+  ]);
+
+  const result = await bridge.execute([
+    {
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "unfreeze", sheet: "Sheet1" },
+    },
+    {
+      name: "sheets_inspect_freeze_panes",
+      arguments: { sheet: "Sheet1" },
+    },
+    {
+      name: "sheets_manage_page_layout",
+      arguments: { sheet: "Sheet1", displayGridlines: true },
+    },
+    {
+      name: "sheets_inspect_page_layout",
+      arguments: { sheet: "Sheet1" },
+    },
+  ]);
+
+  for (const item of result.results.slice(0, 2)) {
+    assert.equal(item.location, null);
+    assert.equal(item.frozenRows, 0);
+    assert.equal(item.frozenColumns, 0);
+    assert.equal(item.topLeftCell, null);
+    assert.equal(item.verified, true);
+  }
+  for (const item of result.results.slice(2)) {
+    assert.equal(item.displayGridlines, true);
+    assert.equal(item.printGridlines, true);
+    assert.equal(item.verified, true);
+  }
 });
 
 test("Sheets macro tools use the documented plugin methods and reject mixed batches", async () => {

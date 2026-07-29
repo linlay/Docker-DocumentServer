@@ -709,6 +709,108 @@
               return content && typeof content.GetAllParagraphs === "function" ? content.GetAllParagraphs() : [];
             }
 
+            function readableValue(target, method, transform) {
+              var available = Boolean(target) && typeof target[method] === "function";
+              if (!available) return { available: false, value: null };
+              var value = safeCall(target, method);
+              if (typeof transform === "function" && value !== null && value !== undefined) {
+                value = transform(value);
+              }
+              return { available: true, value: value === undefined ? null : value };
+            }
+
+            function readableColor(target) {
+              if (target === null || target === undefined) return null;
+              if (typeof target === "string" || typeof target === "number") return target;
+              return serialized(target);
+            }
+
+            function describeTextStyles(shape) {
+              var paragraphs = getParagraphsFromShape(shape);
+              var fontSizes = [];
+              var fontFamilies = [];
+              var paragraphResults = [];
+              for (var paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
+                var paragraph = paragraphs[paragraphIndex];
+                var target = paragraphProperties(paragraph);
+                var alignment = readableValue(target, "GetJc");
+                var bullet = readableValue(target, "GetBullet");
+                var listType = null;
+                var listValue = null;
+                if (bullet.available) {
+                  if (bullet.value === null) {
+                    listType = "none";
+                  } else {
+                    listType = safeCall(bullet.value, "GetType")
+                      || safeCall(bullet.value, "GetClassType")
+                      || bullet.value.kind
+                      || null;
+                    listValue = serialized(bullet.value);
+                    if (listValue === null && isObject(bullet.value)) {
+                      listValue = {
+                        kind: bullet.value.kind || null,
+                        symbol: bullet.value.symbol || null,
+                        type: bullet.value.type || null,
+                        startAt: bullet.value.startAt || null,
+                      };
+                    }
+                  }
+                }
+                var runs = [];
+                var elementCount = typeof paragraph.GetElementsCount === "function"
+                  ? paragraph.GetElementsCount()
+                  : 0;
+                for (var elementIndex = 0; elementIndex < elementCount; elementIndex += 1) {
+                  var element = paragraph.GetElement(elementIndex);
+                  if (!element || safeCall(element, "GetClassType") !== "run") continue;
+                  var rawFontSize = readableValue(element, "GetFontSize");
+                  var fontSize = {
+                    available: rawFontSize.available,
+                    value: rawFontSize.value === null ? null : Number(rawFontSize.value) / 2,
+                  };
+                  var fontFamily = readableValue(element, "GetFontFamily");
+                  var bold = readableValue(element, "GetBold");
+                  var italic = readableValue(element, "GetItalic");
+                  var underline = readableValue(element, "GetUnderline");
+                  var color = readableValue(element, "GetColor", readableColor);
+                  if (typeof fontSize.value === "number" && isFinite(fontSize.value)) {
+                    fontSizes.push(fontSize.value);
+                  }
+                  if (typeof fontFamily.value === "string" && fontFamilies.indexOf(fontFamily.value) === -1) {
+                    fontFamilies.push(fontFamily.value);
+                  }
+                  runs.push({
+                    text: safeCall(element, "GetText"),
+                    fontSize: fontSize,
+                    fontFamily: fontFamily,
+                    bold: bold,
+                    italic: italic,
+                    underline: underline,
+                    color: color,
+                  });
+                }
+                paragraphResults.push({
+                  paragraphIndex: paragraphIndex + 1,
+                  text: runs.map(function (run) { return String(run.text || ""); }).join(""),
+                  alignment: alignment,
+                  list: {
+                    available: bullet.available,
+                    type: listType,
+                    value: listValue,
+                  },
+                  runs: runs,
+                });
+              }
+              return {
+                available: paragraphs.length > 0,
+                paragraphCount: paragraphs.length,
+                minFontSize: fontSizes.length ? Math.min.apply(Math, fontSizes) : null,
+                maxFontSize: fontSizes.length ? Math.max.apply(Math, fontSizes) : null,
+                fontFamilies: fontFamilies,
+                paragraphs: paragraphResults,
+              };
+            }
+
             function applyRunFormat(run, format) {
               if (format.fontSize !== undefined) run.SetFontSize(Math.max(2, Math.round(Number(format.fontSize) * 2)));
               if (format.fontFamily) run.SetFontFamily(String(format.fontFamily));
@@ -1084,11 +1186,12 @@
                   mmToEmu(args.paddingMm.bottom || 0)
                 );
               }
-              if (hasOwn(args, "text")) replaceShapeText(shape, args);
+              if (hasOwn(args, "paragraphs")) replaceShapeParagraphs(shape, args.paragraphs);
+              else if (hasOwn(args, "text")) replaceShapeText(shape, args);
               else formatShapeText(shape, args);
             }
 
-            function describeDrawing(drawing, objectIndex, includeRaw) {
+            function describeDrawing(drawing, objectIndex, includeRaw, includeTextStyles) {
               var kind = drawingKind(drawing);
               var geometry = kind === "shape" ? safeCall(drawing, "GetGeometry") : null;
               var frame = getDrawingFrame(drawing);
@@ -1110,6 +1213,7 @@
                 info.text = drawingText(drawing);
                 info.fill = describeFill(safeCall(drawing, "GetFill"));
                 info.line = describeStroke(safeCall(drawing, "GetLine"));
+                if (includeTextStyles) info.textStyles = describeTextStyles(drawing);
               }
               if (kind === "chart") {
                 info.chartIndex = objectIndex;
@@ -1139,6 +1243,245 @@
               }
               if (includeRaw) info.raw = serialized(drawing);
               return info;
+            }
+
+            function normalizeSafeMargins(value) {
+              if (isObject(value)) {
+                return {
+                  left: Math.max(0, asFinite(value.left, 0)),
+                  top: Math.max(0, asFinite(value.top, 0)),
+                  right: Math.max(0, asFinite(value.right, 0)),
+                  bottom: Math.max(0, asFinite(value.bottom, 0)),
+                };
+              }
+              var margin = Math.max(0, asFinite(value, 0));
+              return { left: margin, top: margin, right: margin, bottom: margin };
+            }
+
+            function drawingLabel(info) {
+              return info.name ? String(info.name) : "#" + String(info.objectIndex);
+            }
+
+            function overlapPairAllowed(first, second, pairs) {
+              if (!Array.isArray(pairs)) return false;
+              var firstName = String(first.name || "");
+              var secondName = String(second.name || "");
+              for (var index = 0; index < pairs.length; index += 1) {
+                var pair = pairs[index] || {};
+                var left = String(pair.firstName || "");
+                var right = String(pair.secondName || "");
+                if (
+                  (left === firstName && right === secondName)
+                  || (left === secondName && right === firstName)
+                ) {
+                  return true;
+                }
+              }
+              return false;
+            }
+
+            function drawingIntersection(first, second) {
+              var left = Math.max(first.xMm, second.xMm);
+              var top = Math.max(first.yMm, second.yMm);
+              var right = Math.min(first.xMm + first.widthMm, second.xMm + second.widthMm);
+              var bottom = Math.min(first.yMm + first.heightMm, second.yMm + second.heightMm);
+              if (!(right > left && bottom > top)) return null;
+              var firstContainsSecond = (
+                first.xMm <= second.xMm
+                && first.yMm <= second.yMm
+                && first.xMm + first.widthMm >= second.xMm + second.widthMm
+                && first.yMm + first.heightMm >= second.yMm + second.heightMm
+              );
+              var secondContainsFirst = (
+                second.xMm <= first.xMm
+                && second.yMm <= first.yMm
+                && second.xMm + second.widthMm >= first.xMm + first.widthMm
+                && second.yMm + second.heightMm >= first.yMm + first.heightMm
+              );
+              return {
+                kind: firstContainsSecond || secondContainsFirst ? "containment" : "overlap",
+                xMm: left,
+                yMm: top,
+                widthMm: right - left,
+                heightMm: bottom - top,
+              };
+            }
+
+            function hasManualListPrefix(text) {
+              var lines = String(text || "").split(/\r?\n/);
+              for (var index = 0; index < lines.length; index += 1) {
+                if (/^\s*(?:[•●▪◦‣⁃]|[-–—]\s|\d{1,3}[.)]\s)/.test(lines[index])) return true;
+              }
+              return false;
+            }
+
+            function validateSlideLayout(slide, slideNumber, args) {
+              var widthMm = emuToMm(safeCall(slide, "GetWidth"));
+              var heightMm = emuToMm(safeCall(slide, "GetHeight"));
+              if (typeof widthMm !== "number") widthMm = emuToMm(safeCall(presentation, "GetWidth"));
+              if (typeof heightMm !== "number") heightMm = emuToMm(safeCall(presentation, "GetHeight"));
+              var margins = normalizeSafeMargins(args.safeMarginMm);
+              var requireUniqueNames = args.requireUniqueNames !== false;
+              var minFontSize = hasOwn(args, "minFontSize") ? Number(args.minFontSize) : null;
+              var maxObjects = hasOwn(args, "maxObjects") ? Number(args.maxObjects) : null;
+              var drawings = slideDrawings(slide);
+              var objects = drawings.map(function (drawing, index) {
+                return describeDrawing(drawing, index, false, true);
+              });
+              var layout = locateLayout(safeCall(slide, "GetLayout"), false);
+              var issues = [];
+              var intersections = [];
+              var seenNames = {};
+
+              if (
+                hasOwn(args, "expectedMasterIndex")
+                && (!layout || Number(layout.masterIndex) !== Number(args.expectedMasterIndex))
+              ) {
+                issues.push({
+                  code: "UNEXPECTED_MASTER",
+                  expected: Number(args.expectedMasterIndex),
+                  actual: layout ? layout.masterIndex : null,
+                });
+              }
+              if (
+                hasOwn(args, "expectedLayoutIndex")
+                && (!layout || Number(layout.layoutIndex) !== Number(args.expectedLayoutIndex))
+              ) {
+                issues.push({
+                  code: "UNEXPECTED_LAYOUT",
+                  expected: Number(args.expectedLayoutIndex),
+                  actual: layout ? layout.layoutIndex : null,
+                });
+              }
+              if (maxObjects !== null && objects.length > maxObjects) {
+                issues.push({
+                  code: "OBJECT_BUDGET_EXCEEDED",
+                  maximum: maxObjects,
+                  actual: objects.length,
+                });
+              }
+
+              for (var objectIndex = 0; objectIndex < objects.length; objectIndex += 1) {
+                var info = objects[objectIndex];
+                var label = drawingLabel(info);
+                var name = typeof info.name === "string" ? info.name.trim() : "";
+                if (requireUniqueNames && !name) {
+                  issues.push({ code: "OBJECT_NAME_MISSING", object: label, objectIndex: info.objectIndex });
+                } else if (requireUniqueNames) {
+                  if (hasOwn(seenNames, name)) {
+                    issues.push({
+                      code: "OBJECT_NAME_DUPLICATE",
+                      name: name,
+                      objectIndexes: [seenNames[name], info.objectIndex],
+                    });
+                  } else {
+                    seenNames[name] = info.objectIndex;
+                  }
+                }
+                var numericFrame = (
+                  typeof info.xMm === "number"
+                  && typeof info.yMm === "number"
+                  && typeof info.widthMm === "number"
+                  && typeof info.heightMm === "number"
+                );
+                if (!numericFrame) {
+                  issues.push({ code: "GEOMETRY_UNAVAILABLE", object: label });
+                } else {
+                  var right = info.xMm + info.widthMm;
+                  var bottom = info.yMm + info.heightMm;
+                  if (info.xMm < 0 || info.yMm < 0 || right > widthMm || bottom > heightMm) {
+                    issues.push({
+                      code: "OBJECT_OUT_OF_BOUNDS",
+                      object: label,
+                      frame: {
+                        xMm: info.xMm,
+                        yMm: info.yMm,
+                        widthMm: info.widthMm,
+                        heightMm: info.heightMm,
+                      },
+                    });
+                  } else if (
+                    info.xMm < margins.left
+                    || info.yMm < margins.top
+                    || right > widthMm - margins.right
+                    || bottom > heightMm - margins.bottom
+                  ) {
+                    issues.push({ code: "SAFE_MARGIN_VIOLATION", object: label });
+                  }
+                }
+                if (
+                  minFontSize !== null
+                  && info.textStyles
+                  && typeof info.textStyles.minFontSize === "number"
+                  && info.textStyles.minFontSize < minFontSize
+                ) {
+                  issues.push({
+                    code: "FONT_TOO_SMALL",
+                    object: label,
+                    minimum: minFontSize,
+                    actual: info.textStyles.minFontSize,
+                  });
+                }
+                if (info.kind === "shape" && hasManualListPrefix(info.text)) {
+                  issues.push({ code: "MANUAL_LIST_PREFIX", object: label });
+                }
+              }
+
+              for (var firstIndex = 0; firstIndex < objects.length; firstIndex += 1) {
+                for (var secondIndex = firstIndex + 1; secondIndex < objects.length; secondIndex += 1) {
+                  var first = objects[firstIndex];
+                  var second = objects[secondIndex];
+                  if (
+                    typeof first.xMm !== "number"
+                    || typeof first.yMm !== "number"
+                    || typeof first.widthMm !== "number"
+                    || typeof first.heightMm !== "number"
+                    || typeof second.xMm !== "number"
+                    || typeof second.yMm !== "number"
+                    || typeof second.widthMm !== "number"
+                    || typeof second.heightMm !== "number"
+                  ) {
+                    continue;
+                  }
+                  var intersection = drawingIntersection(first, second);
+                  if (!intersection) continue;
+                  var allowed = overlapPairAllowed(first, second, args.allowedOverlapPairs);
+                  intersections.push({
+                    first: drawingLabel(first),
+                    second: drawingLabel(second),
+                    kind: intersection.kind,
+                    allowed: allowed,
+                    frame: {
+                      xMm: intersection.xMm,
+                      yMm: intersection.yMm,
+                      widthMm: intersection.widthMm,
+                      heightMm: intersection.heightMm,
+                    },
+                  });
+                  if (intersection.kind === "overlap" && !allowed) {
+                    issues.push({
+                      code: "OBJECT_OVERLAP",
+                      first: drawingLabel(first),
+                      second: drawingLabel(second),
+                    });
+                  }
+                }
+              }
+
+              return {
+                slide: slideNumber,
+                valid: issues.length === 0,
+                widthMm: widthMm,
+                heightMm: heightMm,
+                layout: layout,
+                objectCount: objects.length,
+                safeMarginMm: margins,
+                objects: objects,
+                intersections: intersections,
+                issues: issues,
+                visualVerified: false,
+                textOverflowVerified: false,
+              };
             }
 
             function tableDimensions(table) {
@@ -1625,7 +1968,12 @@
                     for (var drawingIndex = 0; drawingIndex < drawings.length && objectTotal < maxObjects; drawingIndex += 1) {
                       var kind = drawingKind(drawings[drawingIndex]);
                       if (kinds && kinds.indexOf(kind) === -1) continue;
-                      objects.push(describeDrawing(drawings[drawingIndex], drawingIndex, Boolean(args.includeRaw)));
+                      objects.push(describeDrawing(
+                        drawings[drawingIndex],
+                        drawingIndex,
+                        Boolean(args.includeRaw),
+                        Boolean(args.includeTextStyles)
+                      ));
                       objectTotal += 1;
                     }
                     objectSlides.push({
@@ -1641,6 +1989,34 @@
                     slides: objectSlides,
                     objectCount: objectTotal,
                     truncated: objectTotal >= maxObjects,
+                  });
+                  break;
+                }
+
+                case "slides_validate_layout": {
+                  var firstValidationSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
+                  var lastValidationSlide = hasOwn(args, "slide") ? firstValidationSlide + 1 : slideCount();
+                  if (firstValidationSlide < 0 || lastValidationSlide > slideCount()) {
+                    throw new Error("幻灯片页码超出范围");
+                  }
+                  var validatedSlides = [];
+                  for (
+                    var validationSlideIndex = firstValidationSlide;
+                    validationSlideIndex < lastValidationSlide;
+                    validationSlideIndex += 1
+                  ) {
+                    validatedSlides.push(validateSlideLayout(
+                      presentation.GetSlideByIndex(validationSlideIndex),
+                      validationSlideIndex + 1,
+                      args
+                    ));
+                  }
+                  results.push({
+                    name: call.name,
+                    valid: validatedSlides.every(function (item) { return item.valid; }),
+                    slides: validatedSlides,
+                    visualVerified: false,
+                    textOverflowVerified: false,
                   });
                   break;
                 }
@@ -1758,9 +2134,30 @@
                 }
 
                 case "slides_add_slide": {
+                  if (hasOwn(args, "masterIndex") && !hasOwn(args, "layoutIndex")) {
+                    throw new Error("提供 masterIndex 时必须同时提供 layoutIndex");
+                  }
                   var newSlide = Api.CreateSlide();
+                  if (hasOwn(args, "layoutIndex")) {
+                    var newSlideMaster = getMaster(args.masterIndex || 1);
+                    var newSlideLayout = getLayout(newSlideMaster, args.layoutIndex);
+                    if (typeof newSlide.ApplyLayout !== "function") {
+                      throw new Error("当前 ONLYOFFICE 版本不支持应用幻灯片版式");
+                    }
+                    if (newSlide.ApplyLayout(newSlideLayout) === false) {
+                      throw new Error("应用幻灯片版式失败");
+                    }
+                  }
                   if (args.backgroundColor) newSlide.SetBackground(Api.CreateSolidFill(apiColor(args.backgroundColor)));
                   presentation.AddSlide(newSlide, args.index ? Math.max(0, Number(args.index) - 1) : undefined);
+                  var newSlideNumber = null;
+                  for (var newSlideIndex = 0; newSlideIndex < slideCount(); newSlideIndex += 1) {
+                    if (presentation.GetSlideByIndex(newSlideIndex) === newSlide) {
+                      newSlideNumber = newSlideIndex + 1;
+                      break;
+                    }
+                  }
+                  var titleObject = null;
                   if (args.title) createTextBox(newSlide, {
                     text: args.title,
                     xMm: 15,
@@ -1770,8 +2167,23 @@
                     fontSize: args.titleFontSize || 28,
                     bold: true,
                   });
+                  if (args.title) {
+                    var titleDrawings = slideDrawings(newSlide);
+                    titleObject = describeDrawing(
+                      titleDrawings[titleDrawings.length - 1],
+                      titleDrawings.length - 1,
+                      false,
+                      false
+                    );
+                  }
                   changed += 1;
-                  results.push({ name: call.name, slideCount: slideCount() });
+                  results.push({
+                    name: call.name,
+                    slide: newSlideNumber,
+                    slideCount: slideCount(),
+                    layout: locateLayout(safeCall(newSlide, "GetLayout"), false),
+                    titleObject: titleObject,
+                  });
                   break;
                 }
 
@@ -2934,6 +3346,9 @@
                 }
 
                 case "slides_add_textbox": {
+                  if (hasOwn(args, "text") === hasOwn(args, "paragraphs")) {
+                    throw new Error("slides_add_textbox 必须且只能提供 text 或 paragraphs");
+                  }
                   var textboxSlideNumber = Number(args.slide || presentation.GetCurSlideIndex() + 1);
                   var textboxSlide = getSlide(textboxSlideNumber);
                   var textbox = createTextBox(textboxSlide, args);
@@ -3068,6 +3483,9 @@
                 }
 
                 case "slides_add_shape": {
+                  if (hasOwn(args, "text") && hasOwn(args, "paragraphs")) {
+                    throw new Error("slides_add_shape 的 text 与 paragraphs 不能同时提供");
+                  }
                   var shapeSlide = getSlide(args.slide);
                   var shapeType = String(args.shapeType || "rect");
                   var shapeWidth = Math.max(1, asFinite(args.widthMm, 100)) * EMU_PER_MM;

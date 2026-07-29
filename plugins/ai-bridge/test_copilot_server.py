@@ -110,7 +110,7 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.4.2-rev3"
+        revision = "0.6.0-rev4"
         paths = [
             "config.json",
             "index.html",
@@ -1005,6 +1005,7 @@ class HttpRelayTests(unittest.TestCase):
             "INVALID_TOOL_ARGUMENTS": 422,
             "EXECUTION_FAILED": 500,
             "WORD_API_UNSUPPORTED": 501,
+            "SHEETS_API_UNSUPPORTED": 501,
             "PERSISTENCE_FAILED": 502,
             "NOT_READY": 503,
             "BRIDGE_TIMEOUT": 504,
@@ -1139,6 +1140,58 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
 
+    def test_validate_accepts_image_arguments_between_standard_and_image_limits(self):
+        self.register()
+        with copilot_server.BRIDGE_CONDITION:
+            copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"]["tools"] = [
+                "word_add_image",
+            ]
+        claims = {
+            "fileName": "demo.docx",
+            "fileType": "docx",
+            "editorType": "word",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+
+        result = copilot_server.bridge_validate(
+            {
+                "toolCalls": [
+                    {
+                        "name": "word_add_image",
+                        "arguments": {
+                            "source": {
+                                "type": "dataUrl",
+                                "dataUrl": "data:image/png;base64," + ("A" * 300000),
+                            },
+                        },
+                    },
+                ],
+            },
+            claims,
+        )
+        self.assertTrue(result["valid"])
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_validate(
+                {
+                    "toolCalls": [
+                        {
+                            "name": "word_add_image",
+                            "arguments": {
+                                "source": {
+                                    "type": "dataUrl",
+                                    "dataUrl": "data:image/png;base64,"
+                                    + ("A" * 12_000_001),
+                                },
+                            },
+                        },
+                    ],
+                },
+                claims,
+            )
+        self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
+
     def test_word_arguments_are_normalized_before_validation_and_fingerprinting(self):
         allowed = [
             "word_set_document_properties",
@@ -1243,6 +1296,121 @@ class HttpRelayTests(unittest.TestCase):
         self.assertNotIn("兼容作者", encoded)
         self.assertNotIn("#112233", encoded)
 
+    def test_sheets_schema_accepts_formula_matrices_and_only_documented_aliases(self):
+        allowed = [
+            "sheets_set_formula",
+            "sheets_format_range",
+            "sheets_manage_table",
+            "sheets_manage_conditional_format",
+            "sheets_manage_validation",
+            "sheets_manage_page_layout",
+        ]
+        session = {
+            "state": {
+                "editorType": "cell",
+                "capabilities": {"tools": allowed},
+            },
+        }
+        tool_calls = [
+            {
+                "name": "sheets_set_formula",
+                "arguments": {
+                    "range": "D2:D4",
+                    "formula": [["=B2-C2"], ["=B3-C3"], ["=B4-C4"]],
+                },
+            },
+            {
+                "name": "sheets_manage_conditional_format",
+                "arguments": {
+                    "action": "add",
+                    "range": "D2:D4",
+                    "operator": "lessThan",
+                },
+            },
+            {
+                "name": "sheets_manage_validation",
+                "arguments": {
+                    "action": "add",
+                    "range": "A2:A4",
+                    "type": "list",
+                    "alertStyle": "warning",
+                    "formula1": "A,B,C",
+                },
+            },
+            {
+                "name": "sheets_manage_page_layout",
+                "arguments": {
+                    "orientation": "landscape",
+                    "displayGridlines": False,
+                },
+            },
+        ]
+        command = copilot_server.bridge_build_command(
+            {
+                "method": "executeBatch",
+                "requestId": "sheets-public-aliases",
+                "toolCalls": tool_calls,
+            },
+            session,
+        )
+        expected_calls = json.loads(json.dumps(tool_calls))
+        expected_calls[1]["arguments"]["operator"] = "xlLess"
+        expected_calls[2]["arguments"]["type"] = "xlValidateList"
+        expected_calls[3]["arguments"]["orientation"] = "xlLandscape"
+        self.assertEqual(command["params"]["toolCalls"], expected_calls)
+        self.assertEqual(len(command["argumentNormalizations"]), 3)
+
+        invalid_calls = [
+            {
+                "name": "sheets_manage_conditional_format",
+                "arguments": {
+                    "action": "add",
+                    "range": "A1",
+                    "operator": "smallerMaybe",
+                },
+            },
+            {
+                "name": "sheets_set_formula",
+                "arguments": {"range": "A1", "formula": 42},
+            },
+            {
+                "name": "sheets_set_formula",
+                "arguments": {
+                    "range": "A1:B2",
+                    "formula": [["=1"], ["=2", "=3"]],
+                },
+            },
+            {
+                "name": "sheets_format_range",
+                "arguments": {"range": "A1:B2"},
+            },
+            {
+                "name": "sheets_manage_table",
+                "arguments": {
+                    "action": "create",
+                    "range": "A1:B2",
+                    "hasHeaders": True,
+                },
+            },
+            {
+                "name": "sheets_manage_page_layout",
+                "arguments": {"marginsPt": {}},
+            },
+        ]
+        for call in invalid_calls:
+            with self.subTest(name=call["name"]):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.bridge_build_command(
+                        {
+                            "method": "executeTool",
+                            "requestId": "sheets-invalid-public-enum",
+                            "name": call["name"],
+                            "arguments": call["arguments"],
+                        },
+                        session,
+                    )
+                self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
+
     def test_word_canonical_property_wins_without_relaxing_unsafe_inputs(self):
         normalized, normalizations = copilot_server.normalize_word_tool_calls(
             [{
@@ -1332,6 +1500,213 @@ class HttpRelayTests(unittest.TestCase):
             "预检作者",
             json.dumps(result["argumentNormalizations"], ensure_ascii=False),
         )
+
+    def test_slides_validate_batch_is_read_only_and_uses_full_schema(self):
+        self.register(
+            file_name="demo.pptx",
+            file_type="pptx",
+            editor_type="slide",
+        )
+        with copilot_server.BRIDGE_CONDITION:
+            copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"]["tools"] = [
+                "slides_add_slide",
+                "slides_add_textbox",
+                "slides_validate_layout",
+            ]
+        claims = {
+            "fileName": "demo.pptx",
+            "fileType": "pptx",
+            "editorType": "slide",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+        commands_before = dict(copilot_server.BRIDGE_COMMANDS)
+        requests_before = dict(copilot_server.BRIDGE_REQUESTS)
+
+        result = copilot_server.bridge_validate(
+            {
+                "toolCalls": [
+                    {
+                        "name": "slides_add_slide",
+                        "arguments": {"masterIndex": 1, "layoutIndex": 2},
+                    },
+                    {
+                        "name": "slides_add_textbox",
+                        "arguments": {
+                            "slide": 1,
+                            "paragraphs": [
+                                {
+                                    "text": "提升交付效率",
+                                    "listType": "bullet",
+                                    "fontSize": 18,
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+            claims,
+        )
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["editorType"], "slide")
+        self.assertEqual(result["toolCalls"], 2)
+        self.assertEqual(result["argumentNormalizations"], [])
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
+        self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_validate(
+                {
+                    "toolCalls": [
+                        {
+                            "name": "slides_add_textbox",
+                            "arguments": {
+                                "slide": 1,
+                                "text": "普通文本",
+                                "paragraphs": [{"text": "重复内容入口"}],
+                            },
+                        },
+                        {
+                            "name": "slides_validate_layout",
+                            "arguments": {"unknownRule": True},
+                        },
+                    ],
+                },
+                claims,
+            )
+        self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
+        self.assertEqual(raised.exception.details["completedToolCalls"], 0)
+        self.assertFalse(raised.exception.details["partialMutationPossible"])
+        paths = {
+            error["path"]
+            for error in raised.exception.details["validationErrors"]
+        }
+        self.assertIn("arguments", paths)
+        self.assertIn("arguments.unknownRule", paths)
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
+        self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
+
+    def test_sheets_validate_batch_rejects_semantic_errors_without_editor_commands(self):
+        self.register(
+            file_name="demo.xlsx",
+            file_type="xlsx",
+            editor_type="cell",
+        )
+        tools = [
+            "sheets_set_values",
+            "sheets_set_formula",
+            "sheets_manage_validation",
+            "sheets_manage_table",
+            "sheets_manage_freeze_panes",
+        ]
+        with copilot_server.BRIDGE_CONDITION:
+            copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"]["tools"] = tools
+        claims = {
+            "fileName": "demo.xlsx",
+            "fileType": "xlsx",
+            "editorType": "cell",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+        commands_before = dict(copilot_server.BRIDGE_COMMANDS)
+        requests_before = dict(copilot_server.BRIDGE_REQUESTS)
+
+        valid = copilot_server.bridge_validate(
+            {
+                "toolCalls": [
+                    {
+                        "name": "sheets_set_values",
+                        "arguments": {
+                            "sheet": "Sheet1",
+                            "range": "A1:B2",
+                            "values": [["A", "B"], [1, 2]],
+                        },
+                    },
+                    {
+                        "name": "sheets_set_formula",
+                        "arguments": {
+                            "sheet": "Sheet1",
+                            "range": "selection",
+                            "formula": "=SUM(A1:B1)",
+                        },
+                    },
+                    {
+                        "name": "sheets_manage_freeze_panes",
+                        "arguments": {
+                            "sheet": "Sheet1",
+                            "action": "freezeRows",
+                            "count": 2,
+                        },
+                    },
+                ],
+            },
+            claims,
+        )
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["editorType"], "cell")
+        self.assertEqual(valid["toolCalls"], 3)
+
+        invalid_calls = [
+            {
+                "name": "sheets_set_values",
+                "arguments": {"range": "A1:B2", "values": 1},
+            },
+            {
+                "name": "sheets_set_values",
+                "arguments": {"range": "not-a-range", "values": 1},
+            },
+            {
+                "name": "sheets_set_values",
+                "arguments": {"range": "XFE1", "values": 1},
+            },
+            {
+                "name": "sheets_set_formula",
+                "arguments": {"range": "A1:B2", "formula": [["=1"], ["=2"]]},
+            },
+            {
+                "name": "sheets_manage_validation",
+                "arguments": {
+                    "action": "add",
+                    "range": "A1:A2",
+                    "type": "wholeNumber",
+                    "formula1": 1,
+                },
+            },
+            {
+                "name": "sheets_manage_table",
+                "arguments": {
+                    "action": "create",
+                    "tableMode": "basic",
+                    "range": "A1:B2",
+                    "name": "StructuredName",
+                },
+            },
+            {
+                "name": "sheets_manage_freeze_panes",
+                "arguments": {"action": "freezeRows", "count": 0},
+            },
+            {
+                "name": "sheets_manage_freeze_panes",
+                "arguments": {"action": "freezeAt"},
+            },
+        ]
+        for call in invalid_calls:
+            with self.subTest(tool=call["name"]):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.bridge_validate({"toolCalls": [call]}, claims)
+                self.assertEqual(raised.exception.status, 422)
+                self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
+                self.assertEqual(
+                    raised.exception.details["completedToolCalls"],
+                    0,
+                )
+                self.assertFalse(
+                    raised.exception.details["partialMutationPossible"],
+                )
+
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
+        self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
 
     def test_word_batch_collects_all_argument_errors_before_enqueue(self):
         self.register()

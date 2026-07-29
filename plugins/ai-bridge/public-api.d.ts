@@ -22,6 +22,7 @@ export type AiBridgeErrorCode =
   | "DOCUMENT_NOT_CONFIGURED"
   | "DOCUMENT_MISMATCH"
   | "EDITOR_MISMATCH"
+  | "CONTRACT_VERSION_MISMATCH"
   | "PERSISTENCE_FAILED"
   | "INVALID_IMAGE_SOURCE"
   | "IMAGE_FETCH_BLOCKED"
@@ -31,6 +32,8 @@ export type AiBridgeErrorCode =
   | "IMAGE_ASSET_EXPIRED"
   | "IMAGE_API_UNSUPPORTED"
   | "WORD_API_UNSUPPORTED"
+  | "SHEETS_API_UNSUPPORTED"
+  | "SHEETS_VIEW_STATE_NOT_APPLIED"
   | "EXECUTION_FAILED"
   | "INVALID_LISTENER"
   | "CLIENT_DESTROYED"
@@ -57,12 +60,16 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
+  contractVersion?: "0.6.0";
+  contractSha256?: string;
 }
 
 export interface AiBridgeState {
-  version: "0.4.2";
+  version: "0.6.0";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
+  contractVersion: "0.6.0";
+  contractSha256: string;
   ready: boolean;
   editorType: AiBridgeEditorType | null;
   context: AiBridgeContext;
@@ -93,6 +100,8 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
+  contractVersion: "0.6.0";
+  contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
 
@@ -933,12 +942,43 @@ export interface SlidesInspectObjectsArgs {
   maxObjects?: number;
   includeRaw?: boolean;
   includeSlideRaw?: boolean;
+  /** Include paragraph/run style readback; unsupported getters are reported as unavailable. */
+  includeTextStyles?: boolean;
+}
+export interface SlidesAllowedOverlapPair {
+  firstName: string;
+  secondName: string;
+}
+export interface SlidesValidateLayoutArgs {
+  slide?: number;
+  /** Uniform or per-edge structural safe area in millimetres. */
+  safeMarginMm?: number | AiBridgePadding;
+  minFontSize?: number;
+  maxObjects?: number;
+  expectedMasterIndex?: number;
+  expectedLayoutIndex?: number;
+  allowedOverlapPairs?: SlidesAllowedOverlapPair[];
+  requireUniqueNames?: boolean;
 }
 export interface SlidesReplaceTextArgs { search: string; replace: string; matchCase?: boolean; slide?: number; }
 export interface SlidesScaleFontArgs { scale: number; slide?: number; }
-export interface SlidesFormatTextArgs extends TextFormat { slide?: number; }
-export interface SlidesFormatSelectionArgs extends TextFormat {}
-export interface SlidesAddSlideArgs { index?: number; title?: string; titleFontSize?: number; backgroundColor?: string; }
+export interface SlidesFormatTextArgs extends BasicTextFormat {
+  underline?: boolean;
+  slide?: number;
+}
+export interface SlidesFormatSelectionArgs extends BasicTextFormat {
+  underline?: boolean;
+}
+export interface SlidesAddSlideArgs {
+  index?: number;
+  title?: string;
+  titleFontSize?: number;
+  backgroundColor?: string;
+  /** One-based master index; used only when layoutIndex is provided. */
+  masterIndex?: number;
+  /** One-based layout index applied atomically to the new slide. */
+  layoutIndex?: number;
+}
 export interface SlidesDuplicateSlideArgs { slide: number; }
 export interface SlidesDeleteSlideArgs { slide: number; }
 export interface SlidesMoveSlideArgs {
@@ -1010,14 +1050,17 @@ export interface SlidesCreateLayoutArgs {
   applyToSlides?: number[];
   includeRaw?: boolean;
 }
-export interface SlidesAddTemplateShapeArgs extends SlidesShapeFormatting {
+export interface SlidesTemplateShapeFormatting extends SlidesShapeFormatting {
+  underline?: boolean;
+}
+export interface SlidesAddTemplateShapeArgs extends SlidesTemplateShapeFormatting {
   scope: "master" | "layout";
   masterIndex?: number;
   layoutIndex?: number;
   shapeType: string;
   placeholderType?: string;
 }
-export interface SlidesManageTemplateObjectArgs extends SlidesShapeFormatting {
+export interface SlidesManageTemplateObjectArgs extends SlidesTemplateShapeFormatting {
   scope: "master" | "layout";
   masterIndex?: number;
   layoutIndex?: number;
@@ -1037,7 +1080,8 @@ export interface SlidesSetTemplateBackgroundArgs {
   mode?: "custom" | "clear" | "master";
   fill?: AiBridgeFill;
 }
-export interface SlidesParagraphFormat extends TextFormat {
+export interface SlidesParagraphFormat extends BasicTextFormat {
+  underline?: boolean;
   align?: "left" | "center" | "right" | "both";
   /** Paragraph indents in millimetres (mm). */
   firstLineIndentMm?: number;
@@ -1142,12 +1186,16 @@ export interface SlidesTableBorder {
   fill?: AiBridgeFill;
   sides?: Array<"top" | "right" | "bottom" | "left">;
 }
-export interface SlidesTableCellFormat extends SlidesParagraphFormat {
-  text?: string;
+export interface SlidesTableCellStyle extends BasicTextFormat {
+  underline?: boolean;
   fill?: AiBridgeFill;
   backgroundColor?: string;
+  align?: "left" | "center" | "right" | "both";
   verticalAlign?: "top" | "center" | "bottom";
   border?: SlidesTableBorder;
+}
+export interface SlidesTableCellFormat extends SlidesTableCellStyle {
+  text?: string;
 }
 export interface SlidesTableCellInput extends SlidesTableCellFormat {
   text: string;
@@ -1191,7 +1239,7 @@ export interface SlidesEditTableArgs extends SlidesObjectTarget {
   columns?: number;
   includeRaw?: boolean;
 }
-export interface SlidesFormatTableArgs extends SlidesObjectTarget, SlidesTableCellFormat {
+export interface SlidesFormatTableArgs extends SlidesObjectTarget, SlidesTableCellStyle {
   xMm?: number;
   yMm?: number;
   widthMm?: number;
@@ -1264,16 +1312,30 @@ export interface SlidesAddFreeformArgs {
   lineWidthPt?: number;
   includeRaw?: boolean;
 }
-export interface SlidesAddTextBoxArgs extends SlidesShapeFormatting {
-  slide: number;
-  text: string;
-}
-export interface SlidesAddWordArtArgs extends SlidesShapeFormatting {
+export type SlidesAddTextBoxArgs =
+  Omit<SlidesShapeFormatting, "text"> & { slide: number } & (
+    | { text: string; paragraphs?: never }
+    | { paragraphs: SlidesTextParagraph[]; text?: never }
+  );
+export interface SlidesAddWordArtArgs extends BasicTextFormat {
   slide: number;
   text: string;
   transform?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  name?: string;
+  fill?: AiBridgeFill;
+  line?: AiBridgeLine;
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
 }
-export interface SlidesAddMathArgs extends SlidesObjectTarget {
+export interface SlidesAddMathArgs {
+  slide: number;
   text: string;
   format?: "latex" | "unicode" | "mathml";
   xMm?: number;
@@ -1341,10 +1403,11 @@ export interface SlidesSetBackgroundArgs {
   mode?: "custom" | "clear" | "layout" | "master";
   fill?: AiBridgeFill;
 }
-export interface SlidesAddShapeArgs extends SlidesShapeFormatting {
-  slide: number;
-  shapeType: string;
-}
+export type SlidesAddShapeArgs =
+  Omit<SlidesShapeFormatting, "text"> & { slide: number; shapeType: string } & (
+    | { text?: string; paragraphs?: never }
+    | { paragraphs: SlidesTextParagraph[]; text?: never }
+  );
 export interface SlidesUpdateShapeArgs extends SlidesObjectTarget, SlidesShapeFormatting {}
 export interface SlidesDeleteObjectArgs extends SlidesObjectTarget {}
 export interface SlidesInspectChartsArgs {
@@ -1375,9 +1438,33 @@ export interface SlidesDeleteChartArgs extends SlidesChartTarget {}
 
 export interface SheetsInspectArgs { maxCells?: number; }
 export interface SheetTarget { sheet?: string; }
-export interface SheetsInspectRangeArgs extends SheetTarget { range: string; includeValues?: boolean; }
-export interface SheetsSetValuesArgs extends SheetTarget { range: string; values: unknown; }
-export interface SheetsSetFormulaArgs extends SheetTarget { range: string; formula: string; }
+export interface SheetsInspectRangeArgs extends SheetTarget {
+  range: string;
+  includeValues?: boolean;
+  /** Include cell font, fill, alignment, number format, wrapping, and dimensions in the readback. */
+  includeFormat?: boolean;
+  /** Include conditional-format count and readable rule properties in the readback. */
+  includeConditionalFormats?: boolean;
+  /** Include the readable data-validation rule, or null when no rule exists. */
+  includeValidation?: boolean;
+}
+export type SheetCellValue = string | number | boolean | null;
+export interface SheetsSetValuesArgs extends SheetTarget {
+  range: string;
+  /**
+   * Scalars are valid only for a single-cell target. Multi-cell targets require
+   * a non-empty rectangular matrix with exactly the same dimensions.
+   */
+  values: SheetCellValue | SheetCellValue[][];
+}
+export interface SheetsSetFormulaArgs extends SheetTarget {
+  range: string;
+  /**
+   * Formula strings are valid only for a single-cell target. Multi-cell targets
+   * require a target-sized matrix, or an anchor followed by fillDown/fillRight.
+   */
+  formula: string | string[][];
+}
 export interface SheetsSetArrayFormulaArgs extends SheetTarget { range: string; formula: string; }
 export interface SheetsReplaceTextArgs extends SheetTarget { range?: string; search: string; replace: string; }
 export interface SheetsFormatRangeArgs extends SheetTarget {
@@ -1504,15 +1591,21 @@ export interface SheetsRecalculateArgs { mode?: "formulas" | "pivots" | "all"; }
 export interface SheetsSortArgs extends SheetTarget {
   range: string;
   keys: Array<{ range: string; order?: "xlAscending" | "xlDescending" }>;
-  header?: string;
-  orientation?: string;
+  header?: boolean | "yes" | "no" | "guess" | "xlYes" | "xlNo" | "xlGuess";
+  orientation?: "rows" | "columns" | "xlSortRows" | "xlSortColumns";
 }
+export type SheetsFilterOperator =
+  | "and" | "or" | "filterValues" | "values" | "top10Items" | "bottom10Items"
+  | "top10Percent" | "bottom10Percent" | "filterCellColor" | "filterFontColor"
+  | "filterIcon" | "dynamic" | "xlAnd" | "xlOr" | "xlFilterValues"
+  | "xlTop10Items" | "xlBottom10Items" | "xlTop10Percent" | "xlBottom10Percent"
+  | "xlFilterCellColor" | "xlFilterFontColor" | "xlFilterIcon" | "xlFilterDynamic";
 export interface SheetsFilterArgs extends SheetTarget {
   action: "set" | "showAll" | "reapply";
   range?: string;
   field?: number;
   criteria1?: unknown;
-  operator?: string;
+  operator?: SheetsFilterOperator;
   criteria2?: unknown;
   visibleDropDown?: boolean;
 }
@@ -1522,8 +1615,15 @@ export interface SheetsInspectTablesArgs extends SheetTarget {
   maxTables?: number;
 }
 export interface SheetsManageTableArgs extends SheetTarget {
+  /** "format" is deprecated and only accepts sheet plus range. */
   action: "create" | "format" | "update" | "resize" | "delete" | "unlist";
   range?: string;
+  /**
+   * Applies only to create and defaults to auto. structured requires
+   * ApiListObject; basic only formats the range; auto only degrades requests
+   * that contain no structured-only properties.
+   */
+  tableMode?: "auto" | "structured" | "basic";
   sourceType?: string;
   tableIndex?: number;
   tableName?: string;
@@ -1545,7 +1645,7 @@ export interface SheetsManageConditionalFormatArgs extends SheetTarget {
   action: "add" | "deleteAll";
   range: string;
   type?: "cellValue" | "expression" | "uniqueValues" | "duplicateValues" | "colorScale" | "dataBar" | "iconSet" | "top10" | "aboveAverage";
-  operator?: string;
+  operator?: SheetsComparisonOperator;
   formula1?: unknown;
   formula2?: unknown;
   scale?: 2 | 3;
@@ -1553,12 +1653,24 @@ export interface SheetsManageConditionalFormatArgs extends SheetTarget {
   fontColor?: string;
   bold?: boolean;
 }
+export type SheetsComparisonOperator =
+  | "between" | "notBetween" | "equal" | "notEqual" | "greaterThan" | "lessThan"
+  | "greaterThanOrEqual" | "lessThanOrEqual" | "xlBetween" | "xlNotBetween"
+  | "xlEqual" | "xlNotEqual" | "xlGreater" | "xlLess" | "xlGreaterEqual" | "xlLessEqual";
+export type SheetsValidationType =
+  | "inputOnly" | "wholeNumber" | "decimal" | "list" | "date" | "time" | "textLength"
+  | "custom" | "xlValidateInputOnly" | "xlValidateWholeNumber" | "xlValidateDecimal"
+  | "xlValidateList" | "xlValidateDate" | "xlValidateTime" | "xlValidateTextLength"
+  | "xlValidateCustom";
+export type SheetsValidationAlertStyle =
+  | "stop" | "warning" | "information" | "info"
+  | "xlValidAlertStop" | "xlValidAlertWarning" | "xlValidAlertInformation";
 export interface SheetsManageValidationArgs extends SheetTarget {
   action: "add" | "modify" | "delete";
   range: string;
-  type?: string;
-  alertStyle?: string;
-  operator?: string;
+  type?: SheetsValidationType;
+  alertStyle?: SheetsValidationAlertStyle;
+  operator?: SheetsComparisonOperator;
   formula1?: unknown;
   formula2?: unknown;
   ignoreBlank?: boolean;
@@ -1631,10 +1743,30 @@ export interface SheetsManageCommentsArgs extends SheetTarget {
   removeAll?: boolean;
 }
 export interface SheetsInspectFreezePanesArgs extends SheetTarget {}
-export interface SheetsManageFreezePanesArgs extends SheetTarget {
-  action: "unfreeze" | "freezeAt" | "freezeRows" | "freezeColumns";
-  range?: string;
-  count?: number;
+export type SheetsManageFreezePanesArgs = SheetTarget & (
+  | { action: "unfreeze"; range?: never; count?: never }
+  /** The range is the exact leading worksheet area to freeze, not the first scrollable cell. */
+  | { action: "freezeAt"; range: string; count?: never }
+  /** count must be a positive integer; use unfreeze to remove panes. */
+  | { action: "freezeRows"; count: number; range?: never }
+  /** count must be a positive integer; use unfreeze to remove panes. */
+  | { action: "freezeColumns"; count: number; range?: never }
+);
+export interface SheetsFreezePanesLocation {
+  address: string;
+  rows: number | null;
+  columns: number | null;
+}
+/** Readback returned by freeze-pane inspect/manage calls after view verification. */
+export interface SheetsFreezePanesResult {
+  name: "sheets_inspect_freeze_panes" | "sheets_manage_freeze_panes";
+  action?: "unfreeze" | "freezeAt" | "freezeRows" | "freezeColumns";
+  sheet: string;
+  location: SheetsFreezePanesLocation | null;
+  frozenRows: number;
+  frozenColumns: number;
+  topLeftCell: string | null;
+  verified: boolean;
 }
 export interface SheetsInspectPropertiesArgs { customNames?: string[]; }
 export interface SheetsCoreProperties {
@@ -1670,180 +1802,5977 @@ export interface SheetsManageProtectedRangesArgs extends SheetTarget {
   permission?: string;
 }
 export interface SheetsInspectPageLayoutArgs extends SheetTarget {}
+/** Page-layout readback; display fields are normalized worksheet-screen booleans. */
+export interface SheetsPageLayoutResult {
+  name: "sheets_inspect_page_layout" | "sheets_manage_page_layout";
+  sheet: string;
+  orientation: string | null;
+  marginsPt: { top: number | null; right: number | null; bottom: number | null; left: number | null };
+  margins: { top: number | null; right: number | null; bottom: number | null; left: number | null };
+  printGridlines: boolean | null;
+  printHeadings: boolean | null;
+  displayGridlines: boolean;
+  displayHeadings: boolean;
+  verified: boolean;
+}
 export type SheetsManagePageLayoutArgs = SheetTarget & {
-  orientation?: string;
+  orientation?: "portrait" | "landscape" | "xlPortrait" | "xlLandscape";
   /** @deprecated Point-valued alias. Prefer marginsPt. */
   margins?: { top?: number; right?: number; bottom?: number; left?: number };
   /** Printed page margins in points (pt). */
   marginsPt?: { top?: number; right?: number; bottom?: number; left?: number };
   printGridlines?: boolean;
   printHeadings?: boolean;
+  /** Controls and verifies gridlines in the worksheet screen view, not printed output. */
+  displayGridlines?: boolean;
+  /** Controls and verifies row/column headings in the worksheet screen view, not printed output. */
+  displayHeadings?: boolean;
 } & (
-  | { orientation: string }
+  | { orientation: "portrait" | "landscape" | "xlPortrait" | "xlLandscape" }
   | { margins: { top?: number; right?: number; bottom?: number; left?: number } }
   | { marginsPt: { top?: number; right?: number; bottom?: number; left?: number } }
   | { printGridlines: boolean }
   | { printHeadings: boolean }
+  | { displayGridlines: boolean }
+  | { displayHeadings: boolean }
 );
 export interface SheetsInspectMacrosArgs { kind?: "onlyoffice" | "vba"; }
 export interface SheetsSetMacrosArgs { content: Record<string, unknown>; }
 
+// <ai-bridge-generated:tool-arguments>
+// Generated by tools/sync_contract.py. Do not edit this region.
+export type AiBridgeGeneratedWordInspectArgs = {
+  maxChars?: number;
+  maxParagraphs?: number;
+  includeStructure?: boolean;
+  includeComments?: boolean;
+};
+export type AiBridgeGeneratedWordReplaceTextArgs = {
+  search: string;
+  replace: string;
+  matchCase?: boolean;
+};
+export type AiBridgeGeneratedWordAppendParagraphArgs = {
+  text: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  align?: "left" | "center" | "right" | "both";
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+  listType?: "bullet" | "numbered";
+  listLevel?: number;
+};
+export type AiBridgeGeneratedWordInsertParagraphArgs = {
+  text: string;
+  inline?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  align?: "left" | "center" | "right" | "both";
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+  listType?: "bullet" | "numbered";
+  listLevel?: number;
+};
+export type AiBridgeGeneratedWordFormatDocumentArgs = {
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  align?: "left" | "center" | "right" | "both";
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+};
+export type AiBridgeGeneratedWordFormatSelectionArgs = {
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+};
+export type AiBridgeGeneratedWordFormatMatchesArgs = {
+  search: string;
+  matchCase?: boolean;
+  occurrence?: number;
+  maxMatches?: number;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+};
+export type AiBridgeGeneratedWordDeleteMatchesArgs = {
+  search: string;
+  matchCase?: boolean;
+  occurrence?: number;
+  maxMatches?: number;
+};
+export type AiBridgeGeneratedWordAddHyperlinkArgs = {
+  search: string;
+  url: string;
+  screenTip?: string;
+  bookmarkName?: string;
+  matchCase?: boolean;
+  occurrence?: number;
+  maxMatches?: number;
+};
+export type AiBridgeGeneratedWordAddCommentArgs = {
+  search: string;
+  text: string;
+  author?: string;
+  userId?: string;
+  matchCase?: boolean;
+  occurrence?: number;
+  maxMatches?: number;
+};
+export type AiBridgeGeneratedWordAddBookmarkArgs = {
+  search: string;
+  occurrence: number;
+  name: string;
+  matchCase?: boolean;
+};
+export type AiBridgeGeneratedWordAddImageArgs = {
+  source: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  widthMm?: number;
+  heightMm?: number;
+  preserveAspectRatio?: boolean;
+  current?: boolean;
+  paragraphIndex?: number;
+  search?: string;
+  occurrence?: number;
+  matchCase?: boolean;
+  wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
+  name?: string;
+};
+export type AiBridgeGeneratedWordInspectAdvancedArgs = {
+  includeProperties?: boolean;
+  customPropertyNames?: Array<string>;
+  includeSections?: boolean;
+  includeStyles?: boolean;
+  includeNumbering?: boolean;
+  includeDrawings?: boolean;
+  includeBookmarks?: boolean;
+  includeNotes?: boolean;
+  includeComments?: boolean;
+  includeRevisions?: boolean;
+  includeContentControls?: boolean;
+  includeCustomXml?: boolean;
+  maxItems?: number;
+};
+export type AiBridgeGeneratedWordSetDocumentPropertiesArgs = {
+  title?: string;
+  subject?: string;
+  creator?: string;
+  author?: string;
+  description?: string;
+  keywords?: string;
+  category?: string;
+  language?: string;
+  identifier?: string;
+  lastModifiedBy?: string;
+  revision?: string;
+  created?: string;
+  modified?: string;
+  custom?: Array<{
+    name: string;
+    value: string | number | boolean;
+    valueType?: "string" | "number" | "boolean" | "date";
+  }>;
+};
+export type AiBridgeGeneratedWordManageSectionArgs = {
+  action?: "configure" | "create";
+  sectionIndex?: number;
+  paragraphIndex?: number;
+  type?: "continuous" | "nextPage" | "evenPage" | "oddPage";
+  startPageNumber?: number;
+  titlePage?: boolean;
+  differentFirstPage?: boolean;
+  evenAndOddHeaders?: boolean;
+  columns?: {
+    count?: number;
+    spaceMm?: number;
+    entries?: Array<{
+      widthMm: number;
+      spaceMm?: number;
+    }>;
+  };
+} & ({ action: "create"; paragraphIndex: number; } | { action?: Exclude<"configure" | "create", "create">; });
+export type AiBridgeGeneratedWordManageStyleArgs = {
+  action?: "create" | "update";
+  name: string;
+  type?: "paragraph" | "character" | "table" | "numbering";
+  basedOn?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  align?: "left" | "center" | "right" | "both";
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  pageBreakBefore?: boolean;
+};
+export type AiBridgeGeneratedWordSetTabsArgs = {
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+  clearAll?: boolean;
+  tabs: Array<{
+    positionMm: number;
+    align?: "left" | "center" | "right" | "decimal" | "bar" | "clear";
+  }>;
+};
+export type AiBridgeGeneratedWordSetNumberingArgs = {
+  kind?: "bullet" | "numbered" | "multilevel";
+  level?: number;
+  restartAt?: number;
+  levels?: Array<{
+    level: number;
+    format?: string;
+    text?: string;
+    start?: number;
+    align?: "left" | "center" | "right";
+    restart?: number;
+  }>;
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+};
+export type AiBridgeGeneratedWordFormatTableAdvancedArgs = {
+  tableIndex: number;
+  row?: number;
+  column?: number;
+  rowHeightMm?: number;
+  rowHeightRule?: "auto" | "atLeast";
+  columnWidthMm?: number;
+  repeatHeader?: boolean;
+  cellMarginsMm?: {
+    top?: number;
+    right?: number;
+    bottom?: number;
+    left?: number;
+  };
+  borders?: {
+    top?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+    right?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+    bottom?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+    left?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+    insideHorizontal?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+    insideVertical?: {
+      style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+      color?: string;
+      widthPt?: number;
+      spacePt?: number;
+    };
+  };
+  wrapping?: "none" | "around";
+} & ({ repeatHeader: boolean; row: number; } | { repeatHeader?: never; });
+export type AiBridgeGeneratedWordAddNestedTableArgs = {
+  tableIndex: number;
+  row: number;
+  column: number;
+  rows: number;
+  cols: number;
+  columns?: number;
+  data?: Array<Array<(string | number | boolean | null | {
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    textColor?: string;
+    highlightColor?: string;
+    characterSpacing?: number;
+    characterSpacingPt?: number;
+    backgroundColor?: string;
+    align?: "left" | "center" | "right" | "both";
+    spacingBefore?: number;
+    spacingAfter?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    firstLineIndent?: number;
+    leftIndent?: number;
+    rightIndent?: number;
+    firstLineIndentPt?: number;
+    leftIndentPt?: number;
+    rightIndentPt?: number;
+    verticalAlign?: "top" | "center" | "bottom";
+    widthPercent?: number;
+  })>>;
+  widthPercent?: number;
+  align?: "left" | "center" | "right";
+  styleName?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+};
+export type AiBridgeGeneratedWordManageDrawingArgs = {
+  action: "update" | "delete";
+  drawingIndex?: number;
+  name?: string;
+  kind?: "image" | "shape" | "chart" | "oleObject" | "smartArt" | "any";
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
+  xMm?: number;
+  yMm?: number;
+  relativeFromH?: string;
+  relativeFromV?: string;
+  alignH?: string;
+  alignV?: string;
+  nameUpdate?: string;
+  border?: {
+    style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
+    color?: string;
+    widthPt?: number;
+    spacePt?: number;
+  };
+} & ({ drawingIndex: number; } | { name: string; });
+export type AiBridgeGeneratedWordAddShapeArgs = {
+  shapeType: string;
+  text?: string;
+  widthMm?: number;
+  heightMm?: number;
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
+  rotationDeg?: number;
+  name?: string;
+  paragraphIndex?: number;
+  current?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+};
+export type AiBridgeGeneratedWordAddChartArgs = {
+  chartType?: string;
+  data: Array<Array<number>>;
+  seriesNames?: Array<string>;
+  categories?: Array<string | number>;
+  numberFormats?: Array<string>;
+  widthMm?: number;
+  heightMm?: number;
+  style?: number;
+  title?: string;
+  legendPosition?: "left" | "top" | "right" | "bottom" | "none";
+  showValues?: boolean;
+  showCategories?: boolean;
+  showSeriesNames?: boolean;
+  wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
+  paragraphIndex?: number;
+  current?: boolean;
+};
+export type AiBridgeGeneratedWordAddMathArgs = {
+  equation: string;
+  format?: "unicode" | "latex" | "mathml";
+  paragraphIndex?: number;
+  current?: boolean;
+};
+export type AiBridgeGeneratedWordAddOleObjectArgs = {
+  source: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  data: string;
+  applicationId: string;
+  widthMm?: number;
+  heightMm?: number;
+  paragraphIndex?: number;
+  current?: boolean;
+  name?: string;
+};
+export type AiBridgeGeneratedWordManageFieldsArgs = {
+  action: "add" | "updateAll" | "clearForms";
+  instruction?: string;
+  search?: string;
+  occurrence?: number;
+  matchCase?: boolean;
+  paragraphIndex?: number;
+} & ({ action: "add"; instruction: string; } | { action?: Exclude<"add" | "updateAll" | "clearForms", "add">; });
+export type AiBridgeGeneratedWordManageLongDocumentArgs = {
+  action: "addToc" | "updateToc" | "addCaption" | "addTableOfFigures" | "updateTableOfFigures" | "addCrossReference" | "addFootnote" | "addEndnote" | "deleteBookmark";
+  paragraphIndex?: number;
+  label?: string;
+  text?: string;
+  excludeLabel?: boolean;
+  numberFormat?: string;
+  before?: boolean;
+  headingLevel?: number;
+  separator?: string;
+  showPageNumbers?: boolean;
+  rightAlignPageNumbers?: boolean;
+  leaderType?: string;
+  formatAsLinks?: boolean;
+  outlineLevels?: number;
+  referenceKind?: "caption" | "bookmark" | "heading" | "numbered" | "footnote" | "endnote";
+  targetIndex?: number;
+  captionIndex?: number;
+  referenceType?: string;
+  hyperlink?: boolean;
+  aboveBelow?: boolean;
+  numberSeparator?: string;
+  noteText?: string;
+  bookmarkName?: string;
+};
+export type AiBridgeGeneratedWordManageCommentsArgs = {
+  action: "reply" | "edit" | "remove" | "removeAll" | "resolve" | "reopen";
+  commentId?: string;
+  text?: string;
+  author?: string;
+  userId?: string;
+};
+export type AiBridgeGeneratedWordManageRevisionsArgs = {
+  action: "start" | "stop" | "acceptAll" | "rejectAll";
+};
+export type AiBridgeGeneratedWordSetProtectionArgs = {
+  action: "protect" | "unprotect";
+  mode?: "readOnly" | "comments" | "forms";
+};
+export type AiBridgeGeneratedWordManageContentControlArgs = {
+  action: "add" | "update" | "remove" | "clear" | "check";
+  kind?: "block" | "inline" | "checkbox" | "comboBox" | "dropDown" | "datePicker" | "picture";
+  index?: number;
+  tag?: string;
+  title?: string;
+  text?: string;
+  placeholder?: string;
+  items?: Array<{
+    display: string;
+    value?: string;
+  }>;
+  selectedValue?: string;
+  checked?: boolean;
+  lock?: "none" | "content" | "control" | "both";
+  color?: string;
+  appearance?: "boundingBox" | "hidden";
+  date?: string;
+  dateFormat?: string;
+  dataBinding?: {
+    prefixMapping?: string;
+    storeItemId: string;
+    xpath: string;
+  };
+  updateFromXml?: boolean;
+  paragraphIndex?: number;
+  current?: boolean;
+  tableIndex?: number;
+  row?: number;
+  column?: number;
+  contentMode?: "append" | "replace";
+};
+export type AiBridgeGeneratedWordManageCustomXmlArgs = {
+  action: "add" | "replace" | "remove" | "insertElement" | "updateElement" | "deleteElement" | "insertAttribute" | "updateAttribute" | "deleteAttribute";
+  partId?: string;
+  xml?: string;
+  xpath?: string;
+  name?: string;
+  value?: string;
+};
+export type AiBridgeGeneratedWordInspectMacrosArgs = {
+  kind?: "onlyoffice" | "vba";
+};
+export type AiBridgeGeneratedWordSetMacrosArgs = {
+  macros: Array<{
+    name: string;
+    value: string;
+    guid?: string;
+  }>;
+  current?: number;
+};
+export type AiBridgeGeneratedWordSetWatermarkArgs = {
+  action?: "setText" | "setImage" | "remove";
+  text?: string;
+  source?: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  opacity?: number;
+  diagonal?: boolean;
+  scale?: number;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+};
+export type AiBridgeGeneratedWordFormatParagraphsArgs = {
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  align?: "left" | "center" | "right" | "both";
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+};
+export type AiBridgeGeneratedWordSetParagraphTextArgs = {
+  text: string;
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  align?: "left" | "center" | "right" | "both";
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+};
+export type AiBridgeGeneratedWordDeleteParagraphsArgs = {
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+};
+export type AiBridgeGeneratedWordSetListArgs = {
+  listType: "bullet" | "numbered";
+  level?: number;
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+  contextualSpacing?: boolean;
+};
+export type AiBridgeGeneratedWordInsertPageBreakArgs = {
+  position?: "before" | "after";
+  paragraphIndexes?: Array<number>;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  maxParagraphs?: number;
+  all?: boolean;
+  current?: boolean;
+};
+export type AiBridgeGeneratedWordNavigateArgs = {
+  target?: "start" | "end" | "page" | "next" | "previous" | "relative" | "current" | "search";
+  page?: number;
+  pageDelta?: number;
+  search?: string;
+  matchCase?: boolean;
+  occurrence?: number;
+};
+export type AiBridgeGeneratedWordScrollArgs = {
+  direction?: "up" | "down";
+  pages?: number;
+};
+export type AiBridgeGeneratedWordScaleFontArgs = {
+  scale: number;
+};
+export type AiBridgeGeneratedWordAddTableArgs = {
+  rows: number;
+  cols: number;
+  columns?: number;
+  data?: Array<Array<(string | number | boolean | null | {
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    textColor?: string;
+    highlightColor?: string;
+    characterSpacing?: number;
+    characterSpacingPt?: number;
+    backgroundColor?: string;
+    align?: "left" | "center" | "right" | "both";
+    spacingBefore?: number;
+    spacingAfter?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    firstLineIndent?: number;
+    leftIndent?: number;
+    rightIndent?: number;
+    firstLineIndentPt?: number;
+    leftIndentPt?: number;
+    rightIndentPt?: number;
+    verticalAlign?: "top" | "center" | "bottom";
+    widthPercent?: number;
+  })>>;
+  widthPercent?: number;
+  align?: "left" | "center" | "right";
+  styleName?: string;
+  firstRow?: boolean;
+  lastRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  horizontalBanding?: boolean;
+  verticalBanding?: boolean;
+  title?: string;
+  description?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  insertAt?: "end" | "current" | "before" | "after";
+  paragraphIndex?: number;
+  tableIndex?: number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
+  pageBreakBefore?: boolean;
+};
+export type AiBridgeGeneratedWordSetTableCellArgs = {
+  tableIndex: number;
+  row: number;
+  column: number;
+  text?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  doubleStrikeout?: boolean;
+  caps?: boolean;
+  smallCaps?: boolean;
+  color?: string;
+  highlightColor?: string;
+  characterSpacing?: number;
+  characterSpacingPt?: number;
+  vertAlign?: "baseline" | "subscript" | "superscript";
+  characterStyleName?: string;
+  backgroundColor?: string;
+  align?: "left" | "center" | "right" | "both";
+  styleName?: string;
+  headingLevel?: number;
+  outlineLevel?: number;
+  spacingBefore?: number;
+  spacingAfter?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  firstLineIndent?: number;
+  leftIndent?: number;
+  rightIndent?: number;
+  firstLineIndentPt?: number;
+  leftIndentPt?: number;
+  rightIndentPt?: number;
+  keepLines?: boolean;
+  keepNext?: boolean;
+  widowControl?: boolean;
+  contextualSpacing?: boolean;
+  pageBreakBefore?: boolean;
+  verticalAlign?: "top" | "center" | "bottom";
+  widthPercent?: number;
+};
+export type AiBridgeGeneratedWordFormatTableArgs = {
+  tableIndex: number;
+  widthPercent?: number;
+  align?: "left" | "center" | "right";
+  styleName?: string;
+  backgroundColor?: string;
+  title?: string;
+  description?: string;
+  firstRow?: boolean;
+  lastRow?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  horizontalBanding?: boolean;
+  verticalBanding?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+};
+export type AiBridgeGeneratedWordEditTableArgs = {
+  tableIndex: number;
+  action: "addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete";
+  row?: number;
+  column?: number;
+  position?: "before" | "after";
+  rowStart?: number;
+  rowEnd?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  rows?: number;
+  columns?: number;
+} & ({ action: "removeRow"; row: number; } | { action?: Exclude<"addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete", "removeRow">; }) & ({ action: "removeColumn"; column: number; } | { action?: Exclude<"addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete", "removeColumn">; }) & ({ action: "splitCell"; row: number; column: number; } | { action?: Exclude<"addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete", "splitCell">; }) & ({ action: "mergeCells"; rowStart: number; rowEnd: number; columnStart: number; columnEnd: number; } | { action?: Exclude<"addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell" | "clear" | "delete", "mergeCells">; });
+export type AiBridgeGeneratedWordSetPageLayoutArgs = {
+  sectionIndex?: number;
+  pageSize?: "A4" | "Letter" | "Legal" | "custom";
+  orientation?: "portrait" | "landscape";
+  widthMm?: number;
+  heightMm?: number;
+  marginLeftMm?: number;
+  marginTopMm?: number;
+  marginRightMm?: number;
+  marginBottomMm?: number;
+  headerDistanceMm?: number;
+  footerDistanceMm?: number;
+  titlePage?: boolean;
+  differentFirstPage?: boolean;
+};
+export type AiBridgeGeneratedWordSetHeaderFooterArgs = {
+  kind: "header" | "footer";
+  type?: "default" | "first" | "even";
+  action?: "set" | "remove";
+  sectionIndex?: number;
+  text?: string;
+  replace?: boolean;
+  pageNumber?: boolean;
+  pagesCount?: boolean;
+  fields?: Array<string>;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  align?: "left" | "center" | "right" | "both";
+};
+export type AiBridgeGeneratedWordSetDocumentTextArgs = {
+  text: string;
+};
+export type AiBridgeGeneratedSlidesInspectArgs = {
+  maxChars?: number;
+};
+export type AiBridgeGeneratedSlidesInspectLayoutsArgs = {
+  masterIndex?: number;
+  includeObjects?: boolean;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesInspectThemesArgs = {
+  masterIndex?: number;
+  slide?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesInspectBuiltinThemesArgs = Record<string, never>;
+export type AiBridgeGeneratedSlidesInspectObjectsArgs = {
+  slide?: number;
+  kinds?: Array<string>;
+  maxObjects?: number;
+  includeRaw?: boolean;
+  includeSlideRaw?: boolean;
+  includeTextStyles?: boolean;
+};
+export type AiBridgeGeneratedSlidesValidateLayoutArgs = {
+  slide?: number;
+  safeMarginMm?: (number | {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  });
+  minFontSize?: number;
+  maxObjects?: number;
+  expectedMasterIndex?: number;
+  expectedLayoutIndex?: number;
+  allowedOverlapPairs?: Array<{
+    firstName: string;
+    secondName: string;
+  }>;
+  requireUniqueNames?: boolean;
+};
+export type AiBridgeGeneratedSlidesReplaceTextArgs = {
+  search: string;
+  replace: string;
+  matchCase?: boolean;
+  slide?: number;
+};
+export type AiBridgeGeneratedSlidesScaleFontArgs = {
+  scale: number;
+  slide?: number;
+};
+export type AiBridgeGeneratedSlidesFormatTextArgs = {
+  slide?: number;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+};
+export type AiBridgeGeneratedSlidesFormatSelectionArgs = {
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+};
+export type AiBridgeGeneratedSlidesAddSlideArgs = {
+  index?: number;
+  title?: string;
+  titleFontSize?: number;
+  backgroundColor?: string;
+  masterIndex?: number;
+  layoutIndex?: number;
+} & ({ masterIndex: number; layoutIndex: number; } | { masterIndex?: never; });
+export type AiBridgeGeneratedSlidesDuplicateSlideArgs = {
+  slide: number;
+};
+export type AiBridgeGeneratedSlidesDeleteSlideArgs = {
+  slide: number;
+};
+export type AiBridgeGeneratedSlidesMoveSlideArgs = {
+  slide: number;
+  toIndex: number;
+};
+export type AiBridgeGeneratedSlidesSetVisibilityArgs = {
+  slide: number;
+  visible: boolean;
+};
+export type AiBridgeGeneratedSlidesSetSizeArgs = {
+  preset?: "wide" | "standard" | "custom";
+  widthMm?: number;
+  heightMm?: number;
+  orientation?: "landscape" | "portrait";
+};
+export type AiBridgeGeneratedSlidesApplyLayoutArgs = {
+  slide: number;
+  masterIndex?: number;
+  layoutIndex: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesSetShowSettingsArgs = {
+  loop: boolean;
+};
+export type AiBridgeGeneratedSlidesApplyThemeArgs = {
+  sourceMasterIndex?: number;
+  sourceSlide?: number;
+  targetSlide?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesApplyBuiltinThemeArgs = {
+  theme: number | string;
+};
+export type AiBridgeGeneratedSlidesSetThemeArgs = {
+  masterIndex?: number;
+  slide?: number;
+  colors?: Array<string>;
+  colorSchemeName?: string;
+  fonts?: {
+    majorLatin: string;
+    minorLatin: string;
+    majorEastAsian?: string;
+    majorComplex?: string;
+    minorEastAsian?: string;
+    minorComplex?: string;
+    name?: string;
+  };
+  includeRaw?: boolean;
+} & ({ colors: Array<string>; } | { fonts: {
+  majorLatin: string;
+  minorLatin: string;
+  majorEastAsian?: string;
+  majorComplex?: string;
+  minorEastAsian?: string;
+  minorComplex?: string;
+  name?: string;
+}; });
+export type AiBridgeGeneratedSlidesCreateLayoutArgs = {
+  masterIndex?: number;
+  name?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  followMasterBackground?: boolean;
+  placeholders?: Array<{
+    type: string;
+    shapeType?: string;
+    text?: string;
+    xMm?: number;
+    yMm?: number;
+    widthMm?: number;
+    heightMm?: number;
+    rotationDeg?: number;
+    flipH?: boolean;
+    flipV?: boolean;
+    name?: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: string;
+    verticalAlign?: "top" | "center" | "bottom";
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+    paddingMm?: {
+      left?: number;
+      top?: number;
+      right?: number;
+      bottom?: number;
+    };
+    fillColor?: string;
+    lineColor?: string;
+    lineWidthPt?: number;
+  }>;
+  applyToSlides?: Array<number>;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddTemplateShapeArgs = {
+  scope: "master" | "layout";
+  masterIndex?: number;
+  layoutIndex?: number;
+  shapeType: string;
+  placeholderType?: string;
+  text?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  paddingMm?: {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesManageTemplateObjectArgs = {
+  scope: "master" | "layout";
+  masterIndex?: number;
+  layoutIndex?: number;
+  action: "update" | "delete";
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  newName?: string;
+  shapeType?: string;
+  text?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  paddingMm?: {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesSetTemplateBackgroundArgs = {
+  scope: "master" | "layout";
+  masterIndex?: number;
+  layoutIndex?: number;
+  mode?: "custom" | "clear" | "master";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+};
+export type AiBridgeGeneratedSlidesSetTextContentArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  paragraphs: Array<{
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    firstLineIndentMm?: number;
+    leftIndentMm?: number;
+    rightIndentMm?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    level?: number;
+    listType?: "none" | "bullet" | "number";
+    bulletSymbol?: string;
+    numberingType?: string;
+    startAt?: number;
+  }>;
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesFormatParagraphsArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  paragraphIndexes?: Array<number>;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: "left" | "center" | "right" | "both";
+  firstLineIndentMm?: number;
+  leftIndentMm?: number;
+  rightIndentMm?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  level?: number;
+  listType?: "none" | "bullet" | "number";
+  bulletSymbol?: string;
+  numberingType?: string;
+  startAt?: number;
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesUpdateObjectArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesSetHyperlinkArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  action?: "external" | "firstSlide" | "lastSlide" | "nextSlide" | "previousSlide" | "slide" | "remove";
+  url?: string;
+  targetSlide?: number;
+  tooltip?: string;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesSetNotesArgs = {
+  slide: number;
+  text: string;
+  append?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddCommentArgs = {
+  slide: number;
+  text: string;
+  xMm?: number;
+  yMm?: number;
+  author?: string;
+  userId?: string;
+};
+export type AiBridgeGeneratedSlidesInspectCommentsArgs = Record<string, never>;
+export type AiBridgeGeneratedSlidesManageCommentArgs = {
+  action: "update" | "addReply" | "removeReplies" | "delete";
+  commentId?: string;
+  commentIndex?: number;
+  text?: string;
+  author?: string;
+  userId?: string;
+  solved?: boolean;
+  xMm?: number;
+  yMm?: number;
+  start?: number;
+  count?: number;
+} & ({ commentId: string; } | { commentIndex: number; });
+export type AiBridgeGeneratedSlidesSetTransitionArgs = {
+  slide: number;
+  clear?: boolean;
+  effect?: string;
+  speed?: "slow" | "medium" | "fast";
+  durationMs?: number;
+  advanceOnClick?: boolean;
+  advanceOnTime?: boolean;
+  advanceTimeMs?: number;
+};
+export type AiBridgeGeneratedSlidesInspectAnimationsArgs = {
+  slide?: number;
+};
+export type AiBridgeGeneratedSlidesManageAnimationArgs = {
+  slide: number;
+  action: "add" | "update" | "delete" | "clear";
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  effectIndex?: number;
+  sequence?: "main" | "interactive";
+  triggerObject?: {
+    objectId?: string;
+    objectIndex?: number;
+    name?: string;
+  } & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+  effectType?: string;
+  trigger?: "onclick" | "withprevious" | "afterprevious";
+  durationMs?: number;
+  delayMs?: number;
+  repeatCount?: number;
+  toIndex?: number;
+};
+export type AiBridgeGeneratedSlidesAddTableArgs = {
+  slide: number;
+  rows: number;
+  columns: number;
+  data?: Array<Array<(string | number | boolean | null | {
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    firstLineIndentMm?: number;
+    leftIndentMm?: number;
+    rightIndentMm?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    level?: number;
+    listType?: "none" | "bullet" | "number";
+    bulletSymbol?: string;
+    numberingType?: string;
+    startAt?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    backgroundColor?: string;
+    verticalAlign?: "top" | "center" | "bottom";
+    border?: {
+      widthMm?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      sides?: Array<"top" | "right" | "bottom" | "left">;
+    };
+  })>>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  name?: string;
+  header?: {
+    text?: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    firstLineIndentMm?: number;
+    leftIndentMm?: number;
+    rightIndentMm?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    level?: number;
+    listType?: "none" | "bullet" | "number";
+    bulletSymbol?: string;
+    numberingType?: string;
+    startAt?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    backgroundColor?: string;
+    verticalAlign?: "top" | "center" | "bottom";
+    border?: {
+      widthMm?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      sides?: Array<"top" | "right" | "bottom" | "left">;
+    };
+  };
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesSetTableCellArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  row: number;
+  column: number;
+  text?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: "left" | "center" | "right" | "both";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  backgroundColor?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  border?: {
+    widthMm?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    sides?: Array<"top" | "right" | "bottom" | "left">;
+  };
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesEditTableArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  action: "addRow" | "addColumn" | "removeRow" | "removeColumn" | "mergeCells" | "splitCell";
+  row?: number;
+  column?: number;
+  position?: "before" | "after";
+  rowStart?: number;
+  rowEnd?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  rows?: number;
+  columns?: number;
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesFormatTableArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  rowStart?: number;
+  rowEnd?: number;
+  columnStart?: number;
+  columnEnd?: number;
+  columnWidthsMm?: Array<number>;
+  rowHeightsMm?: Array<number>;
+  tableLook?: {
+    firstColumn?: boolean;
+    firstRow?: boolean;
+    lastColumn?: boolean;
+    lastRow?: boolean;
+    horizontalBanding?: boolean;
+    verticalBanding?: boolean;
+  };
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: "left" | "center" | "right" | "both";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  backgroundColor?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  border?: {
+    widthMm?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    sides?: Array<"top" | "right" | "bottom" | "left">;
+  };
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesAlignObjectsArgs = {
+  slide: number;
+  targets: Array<{
+    objectId?: string;
+    objectIndex?: number;
+    name?: string;
+  } & ({ objectId: string; } | { objectIndex: number; } | { name: string; })>;
+  align?: "left" | "center" | "right" | "top" | "middle" | "bottom";
+  distribute?: "horizontal" | "vertical";
+  relativeTo?: "selection" | "slide";
+} & ({ align: "left" | "center" | "right" | "top" | "middle" | "bottom"; } | { distribute: "horizontal" | "vertical"; });
+export type AiBridgeGeneratedSlidesGroupObjectsArgs = {
+  slide: number;
+  action?: "group" | "ungroup";
+  targets?: Array<{
+    objectId?: string;
+    objectIndex?: number;
+    name?: string;
+  } & ({ objectId: string; } | { objectIndex: number; } | { name: string; })>;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesReorderObjectArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  action: "front" | "back" | "forward" | "backward";
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesAddConnectorArgs = {
+  slide: number;
+  connectorType?: string;
+  startXmm: number;
+  startYmm: number;
+  endXmm: number;
+  endYmm: number;
+  name?: string;
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddFreeformArgs = {
+  slide: number;
+  paths: Array<{
+    fill?: string;
+    stroke?: boolean;
+    commands: Array<{
+      type: "moveTo" | "lineTo" | "quadBezTo" | "cubicBezTo" | "arcTo" | "close";
+      xMm?: number;
+      yMm?: number;
+      controlXmm?: number;
+      controlYmm?: number;
+      control1Xmm?: number;
+      control1Ymm?: number;
+      control2Xmm?: number;
+      control2Ymm?: number;
+      widthRadiusMm?: number;
+      heightRadiusMm?: number;
+      startAngleDeg?: number;
+      sweepAngleDeg?: number;
+    }>;
+  }>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  name?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddTextboxArgs = {
+  slide: number;
+  text?: string;
+  paragraphs?: Array<{
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    firstLineIndentMm?: number;
+    leftIndentMm?: number;
+    rightIndentMm?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    level?: number;
+    listType?: "none" | "bullet" | "number";
+    bulletSymbol?: string;
+    numberingType?: string;
+    startAt?: number;
+  }>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  paddingMm?: {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  includeRaw?: boolean;
+} & ({ text: string; } | { paragraphs: Array<{
+  text: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  color?: string;
+  align?: "left" | "center" | "right" | "both";
+  firstLineIndentMm?: number;
+  leftIndentMm?: number;
+  rightIndentMm?: number;
+  spacingBeforePt?: number;
+  spacingAfterPt?: number;
+  lineSpacing?: number;
+  lineRule?: "auto" | "exact" | "atLeast";
+  level?: number;
+  listType?: "none" | "bullet" | "number";
+  bulletSymbol?: string;
+  numberingType?: string;
+  startAt?: number;
+}>; });
+export type AiBridgeGeneratedSlidesAddWordArtArgs = {
+  slide: number;
+  text: string;
+  transform?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  name?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddMathArgs = {
+  slide: number;
+  text: string;
+  format?: "latex" | "unicode" | "mathml";
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  name?: string;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddImageArgs = {
+  source: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  slide: number;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  preserveAspectRatio?: boolean;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+};
+export type AiBridgeGeneratedSlidesAddImageShapeArgs = {
+  source: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  slide: number;
+  shapeType?: string;
+  fillMode?: "stretch" | "tile";
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  preserveAspectRatio?: boolean;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  lineColor?: string;
+  lineWidthPt?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddOleObjectArgs = {
+  source: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  slide: number;
+  data: string;
+  appId: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  name?: string;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesSetBackgroundArgs = {
+  slide: number;
+  mode?: "custom" | "clear" | "layout" | "master";
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+};
+export type AiBridgeGeneratedSlidesAddShapeArgs = {
+  slide: number;
+  shapeType: string;
+  text?: string;
+  paragraphs?: Array<{
+    text: string;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    firstLineIndentMm?: number;
+    leftIndentMm?: number;
+    rightIndentMm?: number;
+    spacingBeforePt?: number;
+    spacingAfterPt?: number;
+    lineSpacing?: number;
+    lineRule?: "auto" | "exact" | "atLeast";
+    level?: number;
+    listType?: "none" | "bullet" | "number";
+    bulletSymbol?: string;
+    numberingType?: string;
+    startAt?: number;
+  }>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  paddingMm?: {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesUpdateShapeArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+  shapeType?: string;
+  text?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  fontSize?: number;
+  fontFamily?: string;
+  bold?: boolean;
+  italic?: boolean;
+  color?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  paddingMm?: {
+    left?: number;
+    top?: number;
+    right?: number;
+    bottom?: number;
+  };
+  fillColor?: string;
+  lineColor?: string;
+  lineWidthPt?: number;
+  align?: string;
+  verticalAlign?: "top" | "center" | "bottom";
+  includeRaw?: boolean;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesDeleteObjectArgs = {
+  slide: number;
+  objectId?: string;
+  objectIndex?: number;
+  name?: string;
+} & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesInspectChartsArgs = {
+  slide?: number;
+  maxCharts?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddChartArgs = {
+  slide: number;
+  type?: string;
+  series: Array<Array<number>>;
+  seriesNames: Array<string | number>;
+  categories: Array<string | number>;
+  numFormats?: Array<string>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  name?: string;
+  style?: number;
+  title?: string;
+  titleFontSize?: number;
+  rotationDeg?: number;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  plotAreaFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  plotAreaLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  titleFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  titleLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  legend?: {
+    position?: "left" | "top" | "right" | "bottom" | "none";
+    fontSize?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  };
+  horizontalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  verticalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  dataLabels?: {
+    showSeriesName?: boolean;
+    showCategoryName?: boolean;
+    showValue?: boolean;
+    showPercent?: boolean;
+  };
+  gridlines?: {
+    majorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    majorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+  };
+  seriesUpdates?: Array<{
+    index: number;
+    type?: string;
+    name?: string;
+    values?: Array<number>;
+    valuesRange?: string;
+    xValues?: Array<number>;
+    xValuesRange?: string;
+    numberFormat?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+    allSeries?: boolean;
+    points?: Array<{
+      index: number;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      line?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      markerFill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      markerLine?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      numberFormat?: string;
+      allSeries?: boolean;
+      allMarkers?: boolean;
+      dataLabels?: {
+        showSeriesName?: boolean;
+        showCategoryName?: boolean;
+        showValue?: boolean;
+        showPercent?: boolean;
+      };
+    }>;
+  }>;
+  removeSeries?: Array<number>;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesUpdateChartArgs = {
+  slide: number;
+  chartId?: string;
+  chartIndex?: number;
+  name?: string;
+  categories?: Array<string | number>;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  style?: number;
+  title?: string;
+  titleFontSize?: number;
+  rotationDeg?: number;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  plotAreaFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  plotAreaLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  titleFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  titleLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  legend?: {
+    position?: "left" | "top" | "right" | "bottom" | "none";
+    fontSize?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  };
+  horizontalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  verticalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  dataLabels?: {
+    showSeriesName?: boolean;
+    showCategoryName?: boolean;
+    showValue?: boolean;
+    showPercent?: boolean;
+  };
+  gridlines?: {
+    majorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    majorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+  };
+  seriesUpdates?: Array<{
+    index: number;
+    type?: string;
+    name?: string;
+    values?: Array<number>;
+    valuesRange?: string;
+    xValues?: Array<number>;
+    xValuesRange?: string;
+    numberFormat?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+    allSeries?: boolean;
+    points?: Array<{
+      index: number;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      line?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      markerFill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      markerLine?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      numberFormat?: string;
+      allSeries?: boolean;
+      allMarkers?: boolean;
+      dataLabels?: {
+        showSeriesName?: boolean;
+        showCategoryName?: boolean;
+        showValue?: boolean;
+        showPercent?: boolean;
+      };
+    }>;
+  }>;
+  removeSeries?: Array<number>;
+  includeRaw?: boolean;
+} & ({ chartId: string; } | { chartIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesDeleteChartArgs = {
+  slide: number;
+  chartId?: string;
+  chartIndex?: number;
+  name?: string;
+} & ({ chartId: string; } | { chartIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesInspectMacrosArgs = {
+  kind?: "onlyoffice" | "vba";
+};
+export type AiBridgeGeneratedSlidesSetMacrosArgs = {
+  content: Record<string, unknown>;
+};
+export type AiBridgeGeneratedSlidesControlSlideshowArgs = {
+  action: "start" | "end" | "pause" | "resume" | "next" | "previous" | "goto";
+  slide?: number;
+};
+export type AiBridgeGeneratedSheetsInspectArgs = {
+  maxCells?: number;
+};
+export type AiBridgeGeneratedSheetsSetValuesArgs = {
+  sheet?: string;
+  range: string;
+  values: (string | number | boolean | null | Array<Array<string | number | boolean | null>>);
+};
+export type AiBridgeGeneratedSheetsSetFormulaArgs = {
+  sheet?: string;
+  range: string;
+  formula: (string | Array<Array<string>>);
+};
+export type AiBridgeGeneratedSheetsInspectRangeArgs = {
+  sheet?: string;
+  range: string;
+  includeValues?: boolean;
+  includeFormat?: boolean;
+  includeConditionalFormats?: boolean;
+  includeValidation?: boolean;
+};
+export type AiBridgeGeneratedSheetsSetArrayFormulaArgs = {
+  sheet?: string;
+  range: string;
+  formula: string;
+};
+export type AiBridgeGeneratedSheetsReplaceTextArgs = {
+  sheet?: string;
+  range?: string;
+  search: string;
+  replace: string;
+};
+export type AiBridgeGeneratedSheetsFormatRangeArgs = {
+  sheet?: string;
+  range: string;
+  fontSize?: number;
+  fontName?: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikeout?: boolean;
+  fontColor?: string;
+  fillColor?: string;
+  horizontalAlign?: string;
+  verticalAlign?: string;
+  numberFormat?: string;
+  wrap?: boolean;
+  orientation?: string | number;
+  columnWidth?: number;
+  columnWidthChars?: number;
+  rowHeight?: number;
+  rowHeightPt?: number;
+  borders?: Array<{
+    side: string;
+    style: string;
+    color: string;
+  }>;
+} & ({ fontSize: number; } | { fontName: string; } | { bold: boolean; } | { italic: boolean; } | { underline: boolean; } | { strikeout: boolean; } | { fontColor: string; } | { fillColor: string; } | { horizontalAlign: string; } | { verticalAlign: string; } | { numberFormat: string; } | { wrap: boolean; } | { orientation: string | number; } | { columnWidth: number; } | { columnWidthChars: number; } | { rowHeight: number; } | { rowHeightPt: number; } | { borders: Array<{
+  side: string;
+  style: string;
+  color: string;
+}>; });
+export type AiBridgeGeneratedSheetsAddSheetArgs = {
+  name: string;
+};
+export type AiBridgeGeneratedSheetsRenameSheetArgs = {
+  sheet?: string;
+  newName: string;
+};
+export type AiBridgeGeneratedSheetsDeleteSheetArgs = {
+  sheet: string;
+};
+export type AiBridgeGeneratedSheetsManageSheetArgs = {
+  action: "setVisibility" | "setActive" | "moveBefore" | "copy";
+  sheet?: string;
+  visible?: boolean;
+  beforeSheet?: string;
+  newName?: string;
+};
+export type AiBridgeGeneratedSheetsManageRangeArgs = {
+  action: "merge" | "unmerge" | "insert" | "delete" | "copy" | "cut" | "clear" | "clearContents" | "clearFormats" | "clearHyperlinks" | "autoFit" | "setHidden" | "fillDown" | "fillUp" | "fillLeft" | "fillRight" | "select";
+  sheet?: string;
+  range: string;
+  destinationSheet?: string;
+  destination?: string;
+  shift?: string;
+  across?: boolean;
+  hidden?: boolean;
+  rows?: boolean;
+  columns?: boolean;
+};
+export type AiBridgeGeneratedSheetsSetRichTextArgs = {
+  sheet?: string;
+  range: string;
+  text?: string;
+  runs: Array<{
+    start: number;
+    length: number;
+    text?: string;
+    fontName?: string;
+    fontSize?: number;
+    fontColor?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean | string;
+    strikeout?: boolean;
+  }>;
+};
+export type AiBridgeGeneratedSheetsInspectNamesArgs = Record<string, never>;
+export type AiBridgeGeneratedSheetsManageNamesArgs = {
+  action: "add" | "update" | "delete";
+  name: string;
+  newName?: string;
+  refersTo?: string;
+};
+export type AiBridgeGeneratedSheetsRecalculateArgs = {
+  mode?: "formulas" | "pivots" | "all";
+};
+export type AiBridgeGeneratedSheetsSortArgs = {
+  sheet?: string;
+  range: string;
+  keys: Array<{
+    range: string;
+    order?: "xlAscending" | "xlDescending";
+  }>;
+  header?: (boolean | "yes" | "no" | "guess" | "xlYes" | "xlNo" | "xlGuess");
+  orientation?: "rows" | "columns" | "xlSortRows" | "xlSortColumns";
+};
+export type AiBridgeGeneratedSheetsFilterArgs = {
+  action: "set" | "showAll" | "reapply";
+  sheet?: string;
+  range?: string;
+  field?: number;
+  criteria1?: unknown;
+  operator?: "and" | "or" | "filterValues" | "values" | "top10Items" | "bottom10Items" | "top10Percent" | "bottom10Percent" | "filterCellColor" | "filterFontColor" | "filterIcon" | "dynamic" | "xlAnd" | "xlOr" | "xlFilterValues" | "xlTop10Items" | "xlBottom10Items" | "xlTop10Percent" | "xlBottom10Percent" | "xlFilterCellColor" | "xlFilterFontColor" | "xlFilterIcon" | "xlFilterDynamic";
+  criteria2?: unknown;
+  visibleDropDown?: boolean;
+};
+export type AiBridgeGeneratedSheetsInspectTablesArgs = {
+  sheet?: string;
+  tableIndex?: number;
+  name?: string;
+  maxTables?: number;
+};
+export type AiBridgeGeneratedSheetsManageTableArgs = {
+  action: "create" | "format" | "update" | "resize" | "delete" | "unlist";
+  sheet?: string;
+  range?: string;
+  tableMode?: "auto" | "structured" | "basic";
+  sourceType?: string;
+  tableIndex?: number;
+  tableName?: string;
+  name?: string;
+  newName?: string;
+  style?: string;
+  showTotals?: boolean;
+  showHeaders?: boolean;
+  rowStripes?: boolean;
+  columnStripes?: boolean;
+  firstColumn?: boolean;
+  lastColumn?: boolean;
+  showAutoFilter?: boolean;
+  showAutoFilterDropDown?: boolean;
+  summary?: string;
+  alternativeText?: string;
+};
+export type AiBridgeGeneratedSheetsManageConditionalFormatArgs = {
+  action: "add" | "deleteAll";
+  sheet?: string;
+  range: string;
+  type?: "cellValue" | "expression" | "uniqueValues" | "duplicateValues" | "colorScale" | "dataBar" | "iconSet" | "top10" | "aboveAverage";
+  operator?: "between" | "notBetween" | "equal" | "notEqual" | "greaterThan" | "lessThan" | "greaterThanOrEqual" | "lessThanOrEqual" | "xlBetween" | "xlNotBetween" | "xlEqual" | "xlNotEqual" | "xlGreater" | "xlLess" | "xlGreaterEqual" | "xlLessEqual";
+  formula1?: unknown;
+  formula2?: unknown;
+  scale?: number;
+  fillColor?: string;
+  fontColor?: string;
+  bold?: boolean;
+};
+export type AiBridgeGeneratedSheetsManageValidationArgs = {
+  action: "add" | "modify" | "delete";
+  sheet?: string;
+  range: string;
+  type?: "inputOnly" | "wholeNumber" | "decimal" | "list" | "date" | "time" | "textLength" | "custom" | "xlValidateInputOnly" | "xlValidateWholeNumber" | "xlValidateDecimal" | "xlValidateList" | "xlValidateDate" | "xlValidateTime" | "xlValidateTextLength" | "xlValidateCustom";
+  alertStyle?: "stop" | "warning" | "information" | "info" | "xlValidAlertStop" | "xlValidAlertWarning" | "xlValidAlertInformation";
+  operator?: "between" | "notBetween" | "equal" | "notEqual" | "greaterThan" | "lessThan" | "greaterThanOrEqual" | "lessThanOrEqual" | "xlBetween" | "xlNotBetween" | "xlEqual" | "xlNotEqual" | "xlGreater" | "xlLess" | "xlGreaterEqual" | "xlLessEqual";
+  formula1?: unknown;
+  formula2?: unknown;
+  ignoreBlank?: boolean;
+  showInput?: boolean;
+  showError?: boolean;
+  inputTitle?: string;
+  inputMessage?: string;
+  errorTitle?: string;
+  errorMessage?: string;
+};
+export type AiBridgeGeneratedSheetsInspectPivotsArgs = Record<string, never>;
+export type AiBridgeGeneratedSheetsManagePivotArgs = {
+  action: "createNewSheet" | "createExisting" | "update" | "refresh" | "refreshAll" | "clear";
+  sheet?: string;
+  name?: string;
+  sourceSheet?: string;
+  sourceRange?: string;
+  destinationSheet?: string;
+  destinationRange?: string;
+  fields?: Record<string, unknown>;
+  dataFields?: Array<(string | {
+    name: string;
+    function?: string;
+  })>;
+  style?: string;
+  title?: string;
+  description?: string;
+  rowGrand?: boolean;
+  columnGrand?: boolean;
+};
+export type AiBridgeGeneratedSheetsInspectDrawingsArgs = {
+  sheet?: string;
+  maxDrawings?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSheetsManageDrawingArgs = {
+  action: "addImage" | "addShape" | "addTextBox" | "addOleObject" | "update" | "delete" | "copy";
+  sheet?: string;
+  destinationSheet?: string;
+  drawingIndex?: number;
+  name?: string;
+  source?: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  shapeType?: string;
+  text?: string;
+  data?: string;
+  appId?: string;
+  widthMm?: number;
+  heightMm?: number;
+  fromColumn?: number;
+  fromRow?: number;
+  columnOffsetMm?: number;
+  rowOffsetMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSheetsManageHyperlinkArgs = {
+  action: "set" | "delete";
+  sheet?: string;
+  range: string;
+  url?: string;
+  location?: string;
+  displayText?: string;
+  tooltip?: string;
+};
+export type AiBridgeGeneratedSheetsInspectCommentsArgs = {
+  sheet?: string;
+};
+export type AiBridgeGeneratedSheetsManageCommentsArgs = {
+  action: "add" | "update" | "delete" | "setSolved" | "addReply" | "removeReplies";
+  sheet?: string;
+  range?: string;
+  commentId?: string;
+  text?: string;
+  author?: string;
+  userId?: string;
+  solved?: boolean;
+  start?: number;
+  count?: number;
+  removeAll?: boolean;
+};
+export type AiBridgeGeneratedSheetsInspectFreezePanesArgs = {
+  sheet?: string;
+};
+export type AiBridgeGeneratedSheetsManageFreezePanesArgs = {
+  action: "unfreeze" | "freezeAt" | "freezeRows" | "freezeColumns";
+  sheet?: string;
+  range?: string;
+  count?: number;
+} & ({
+  action?: "unfreeze";
+} | {
+  action?: "freezeAt";
+} | {
+  action?: "freezeRows";
+} | {
+  action?: "freezeColumns";
+});
+export type AiBridgeGeneratedSheetsInspectPropertiesArgs = {
+  customNames?: Array<string>;
+};
+export type AiBridgeGeneratedSheetsManagePropertiesArgs = {
+  core?: {
+    category?: unknown;
+    contentStatus?: unknown;
+    created?: unknown;
+    creator?: unknown;
+    description?: unknown;
+    identifier?: unknown;
+    keywords?: unknown;
+    language?: unknown;
+    lastModifiedBy?: unknown;
+    lastPrinted?: unknown;
+    modified?: unknown;
+    revision?: unknown;
+    subject?: unknown;
+    title?: unknown;
+    version?: unknown;
+  };
+  custom?: Record<string, unknown>;
+};
+export type AiBridgeGeneratedSheetsInspectProtectedRangesArgs = {
+  sheet?: string;
+};
+export type AiBridgeGeneratedSheetsManageProtectedRangesArgs = {
+  action: "add" | "update" | "addUser" | "deleteUser";
+  sheet?: string;
+  title: string;
+  newTitle?: string;
+  range?: string;
+  anyoneType?: string;
+  userId?: string;
+  userName?: string;
+  permission?: string;
+};
+export type AiBridgeGeneratedSheetsInspectPageLayoutArgs = {
+  sheet?: string;
+};
+export type AiBridgeGeneratedSheetsManagePageLayoutArgs = {
+  sheet?: string;
+  orientation?: "portrait" | "landscape" | "xlPortrait" | "xlLandscape";
+  margins?: {
+    top?: number;
+    right?: number;
+    bottom?: number;
+    left?: number;
+  };
+  marginsPt?: {
+    top?: number;
+    right?: number;
+    bottom?: number;
+    left?: number;
+  };
+  printGridlines?: boolean;
+  printHeadings?: boolean;
+  displayGridlines?: boolean;
+  displayHeadings?: boolean;
+} & ({ orientation: "portrait" | "landscape" | "xlPortrait" | "xlLandscape"; } | { margins: {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}; } | { marginsPt: {
+  top?: number;
+  right?: number;
+  bottom?: number;
+  left?: number;
+}; } | { printGridlines: boolean; } | { printHeadings: boolean; } | { displayGridlines: boolean; } | { displayHeadings: boolean; });
+export type AiBridgeGeneratedSheetsInspectMacrosArgs = {
+  kind?: "onlyoffice" | "vba";
+};
+export type AiBridgeGeneratedSheetsSetMacrosArgs = {
+  content: Record<string, unknown>;
+};
+export type AiBridgeGeneratedSheetsAddChartArgs = {
+  sheet?: string;
+  range: string;
+  type?: string;
+  title?: string;
+  titleFontSize?: number;
+  inRows?: boolean;
+  style?: number;
+  widthMm?: number;
+  heightMm?: number;
+  fromColumn?: number;
+  fromRow?: number;
+  columnOffsetMm?: number;
+  rowOffsetMm?: number;
+  categoryRange?: string;
+  addSeries?: Array<{
+    name: string;
+    valuesRange: string;
+    xValuesRange?: string;
+  }>;
+  rotationDeg?: number;
+  name?: string;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  plotAreaFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  plotAreaLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  titleFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  titleLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  legend?: {
+    position?: "left" | "top" | "right" | "bottom" | "none";
+    fontSize?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  };
+  horizontalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  verticalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  dataLabels?: {
+    showSeriesName?: boolean;
+    showCategoryName?: boolean;
+    showValue?: boolean;
+    showPercent?: boolean;
+  };
+  gridlines?: {
+    majorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    majorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+  };
+  seriesUpdates?: Array<{
+    index: number;
+    type?: string;
+    name?: string;
+    values?: Array<number>;
+    valuesRange?: string;
+    xValues?: Array<number>;
+    xValuesRange?: string;
+    numberFormat?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+    allSeries?: boolean;
+    points?: Array<{
+      index: number;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      line?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      markerFill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      markerLine?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      numberFormat?: string;
+      allSeries?: boolean;
+      allMarkers?: boolean;
+      dataLabels?: {
+        showSeriesName?: boolean;
+        showCategoryName?: boolean;
+        showValue?: boolean;
+        showPercent?: boolean;
+      };
+    }>;
+  }>;
+  removeSeries?: Array<number>;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSheetsInspectChartsArgs = {
+  sheet?: string;
+  maxCharts?: number;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSheetsUpdateChartArgs = {
+  sheet?: string;
+  chartIndex?: number;
+  name?: string;
+  style?: number;
+  title?: string;
+  titleFontSize?: number;
+  rotationDeg?: number;
+  widthMm?: number;
+  heightMm?: number;
+  fromColumn?: number;
+  fromRow?: number;
+  columnOffsetMm?: number;
+  rowOffsetMm?: number;
+  categoryRange?: string;
+  addSeries?: Array<{
+    name: string;
+    valuesRange: string;
+    xValuesRange?: string;
+  }>;
+  fill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  line?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  plotAreaFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  plotAreaLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  titleFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  titleLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  legend?: {
+    position?: "left" | "top" | "right" | "bottom" | "none";
+    fontSize?: number;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  };
+  horizontalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  verticalAxis?: {
+    title?: string;
+    titleFontSize?: number;
+    labelsFontSize?: number;
+    normalOrder?: boolean;
+    majorTickMark?: string;
+    minorTickMark?: string;
+    tickLabelPosition?: "none" | "nextTo" | "low" | "high";
+    numberFormat?: string;
+    position?: string;
+  };
+  dataLabels?: {
+    showSeriesName?: boolean;
+    showCategoryName?: boolean;
+    showValue?: boolean;
+    showPercent?: boolean;
+  };
+  gridlines?: {
+    majorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorHorizontal?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    majorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+    minorVertical?: {
+      line: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+    };
+  };
+  seriesUpdates?: Array<{
+    index: number;
+    type?: string;
+    name?: string;
+    values?: Array<number>;
+    valuesRange?: string;
+    xValues?: Array<number>;
+    xValuesRange?: string;
+    numberFormat?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+    allSeries?: boolean;
+    points?: Array<{
+      index: number;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      line?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      markerFill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      markerLine?: {
+        type?: "solid" | "none";
+        enabled?: boolean;
+        widthPt?: number;
+        color?: string;
+        fill?: ({
+          type: "none";
+        } | {
+          type: "solid";
+          color: string;
+        } | {
+          type: "linearGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+          angleDeg?: number;
+        } | {
+          type: "radialGradient";
+          stops: Array<{
+            position: number;
+            color: string;
+          }>;
+        } | {
+          type: "pattern";
+          pattern: string;
+          backgroundColor: string;
+          foregroundColor: string;
+        } | {
+          type?: "raw";
+          raw: unknown;
+        });
+        raw?: unknown;
+      };
+      numberFormat?: string;
+      allSeries?: boolean;
+      allMarkers?: boolean;
+      dataLabels?: {
+        showSeriesName?: boolean;
+        showCategoryName?: boolean;
+        showValue?: boolean;
+        showPercent?: boolean;
+      };
+    }>;
+  }>;
+  removeSeries?: Array<number>;
+  includeRaw?: boolean;
+} & ({ chartIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSheetsDeleteChartArgs = {
+  sheet?: string;
+  chartIndex?: number;
+  name?: string;
+} & ({ chartIndex: number; } | { name: string; });
+
 export interface AiBridgeToolArgumentsMap {
-  word_inspect: WordInspectArgs;
-  word_replace_text: WordReplaceTextArgs;
-  word_append_paragraph: WordAppendParagraphArgs;
-  word_insert_paragraph: WordInsertParagraphArgs;
-  word_format_document: WordFormatDocumentArgs;
-  word_format_selection: WordFormatSelectionArgs;
-  word_format_matches: WordFormatMatchesArgs;
-  word_delete_matches: WordDeleteMatchesArgs;
-  word_add_hyperlink: WordAddHyperlinkArgs;
-  word_add_comment: WordAddCommentArgs;
-  word_add_bookmark: WordAddBookmarkArgs;
-  word_add_image: WordAddImageArgs;
-  word_inspect_advanced: WordInspectAdvancedArgs;
-  word_set_document_properties: WordSetDocumentPropertiesArgs;
-  word_manage_section: WordManageSectionArgs;
-  word_manage_style: WordManageStyleArgs;
-  word_set_tabs: WordSetTabsArgs;
-  word_set_numbering: WordSetNumberingArgs;
-  word_format_table_advanced: WordFormatTableAdvancedArgs;
-  word_add_nested_table: WordAddNestedTableArgs;
-  word_manage_drawing: WordManageDrawingArgs;
-  word_add_shape: WordAddShapeArgs;
-  word_add_chart: WordAddChartArgs;
-  word_add_math: WordAddMathArgs;
-  word_add_ole_object: WordAddOleObjectArgs;
-  word_manage_fields: WordManageFieldsArgs;
-  word_manage_long_document: WordManageLongDocumentArgs;
-  word_manage_comments: WordManageCommentsArgs;
-  word_manage_revisions: WordManageRevisionsArgs;
-  word_set_protection: WordSetProtectionArgs;
-  word_manage_content_control: WordManageContentControlArgs;
-  word_manage_custom_xml: WordManageCustomXmlArgs;
-  word_inspect_macros: WordInspectMacrosArgs;
-  word_set_macros: WordSetMacrosArgs;
-  word_set_watermark: WordSetWatermarkArgs;
-  word_format_paragraphs: WordFormatParagraphsArgs;
-  word_set_paragraph_text: WordSetParagraphTextArgs;
-  word_delete_paragraphs: WordDeleteParagraphsArgs;
-  word_set_list: WordSetListArgs;
-  word_insert_page_break: WordInsertPageBreakArgs;
-  word_navigate: WordNavigateArgs;
-  word_scroll: WordScrollArgs;
-  word_scale_font: WordScaleFontArgs;
-  word_add_table: WordAddTableArgs;
-  word_set_table_cell: WordSetTableCellArgs;
-  word_format_table: WordFormatTableArgs;
-  word_edit_table: WordEditTableArgs;
-  word_set_page_layout: WordSetPageLayoutArgs;
-  word_set_header_footer: WordSetHeaderFooterArgs;
-  word_set_document_text: WordSetDocumentTextArgs;
-  slides_inspect: SlidesInspectArgs;
-  slides_inspect_layouts: SlidesInspectLayoutsArgs;
-  slides_inspect_themes: SlidesInspectThemesArgs;
-  slides_inspect_builtin_themes: SlidesInspectBuiltinThemesArgs;
-  slides_inspect_objects: SlidesInspectObjectsArgs;
-  slides_replace_text: SlidesReplaceTextArgs;
-  slides_scale_font: SlidesScaleFontArgs;
-  slides_format_text: SlidesFormatTextArgs;
-  slides_format_selection: SlidesFormatSelectionArgs;
-  slides_add_slide: SlidesAddSlideArgs;
-  slides_duplicate_slide: SlidesDuplicateSlideArgs;
-  slides_delete_slide: SlidesDeleteSlideArgs;
-  slides_move_slide: SlidesMoveSlideArgs;
-  slides_set_visibility: SlidesSetVisibilityArgs;
-  slides_set_size: SlidesSetSizeArgs;
-  slides_apply_layout: SlidesApplyLayoutArgs;
-  slides_set_show_settings: SlidesSetShowSettingsArgs;
-  slides_apply_theme: SlidesApplyThemeArgs;
-  slides_apply_builtin_theme: SlidesApplyBuiltinThemeArgs;
-  slides_set_theme: SlidesSetThemeArgs;
-  slides_create_layout: SlidesCreateLayoutArgs;
-  slides_add_template_shape: SlidesAddTemplateShapeArgs;
-  slides_manage_template_object: SlidesManageTemplateObjectArgs;
-  slides_set_template_background: SlidesSetTemplateBackgroundArgs;
-  slides_set_text_content: SlidesSetTextContentArgs;
-  slides_format_paragraphs: SlidesFormatParagraphsArgs;
-  slides_update_object: SlidesUpdateObjectArgs;
-  slides_set_hyperlink: SlidesSetHyperlinkArgs;
-  slides_set_notes: SlidesSetNotesArgs;
-  slides_add_comment: SlidesAddCommentArgs;
-  slides_inspect_comments: SlidesInspectCommentsArgs;
-  slides_manage_comment: SlidesManageCommentArgs;
-  slides_set_transition: SlidesSetTransitionArgs;
-  slides_inspect_animations: SlidesInspectAnimationsArgs;
-  slides_manage_animation: SlidesManageAnimationArgs;
-  slides_add_table: SlidesAddTableArgs;
-  slides_set_table_cell: SlidesSetTableCellArgs;
-  slides_edit_table: SlidesEditTableArgs;
-  slides_format_table: SlidesFormatTableArgs;
-  slides_align_objects: SlidesAlignObjectsArgs;
-  slides_group_objects: SlidesGroupObjectsArgs;
-  slides_reorder_object: SlidesReorderObjectArgs;
-  slides_add_connector: SlidesAddConnectorArgs;
-  slides_add_freeform: SlidesAddFreeformArgs;
-  slides_add_textbox: SlidesAddTextBoxArgs;
-  slides_add_word_art: SlidesAddWordArtArgs;
-  slides_add_math: SlidesAddMathArgs;
-  slides_add_image: SlidesAddImageArgs;
-  slides_add_image_shape: SlidesAddImageShapeArgs;
-  slides_add_ole_object: SlidesAddOleObjectArgs;
-  slides_set_background: SlidesSetBackgroundArgs;
-  slides_add_shape: SlidesAddShapeArgs;
-  slides_update_shape: SlidesUpdateShapeArgs;
-  slides_delete_object: SlidesDeleteObjectArgs;
-  slides_inspect_charts: SlidesInspectChartsArgs;
-  slides_add_chart: SlidesAddChartArgs;
-  slides_update_chart: SlidesUpdateChartArgs;
-  slides_delete_chart: SlidesDeleteChartArgs;
-  slides_inspect_macros: SlidesInspectMacrosArgs;
-  slides_set_macros: SlidesSetMacrosArgs;
-  slides_control_slideshow: SlidesControlSlideshowArgs;
-  sheets_inspect: SheetsInspectArgs;
-  sheets_inspect_range: SheetsInspectRangeArgs;
-  sheets_set_values: SheetsSetValuesArgs;
-  sheets_set_formula: SheetsSetFormulaArgs;
-  sheets_set_array_formula: SheetsSetArrayFormulaArgs;
-  sheets_replace_text: SheetsReplaceTextArgs;
-  sheets_format_range: SheetsFormatRangeArgs;
-  sheets_add_sheet: SheetsAddSheetArgs;
-  sheets_rename_sheet: SheetsRenameSheetArgs;
-  sheets_delete_sheet: SheetsDeleteSheetArgs;
-  sheets_manage_sheet: SheetsManageSheetArgs;
-  sheets_manage_range: SheetsManageRangeArgs;
-  sheets_set_rich_text: SheetsSetRichTextArgs;
-  sheets_inspect_names: SheetsInspectNamesArgs;
-  sheets_manage_names: SheetsManageNamesArgs;
-  sheets_recalculate: SheetsRecalculateArgs;
-  sheets_sort: SheetsSortArgs;
-  sheets_filter: SheetsFilterArgs;
-  sheets_inspect_tables: SheetsInspectTablesArgs;
-  sheets_manage_table: SheetsManageTableArgs;
-  sheets_manage_conditional_format: SheetsManageConditionalFormatArgs;
-  sheets_manage_validation: SheetsManageValidationArgs;
-  sheets_inspect_pivots: SheetsInspectPivotsArgs;
-  sheets_manage_pivot: SheetsManagePivotArgs;
-  sheets_inspect_drawings: SheetsInspectDrawingsArgs;
-  sheets_manage_drawing: SheetsManageDrawingArgs;
-  sheets_manage_hyperlink: SheetsManageHyperlinkArgs;
-  sheets_inspect_comments: SheetsInspectCommentsArgs;
-  sheets_manage_comments: SheetsManageCommentsArgs;
-  sheets_inspect_freeze_panes: SheetsInspectFreezePanesArgs;
-  sheets_manage_freeze_panes: SheetsManageFreezePanesArgs;
-  sheets_inspect_properties: SheetsInspectPropertiesArgs;
-  sheets_manage_properties: SheetsManagePropertiesArgs;
-  sheets_inspect_protected_ranges: SheetsInspectProtectedRangesArgs;
-  sheets_manage_protected_ranges: SheetsManageProtectedRangesArgs;
-  sheets_inspect_page_layout: SheetsInspectPageLayoutArgs;
-  sheets_manage_page_layout: SheetsManagePageLayoutArgs;
-  sheets_inspect_macros: SheetsInspectMacrosArgs;
-  sheets_set_macros: SheetsSetMacrosArgs;
-  sheets_add_chart: SheetsAddChartArgs;
-  sheets_inspect_charts: SheetsInspectChartsArgs;
-  sheets_update_chart: SheetsUpdateChartArgs;
-  sheets_delete_chart: SheetsDeleteChartArgs;
+  word_inspect: AiBridgeGeneratedWordInspectArgs;
+  word_replace_text: AiBridgeGeneratedWordReplaceTextArgs;
+  word_append_paragraph: AiBridgeGeneratedWordAppendParagraphArgs;
+  word_insert_paragraph: AiBridgeGeneratedWordInsertParagraphArgs;
+  word_format_document: AiBridgeGeneratedWordFormatDocumentArgs;
+  word_format_selection: AiBridgeGeneratedWordFormatSelectionArgs;
+  word_format_matches: AiBridgeGeneratedWordFormatMatchesArgs;
+  word_delete_matches: AiBridgeGeneratedWordDeleteMatchesArgs;
+  word_add_hyperlink: AiBridgeGeneratedWordAddHyperlinkArgs;
+  word_add_comment: AiBridgeGeneratedWordAddCommentArgs;
+  word_add_bookmark: AiBridgeGeneratedWordAddBookmarkArgs;
+  word_add_image: AiBridgeGeneratedWordAddImageArgs;
+  word_inspect_advanced: AiBridgeGeneratedWordInspectAdvancedArgs;
+  word_set_document_properties: AiBridgeGeneratedWordSetDocumentPropertiesArgs;
+  word_manage_section: AiBridgeGeneratedWordManageSectionArgs;
+  word_manage_style: AiBridgeGeneratedWordManageStyleArgs;
+  word_set_tabs: AiBridgeGeneratedWordSetTabsArgs;
+  word_set_numbering: AiBridgeGeneratedWordSetNumberingArgs;
+  word_format_table_advanced: AiBridgeGeneratedWordFormatTableAdvancedArgs;
+  word_add_nested_table: AiBridgeGeneratedWordAddNestedTableArgs;
+  word_manage_drawing: AiBridgeGeneratedWordManageDrawingArgs;
+  word_add_shape: AiBridgeGeneratedWordAddShapeArgs;
+  word_add_chart: AiBridgeGeneratedWordAddChartArgs;
+  word_add_math: AiBridgeGeneratedWordAddMathArgs;
+  word_add_ole_object: AiBridgeGeneratedWordAddOleObjectArgs;
+  word_manage_fields: AiBridgeGeneratedWordManageFieldsArgs;
+  word_manage_long_document: AiBridgeGeneratedWordManageLongDocumentArgs;
+  word_manage_comments: AiBridgeGeneratedWordManageCommentsArgs;
+  word_manage_revisions: AiBridgeGeneratedWordManageRevisionsArgs;
+  word_set_protection: AiBridgeGeneratedWordSetProtectionArgs;
+  word_manage_content_control: AiBridgeGeneratedWordManageContentControlArgs;
+  word_manage_custom_xml: AiBridgeGeneratedWordManageCustomXmlArgs;
+  word_inspect_macros: AiBridgeGeneratedWordInspectMacrosArgs;
+  word_set_macros: AiBridgeGeneratedWordSetMacrosArgs;
+  word_set_watermark: AiBridgeGeneratedWordSetWatermarkArgs;
+  word_format_paragraphs: AiBridgeGeneratedWordFormatParagraphsArgs;
+  word_set_paragraph_text: AiBridgeGeneratedWordSetParagraphTextArgs;
+  word_delete_paragraphs: AiBridgeGeneratedWordDeleteParagraphsArgs;
+  word_set_list: AiBridgeGeneratedWordSetListArgs;
+  word_insert_page_break: AiBridgeGeneratedWordInsertPageBreakArgs;
+  word_navigate: AiBridgeGeneratedWordNavigateArgs;
+  word_scroll: AiBridgeGeneratedWordScrollArgs;
+  word_scale_font: AiBridgeGeneratedWordScaleFontArgs;
+  word_add_table: AiBridgeGeneratedWordAddTableArgs;
+  word_set_table_cell: AiBridgeGeneratedWordSetTableCellArgs;
+  word_format_table: AiBridgeGeneratedWordFormatTableArgs;
+  word_edit_table: AiBridgeGeneratedWordEditTableArgs;
+  word_set_page_layout: AiBridgeGeneratedWordSetPageLayoutArgs;
+  word_set_header_footer: AiBridgeGeneratedWordSetHeaderFooterArgs;
+  word_set_document_text: AiBridgeGeneratedWordSetDocumentTextArgs;
+  slides_inspect: AiBridgeGeneratedSlidesInspectArgs;
+  slides_inspect_layouts: AiBridgeGeneratedSlidesInspectLayoutsArgs;
+  slides_inspect_themes: AiBridgeGeneratedSlidesInspectThemesArgs;
+  slides_inspect_builtin_themes: AiBridgeGeneratedSlidesInspectBuiltinThemesArgs;
+  slides_inspect_objects: AiBridgeGeneratedSlidesInspectObjectsArgs;
+  slides_validate_layout: AiBridgeGeneratedSlidesValidateLayoutArgs;
+  slides_replace_text: AiBridgeGeneratedSlidesReplaceTextArgs;
+  slides_scale_font: AiBridgeGeneratedSlidesScaleFontArgs;
+  slides_format_text: AiBridgeGeneratedSlidesFormatTextArgs;
+  slides_format_selection: AiBridgeGeneratedSlidesFormatSelectionArgs;
+  slides_add_slide: AiBridgeGeneratedSlidesAddSlideArgs;
+  slides_duplicate_slide: AiBridgeGeneratedSlidesDuplicateSlideArgs;
+  slides_delete_slide: AiBridgeGeneratedSlidesDeleteSlideArgs;
+  slides_move_slide: AiBridgeGeneratedSlidesMoveSlideArgs;
+  slides_set_visibility: AiBridgeGeneratedSlidesSetVisibilityArgs;
+  slides_set_size: AiBridgeGeneratedSlidesSetSizeArgs;
+  slides_apply_layout: AiBridgeGeneratedSlidesApplyLayoutArgs;
+  slides_set_show_settings: AiBridgeGeneratedSlidesSetShowSettingsArgs;
+  slides_apply_theme: AiBridgeGeneratedSlidesApplyThemeArgs;
+  slides_apply_builtin_theme: AiBridgeGeneratedSlidesApplyBuiltinThemeArgs;
+  slides_set_theme: AiBridgeGeneratedSlidesSetThemeArgs;
+  slides_create_layout: AiBridgeGeneratedSlidesCreateLayoutArgs;
+  slides_add_template_shape: AiBridgeGeneratedSlidesAddTemplateShapeArgs;
+  slides_manage_template_object: AiBridgeGeneratedSlidesManageTemplateObjectArgs;
+  slides_set_template_background: AiBridgeGeneratedSlidesSetTemplateBackgroundArgs;
+  slides_set_text_content: AiBridgeGeneratedSlidesSetTextContentArgs;
+  slides_format_paragraphs: AiBridgeGeneratedSlidesFormatParagraphsArgs;
+  slides_update_object: AiBridgeGeneratedSlidesUpdateObjectArgs;
+  slides_set_hyperlink: AiBridgeGeneratedSlidesSetHyperlinkArgs;
+  slides_set_notes: AiBridgeGeneratedSlidesSetNotesArgs;
+  slides_add_comment: AiBridgeGeneratedSlidesAddCommentArgs;
+  slides_inspect_comments: AiBridgeGeneratedSlidesInspectCommentsArgs;
+  slides_manage_comment: AiBridgeGeneratedSlidesManageCommentArgs;
+  slides_set_transition: AiBridgeGeneratedSlidesSetTransitionArgs;
+  slides_inspect_animations: AiBridgeGeneratedSlidesInspectAnimationsArgs;
+  slides_manage_animation: AiBridgeGeneratedSlidesManageAnimationArgs;
+  slides_add_table: AiBridgeGeneratedSlidesAddTableArgs;
+  slides_set_table_cell: AiBridgeGeneratedSlidesSetTableCellArgs;
+  slides_edit_table: AiBridgeGeneratedSlidesEditTableArgs;
+  slides_format_table: AiBridgeGeneratedSlidesFormatTableArgs;
+  slides_align_objects: AiBridgeGeneratedSlidesAlignObjectsArgs;
+  slides_group_objects: AiBridgeGeneratedSlidesGroupObjectsArgs;
+  slides_reorder_object: AiBridgeGeneratedSlidesReorderObjectArgs;
+  slides_add_connector: AiBridgeGeneratedSlidesAddConnectorArgs;
+  slides_add_freeform: AiBridgeGeneratedSlidesAddFreeformArgs;
+  slides_add_textbox: AiBridgeGeneratedSlidesAddTextboxArgs;
+  slides_add_word_art: AiBridgeGeneratedSlidesAddWordArtArgs;
+  slides_add_math: AiBridgeGeneratedSlidesAddMathArgs;
+  slides_add_image: AiBridgeGeneratedSlidesAddImageArgs;
+  slides_add_image_shape: AiBridgeGeneratedSlidesAddImageShapeArgs;
+  slides_add_ole_object: AiBridgeGeneratedSlidesAddOleObjectArgs;
+  slides_set_background: AiBridgeGeneratedSlidesSetBackgroundArgs;
+  slides_add_shape: AiBridgeGeneratedSlidesAddShapeArgs;
+  slides_update_shape: AiBridgeGeneratedSlidesUpdateShapeArgs;
+  slides_delete_object: AiBridgeGeneratedSlidesDeleteObjectArgs;
+  slides_inspect_charts: AiBridgeGeneratedSlidesInspectChartsArgs;
+  slides_add_chart: AiBridgeGeneratedSlidesAddChartArgs;
+  slides_update_chart: AiBridgeGeneratedSlidesUpdateChartArgs;
+  slides_delete_chart: AiBridgeGeneratedSlidesDeleteChartArgs;
+  slides_inspect_macros: AiBridgeGeneratedSlidesInspectMacrosArgs;
+  slides_set_macros: AiBridgeGeneratedSlidesSetMacrosArgs;
+  slides_control_slideshow: AiBridgeGeneratedSlidesControlSlideshowArgs;
+  sheets_inspect: AiBridgeGeneratedSheetsInspectArgs;
+  sheets_set_values: AiBridgeGeneratedSheetsSetValuesArgs;
+  sheets_set_formula: AiBridgeGeneratedSheetsSetFormulaArgs;
+  sheets_inspect_range: AiBridgeGeneratedSheetsInspectRangeArgs;
+  sheets_set_array_formula: AiBridgeGeneratedSheetsSetArrayFormulaArgs;
+  sheets_replace_text: AiBridgeGeneratedSheetsReplaceTextArgs;
+  sheets_format_range: AiBridgeGeneratedSheetsFormatRangeArgs;
+  sheets_add_sheet: AiBridgeGeneratedSheetsAddSheetArgs;
+  sheets_rename_sheet: AiBridgeGeneratedSheetsRenameSheetArgs;
+  sheets_delete_sheet: AiBridgeGeneratedSheetsDeleteSheetArgs;
+  sheets_manage_sheet: AiBridgeGeneratedSheetsManageSheetArgs;
+  sheets_manage_range: AiBridgeGeneratedSheetsManageRangeArgs;
+  sheets_set_rich_text: AiBridgeGeneratedSheetsSetRichTextArgs;
+  sheets_inspect_names: AiBridgeGeneratedSheetsInspectNamesArgs;
+  sheets_manage_names: AiBridgeGeneratedSheetsManageNamesArgs;
+  sheets_recalculate: AiBridgeGeneratedSheetsRecalculateArgs;
+  sheets_sort: AiBridgeGeneratedSheetsSortArgs;
+  sheets_filter: AiBridgeGeneratedSheetsFilterArgs;
+  sheets_inspect_tables: AiBridgeGeneratedSheetsInspectTablesArgs;
+  sheets_manage_table: AiBridgeGeneratedSheetsManageTableArgs;
+  sheets_manage_conditional_format: AiBridgeGeneratedSheetsManageConditionalFormatArgs;
+  sheets_manage_validation: AiBridgeGeneratedSheetsManageValidationArgs;
+  sheets_inspect_pivots: AiBridgeGeneratedSheetsInspectPivotsArgs;
+  sheets_manage_pivot: AiBridgeGeneratedSheetsManagePivotArgs;
+  sheets_inspect_drawings: AiBridgeGeneratedSheetsInspectDrawingsArgs;
+  sheets_manage_drawing: AiBridgeGeneratedSheetsManageDrawingArgs;
+  sheets_manage_hyperlink: AiBridgeGeneratedSheetsManageHyperlinkArgs;
+  sheets_inspect_comments: AiBridgeGeneratedSheetsInspectCommentsArgs;
+  sheets_manage_comments: AiBridgeGeneratedSheetsManageCommentsArgs;
+  sheets_inspect_freeze_panes: AiBridgeGeneratedSheetsInspectFreezePanesArgs;
+  sheets_manage_freeze_panes: AiBridgeGeneratedSheetsManageFreezePanesArgs;
+  sheets_inspect_properties: AiBridgeGeneratedSheetsInspectPropertiesArgs;
+  sheets_manage_properties: AiBridgeGeneratedSheetsManagePropertiesArgs;
+  sheets_inspect_protected_ranges: AiBridgeGeneratedSheetsInspectProtectedRangesArgs;
+  sheets_manage_protected_ranges: AiBridgeGeneratedSheetsManageProtectedRangesArgs;
+  sheets_inspect_page_layout: AiBridgeGeneratedSheetsInspectPageLayoutArgs;
+  sheets_manage_page_layout: AiBridgeGeneratedSheetsManagePageLayoutArgs;
+  sheets_inspect_macros: AiBridgeGeneratedSheetsInspectMacrosArgs;
+  sheets_set_macros: AiBridgeGeneratedSheetsSetMacrosArgs;
+  sheets_add_chart: AiBridgeGeneratedSheetsAddChartArgs;
+  sheets_inspect_charts: AiBridgeGeneratedSheetsInspectChartsArgs;
+  sheets_update_chart: AiBridgeGeneratedSheetsUpdateChartArgs;
+  sheets_delete_chart: AiBridgeGeneratedSheetsDeleteChartArgs;
 }
+// </ai-bridge-generated:tool-arguments>
 
 export type AiBridgeToolName = keyof AiBridgeToolArgumentsMap;
 export type AiBridgeToolCall = {
@@ -1915,6 +7844,7 @@ export interface AiBridgeSlidesApi {
   inspectThemes(args?: SlidesInspectThemesArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   inspectBuiltinThemes(args?: SlidesInspectBuiltinThemesArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   inspectObjects(args?: SlidesInspectObjectsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  validateLayout(args?: SlidesValidateLayoutArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   replaceText(args: SlidesReplaceTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   scaleFont(args: SlidesScaleFontArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   formatText(args: SlidesFormatTextArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
@@ -2022,7 +7952,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.4.2";
+  readonly version: "0.6.0";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

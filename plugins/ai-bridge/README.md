@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.4.2`
+- Version: `0.6.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.4.2-rev3",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.6.0-rev4",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -128,7 +128,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.4.2-rev3"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev4"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -157,7 +157,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.4.2-rev3"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.6.0-rev4"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -270,6 +270,17 @@ The versioned public contract is available as:
 - `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
 - `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
 
+`public-api.json` is the single machine contract. After changing it or its
+runtime semantics, regenerate the checked-in projections and the zenmind-env
+HTTPX/skill artifacts:
+
+```bash
+python3 tools/sync_contract.py --write --zenmind-root /path/to/zenmind-env
+python3 tools/sync_contract.py --check --zenmind-root /path/to/zenmind-env
+```
+
+Generated files contain an edit warning and must not be changed directly.
+
 Word, nested Word, and Slides table `data` cells accept
 `string | number | boolean | null` or a formatting object with a required string
 `text`. Use `color` for text color; `textColor` and other unknown fields are
@@ -355,11 +366,22 @@ therefore remains deterministic and does not create an undo entry.
 | PPT images | Add imported PNG/JPEG/GIF/WebP/SVG; contain/stretch sizing, position, rotation, flips, borders, safe SVG normalization, and preset-shape crops |
 | PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | PPT animation/show | Slide transitions including Morph, object entrance/emphasis/exit/path effects, ordering/timing/interactive triggers, loop and live slideshow control |
-| XLSX workbook/cells | Typed text/number/date/time/percentage/boolean values, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
-| XLSX data | Sort, filter, formatted tables, conditional formats, validation/drop-downs, and pivot tables |
+| XLSX workbook/cells | Strict JSON scalar values and exact-shape matrices, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
+| XLSX data | Sort, filter, structured/basic table modes, conditional formats, complete validation readback/drop-downs, and pivot tables |
 | XLSX objects/view | Images, shapes, text boxes, OLE, links, comments, freeze panes, protected ranges, and documented page-layout properties |
 | XLSX charts | Inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | Fill model | None, solid, linear gradient, radial gradient, pattern, and lossless `raw` Office JSON replay |
+
+`sheets_set_formula` accepts either one formula string or a two-dimensional
+formula matrix matching the target range. A scalar is rejected for a multi-cell
+target; use a matrix or an anchor plus `fillDown` / `fillRight` when relative
+references must advance. `sheets_set_values` follows the same exact-shape rule.
+`sheets_inspect_range` can include cell format, conditional-format, and complete
+data-validation readback.
+Screen view flags (`displayGridlines`, `displayHeadings`) are separate from
+print flags (`printGridlines`, `printHeadings`) and are verified against the
+worksheet model before save. Freeze-pane mutations likewise wait for
+`GetLocation()` readback and return normalized row/column counts.
 
 Gradient stops use `position: 0..100`; `angleDeg` is in degrees. Object and
 chart indexes are zero-based. All physical dimensions use millimetres and line
@@ -368,6 +390,20 @@ widths use points. `inspectObjects` and `inspectCharts` can return the exact
 Spreadsheet chart deletion delegates to `ApiDrawing.Delete()`, which is a paid
 capability in some ONLYOFFICE Docs editions; unsupported editions return an
 explicit error without reporting a false deletion.
+
+For a real exported-file regression, open a fresh localhost XLSX capability page
+and run:
+
+```bash
+AI_BRIDGE_LIVE_FILE=<uuid>.xlsx \
+  python3 plugins/ai-bridge/test_sheets_ooxml_integration.py
+```
+
+The dedicated live test requires `AI_BRIDGE_LIVE_FILE` and fails rather than
+silently skipping when it is absent. It checks persisted OOXML fills,
+differential styles, conditional formatting, formulas, validation XML, screen
+gridlines, frozen panes, page orientation, strict values, and the basic-table
+result.
 
 ## Persistence service
 
@@ -415,9 +451,10 @@ The localhost example exposes these additional endpoints:
 - `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
   requested tool against the authoritative page capabilities, treats a supplied
   browser `sessionId` as a compatibility hint, and waits for the live result.
-- `POST /copilot-api/bridge/validate`: accepts a Word `toolCalls` batch and runs
-  the same normalization, schema, and semantic validation as execution without
-  polling the editor or creating a history point.
+- `POST /copilot-api/bridge/validate`: accepts a Word, Slides, or Sheets `toolCalls`
+  batch and runs the same editor-specific normalization, schema, and semantic
+  validation as execution without polling the editor, creating a history point,
+  or saving the document.
 
 Word arguments are normalized before validation and idempotency fingerprinting.
 The machine-readable policy is `inputNormalization.word` in `public-api.json`;

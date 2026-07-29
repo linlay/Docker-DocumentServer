@@ -1116,7 +1116,7 @@ test("headless plugin handshakes with one host instance and executes a read-only
   const { hostWindow } = createHarness();
   await hostWindow.aiBridge.ready({ timeoutMs: 1000 });
 
-  assert.equal(hostWindow.aiBridge.version, "0.4.2");
+  assert.equal(hostWindow.aiBridge.version, publicContract.version);
   assert.equal(hostWindow.aiBridge.editorType, "word");
   assert.equal(hostWindow.aiBridge.context.documentKey, "doc-key-v1");
   assert.ok(hostWindow.aiBridge.capabilities.tools.includes("word_inspect"));
@@ -1519,6 +1519,7 @@ test("public contract, plugin allow-lists, and all convenience methods stay alig
       methods: {
         inspect: ["slides_inspect", {}],
         inspectObjects: ["slides_inspect_objects", {}],
+        validateLayout: ["slides_validate_layout", { slide: 1 }],
         replaceText: ["slides_replace_text", { search: "a", replace: "b" }],
         scaleFont: ["slides_scale_font", { scale: 0.9 }],
         formatText: ["slides_format_text", { bold: true }],

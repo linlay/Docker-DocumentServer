@@ -24,7 +24,10 @@ DOCKER_IMAGE := $(DOCKER_ORG)/4testing-$(PRODUCT_NAME)$(PRODUCT_EDITION)
 DOCKER_DUMMY := $(COMPANY_NAME_LOW)-$(PRODUCT_NAME)$(PRODUCT_EDITION)__$(DOCKER_TAG).dummy
 DOCKER_ARCH := $(COMPANY_NAME_LOW)-$(PRODUCT_NAME)_$(DOCKER_TAG).tar.gz
 
-.PHONY: all clean clean-docker image deploy docker
+.PHONY: all clean clean-docker image deploy docker ai-bridge-contract-check
+
+ai-bridge-contract-check:
+	PYTHONDONTWRITEBYTECODE=1 python3 plugins/ai-bridge/tools/sync_contract.py --check $(if $(ZENMIND_ROOT),--zenmind-root "$(ZENMIND_ROOT)")
 
 $(DOCKER_DUMMY):
 	docker pull ubuntu:22.04

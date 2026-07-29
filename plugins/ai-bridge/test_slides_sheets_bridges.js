@@ -57,6 +57,11 @@ class SlideRun {
   RemoveAllElements() { this.text = ""; }
   AddText(text) { this.text += String(text); return this; }
   GetFontSize() { return this.fontSize; }
+  GetFontFamily() { return this.format.fontFamily ?? null; }
+  GetBold() { return this.format.bold ?? false; }
+  GetItalic() { return this.format.italic ?? false; }
+  GetUnderline() { return this.format.underline ?? false; }
+  GetColor() { return this.format.color ?? null; }
   SetFontSize(value) { this.fontSize = value; }
   SetFontFamily(value) { this.format.fontFamily = value; }
   SetBold(value) { this.format.bold = value; }
@@ -78,6 +83,8 @@ class SlideParagraph {
     this.runs.push(run);
     return run;
   }
+  GetJc() { return this.align; }
+  GetBullet() { return this.bullet ?? null; }
   SetJc(value) { this.align = value; }
   SetIndFirstLine(value) { this.firstLineIndent = value; }
   SetIndLeft(value) { this.leftIndent = value; }
@@ -1019,6 +1026,17 @@ class MockRange {
   }
   GetAddress() { return this.address; }
   GetValue() { return this.values; }
+  GetRowsCount() {
+    const match = String(this.address).match(/^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i);
+    return match ? Math.abs(Number(match[4] || match[2]) - Number(match[2])) + 1 : 1;
+  }
+  GetColumnsCount() {
+    const match = String(this.address).match(/^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i);
+    if (!match) return 1;
+    const columnNumber = letters => [...letters.toUpperCase()]
+      .reduce((value, letter) => (value * 26) + letter.charCodeAt(0) - 64, 0);
+    return Math.abs(columnNumber(match[3] || match[1]) - columnNumber(match[1])) + 1;
+  }
   SetValue(values) { this.values = values; return true; }
   SetFormula(formula) { this.formula = formula; return true; }
   Replace(search, replacement) {
@@ -1423,6 +1441,135 @@ test("Slides bridge inspects layouts and changes order, visibility, size, layout
   assert.equal(presentation.GetLoopUntilStopped(), true);
   assert.equal(result.results[6].slides[0].visible, false);
   assert.equal(result.results[6].loopUntilStopped, true);
+});
+
+test("Slides bridge atomically applies a layout and creates native rich text", async () => {
+  const { bridge, presentation } = slidesHarness();
+  const result = await bridge.execute([
+    {
+      name: "slides_add_slide",
+      arguments: { masterIndex: 1, layoutIndex: 2, title: "经营概览", titleFontSize: 32 },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3,
+        name: "s3-actions",
+        xMm: 20,
+        yMm: 55,
+        widthMm: 100,
+        heightMm: 70,
+        paragraphs: [
+          { text: "优化产品结构", listType: "bullet", fontSize: 20 },
+          { text: "提升交付效率", listType: "number", numberingType: "ArabicPeriod", fontSize: 18 },
+        ],
+      },
+    },
+    {
+      name: "slides_inspect_objects",
+      arguments: { slide: 3, includeTextStyles: true },
+    },
+  ]);
+
+  assert.equal(result.results[0].slide, 3);
+  assert.equal(result.results[0].layout.layoutIndex, 2);
+  assert.equal(result.results[0].titleObject.text, "经营概览");
+  assert.equal(presentation.GetSlideByIndex(2).GetLayout().GetName(), "Title and Content");
+  const added = result.results[1].object;
+  assert.equal(added.name, "s3-actions");
+  const inspected = result.results[2].slides[0].objects.find(item => item.name === "s3-actions");
+  assert.equal(inspected.textStyles.paragraphCount, 2);
+  assert.equal(inspected.textStyles.minFontSize, 18);
+  assert.equal(inspected.textStyles.paragraphs[0].list.type, "bullet");
+  assert.equal(inspected.textStyles.paragraphs[1].list.type, "number");
+});
+
+test("Slides structural validation distinguishes containment, allowed overlap, and violations", async () => {
+  const { bridge, presentation } = slidesHarness();
+  await bridge.execute([
+    { name: "slides_add_slide", arguments: { masterIndex: 1, layoutIndex: 2 } },
+    {
+      name: "slides_add_shape",
+      arguments: {
+        slide: 3,
+        shapeType: "rect",
+        name: "panel",
+        xMm: 20,
+        yMm: 20,
+        widthMm: 80,
+        heightMm: 50,
+        paragraphs: [{ text: "经营指标", fontSize: 20 }],
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3,
+        name: "inside",
+        xMm: 30,
+        yMm: 30,
+        widthMm: 20,
+        heightMm: 10,
+        text: "包含关系",
+        fontSize: 18,
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3,
+        name: "overlap",
+        xMm: 90,
+        yMm: 30,
+        widthMm: 30,
+        heightMm: 20,
+        text: "允许交叉",
+        fontSize: 18,
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3,
+        name: "outside",
+        xMm: 245,
+        yMm: 150,
+        widthMm: 20,
+        heightMm: 20,
+        text: "• 手写列表",
+        fontSize: 12,
+      },
+    },
+  ]);
+  const historyBefore = presentation.historyPoints;
+  const result = await bridge.execute([
+    {
+      name: "slides_validate_layout",
+      arguments: {
+        slide: 3,
+        safeMarginMm: 15,
+        minFontSize: 16,
+        maxObjects: 4,
+        expectedMasterIndex: 1,
+        expectedLayoutIndex: 2,
+        requireUniqueNames: true,
+        allowedOverlapPairs: [{ firstName: "panel", secondName: "overlap" }],
+      },
+    },
+  ]);
+
+  assert.equal(presentation.historyPoints, historyBefore);
+  assert.equal(result.changed, 0);
+  assert.equal(result.needsSave, false);
+  assert.equal(result.results[0].visualVerified, false);
+  assert.equal(result.results[0].textOverflowVerified, false);
+  const validation = result.results[0].slides[0];
+  assert.equal(validation.valid, false);
+  assert.ok(validation.intersections.some(item => item.kind === "containment"));
+  assert.ok(validation.intersections.some(item => item.kind === "overlap" && item.allowed));
+  assert.ok(validation.issues.some(item => item.code === "OBJECT_OUT_OF_BOUNDS"));
+  assert.ok(validation.issues.some(item => item.code === "FONT_TOO_SMALL"));
+  assert.ok(validation.issues.some(item => item.code === "MANUAL_LIST_PREFIX"));
 });
 
 test("Slides bridge inspects and customizes themes, masters, and layouts", async () => {

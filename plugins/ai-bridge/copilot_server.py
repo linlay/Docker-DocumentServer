@@ -87,7 +87,6 @@ BRIDGE_ALLOWED_METHODS = {
     "redo",
     "getState",
 }
-BRIDGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 BRIDGE_LOG_PHASES = {"word-command", "editor-save"}
 BRIDGE_STARTUP_TIMING_FIELDS = (
     "hostScriptMs",
@@ -100,8 +99,6 @@ BRIDGE_STARTUP_TIMING_FIELDS = (
 )
 LOCAL_GUEST_DISPLAY_NAME = "访客"
 LOCAL_GUEST_USER_PREFIX = "local-guest:"
-IMAGE_MAX_BYTES = 8 * 1024 * 1024
-IMAGE_MAX_REQUEST_BYTES = 12_000_000
 IMAGE_MAX_EDGE_PX = 12_000
 IMAGE_MAX_PIXELS = 40_000_000
 IMAGE_FETCH_TIMEOUT_SECONDS = 20
@@ -115,15 +112,6 @@ IMAGE_MIME_EXTENSIONS = {
     "image/gif": "gif",
     "image/webp": "webp",
     "image/svg+xml": "svg",
-}
-IMAGE_SOURCE_TOOLS = {
-    "word_add_image",
-    "slides_add_image",
-    "slides_add_image_shape",
-    "slides_add_ole_object",
-    "word_add_ole_object",
-    "word_set_watermark",
-    "sheets_manage_drawing",
 }
 BRIDGE_CONDITION = threading.Condition()
 BRIDGE_SESSIONS: dict[str, dict[str, Any]] = {}
@@ -158,58 +146,6 @@ SHEET = {"type": "string", "description": "工作表名称；省略时使用活�
 RANGE = {"type": "string", "description": "A1 表示法，例如 A1:D10；使用 selection 表示当前选区"}
 
 
-WORD_TOOL_DESCRIPTIONS = {
-    "word_inspect": "读取 Word 正文、选区、页码、段落结构、表格和可选批注；不修改文档",
-    "word_replace_text": "在 Word 全文中查找并替换文本",
-    "word_append_paragraph": "在 Word 文末追加带字符、段落、标题或列表样式的段落",
-    "word_insert_paragraph": "在 Word 当前光标处插入带样式的段落",
-    "word_format_document": "统一设置 Word 全文的字符与段落格式",
-    "word_format_selection": "只格式化 Word 当前选中文本",
-    "word_format_matches": "搜索 Word 文本并只格式化精确命中范围",
-    "word_delete_matches": "删除 Word 中指定的文本命中范围",
-    "word_add_hyperlink": "给 Word 中指定的文本命中范围添加超链接",
-    "word_add_comment": "给 Word 中指定的文本命中范围添加批注",
-    "word_add_bookmark": "给 Word 中精确指定的一处文本添加书签",
-    "word_add_image": "把 HTTPS URL 或 Base64 Data URL 图片安全导入 Word，可按光标、段落序号或文本命中定位并设置尺寸与环绕",
-    "word_inspect_advanced": "只读检查 Word 文档属性、节、样式、编号、绘图、书签、脚注尾注、批注、修订、内容控件和自定义 XML",
-    "word_set_document_properties": "设置 Word 文档标题、主题、作者等文档属性",
-    "word_manage_section": "创建或配置 Word 文档节、分节类型、起始页码和分栏",
-    "word_manage_style": "创建或更新 Word 段落、字符、表格或编号样式及其继承关系",
-    "word_set_tabs": "设置 Word 段落制表位",
-    "word_set_numbering": "设置 Word 段落的高级编号属性",
-    "word_format_table_advanced": "设置 Word 表格的高级布局、边框、间距和单元格属性",
-    "word_add_nested_table": "在 Word 表格单元格中添加嵌套表格；data 单元格支持标量或含 text 的格式对象",
-    "word_manage_drawing": "定位并更新或删除 Word 绘图对象",
-    "word_add_shape": "在 Word 中添加带可选文本的形状并设置尺寸、样式、旋转和环绕",
-    "word_add_chart": "在 Word 中添加图表并设置数据和样式",
-    "word_add_math": "在 Word 中添加数学公式对象",
-    "word_add_ole_object": "在 Word 中添加受控 OLE 对象",
-    "word_manage_fields": "添加 Word 动态字段、更新全部字段或清除表单字段",
-    "word_manage_long_document": "管理 Word 目录、题注、图表目录、交叉引用、脚注尾注和书签",
-    "word_manage_comments": "管理 Word 批注线程和状态",
-    "word_manage_revisions": "启停修订模式，或接受、拒绝全部 Word 修订",
-    "word_set_protection": "设置或移除 Word 文档保护",
-    "word_manage_content_control": "添加、更新、检查或删除 Word 内容控件，支持列表、日期、外观和自定义 XML 数据绑定",
-    "word_manage_custom_xml": "管理 Word 自定义 XML 部件及 XPath 元素、属性",
-    "word_inspect_macros": "只读检查 Word 的 ONLYOFFICE 或 VBA 宏",
-    "word_set_macros": "替换 Word 文档中保存的 ONLYOFFICE 宏集合",
-    "word_set_watermark": "设置或移除 Word 水印",
-    "word_format_paragraphs": "按段落序号、文本或当前光标设置完整段落样式",
-    "word_set_paragraph_text": "替换指定段落的文本并可同时设置样式",
-    "word_delete_paragraphs": "删除按序号、文本或当前光标选中的段落",
-    "word_set_list": "把指定段落设置为项目符号或编号列表",
-    "word_insert_page_break": "在指定段落之前或之后插入分页符",
-    "word_navigate": "只读跳转到首页、末页、指定页、相对页或搜索命中位置",
-    "word_scroll": "只读按页向上或向下滚动 Word 视图",
-    "word_scale_font": "按比例缩放 Word 全文字号；0.8 表示缩小 20%",
-    "word_add_table": "创建并填充 Word 表格；data 单元格支持标量或含 text 的格式对象",
-    "word_set_table_cell": "设置指定 Word 表格单元格的文本和格式",
-    "word_format_table": "设置指定 Word 表格的宽度、样式、外观和单元格格式",
-    "word_edit_table": "增删 Word 表格行列，或合并、拆分、清空、删除表格",
-    "word_set_page_layout": "设置 Word 节的纸张、方向、页边距和页眉页脚距离",
-    "word_set_header_footer": "设置或删除 Word 默认、首页或偶数页的页眉页脚",
-    "word_set_document_text": "用纯文本重写整个 Word 文档；仅在用户明确要求时使用",
-}
 
 
 def resolve_contract_schema(value: Any, definitions: dict[str, Any]) -> Any:
@@ -247,23 +183,112 @@ def load_public_contract() -> dict[str, Any]:
 
 
 PUBLIC_API_CONTRACT = load_public_contract()
+PUBLIC_API_CONTRACT_VERSION = str(PUBLIC_API_CONTRACT.get("version") or "")
+PUBLIC_API_CONTRACT_SHA256 = hashlib.sha256(
+    json.dumps(
+        PUBLIC_API_CONTRACT,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+).hexdigest()
+PUBLIC_API_LIMITS = PUBLIC_API_CONTRACT.get("limits") or {}
+MAX_TOOL_CALLS = int(PUBLIC_API_LIMITS.get("maxToolCalls") or 0)
+MAX_ARGUMENTS_JSON_CHARS = int(
+    PUBLIC_API_LIMITS.get("maxArgumentsJsonChars") or 0
+)
+IMAGE_MAX_REQUEST_BYTES = int(
+    PUBLIC_API_LIMITS.get("maxImageRequestBytes") or 0
+)
+IMAGE_MAX_BYTES = int(PUBLIC_API_LIMITS.get("maxImageBytes") or 0)
+MAX_REQUEST_ID_CHARS = int(PUBLIC_API_LIMITS.get("maxRequestIdChars") or 0)
+MAX_TIMEOUT_MS = int(PUBLIC_API_LIMITS.get("maxTimeoutMs") or 0)
+if not all(
+    (
+        PUBLIC_API_CONTRACT_VERSION,
+        MAX_TOOL_CALLS,
+        MAX_ARGUMENTS_JSON_CHARS,
+        IMAGE_MAX_REQUEST_BYTES,
+        IMAGE_MAX_BYTES,
+        MAX_REQUEST_ID_CHARS,
+        MAX_TIMEOUT_MS,
+    )
+):
+    raise RuntimeError("public-api.json 缺少必需的版本或限制")
+BRIDGE_ID_PATTERN = re.compile(
+    rf"^[A-Za-z0-9._:-]{{1,{MAX_REQUEST_ID_CHARS}}}$"
+)
 
 
-def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[str, Any]]:
+def contract_identity() -> dict[str, str]:
+    return {
+        "contractVersion": PUBLIC_API_CONTRACT_VERSION,
+        "contractSha256": PUBLIC_API_CONTRACT_SHA256,
+    }
+
+
+def editor_public_contract(editor: str) -> dict[str, Any]:
+    schemas = PUBLIC_API_CONTRACT.get("tools", {}).get(editor)
+    if not isinstance(schemas, dict):
+        raise BridgeError(404, "EDITOR_MISMATCH", f"不存在编辑器契约：{editor}")
+    units_key = {"word": "word", "slide": "slide", "cell": "sheet"}[editor]
+    normalization_key = {"word": "word", "slide": "slide", "cell": "sheet"}[editor]
+    return {
+        "name": PUBLIC_API_CONTRACT.get("name"),
+        "version": PUBLIC_API_CONTRACT_VERSION,
+        "protocolVersion": PUBLIC_API_CONTRACT.get("protocolVersion"),
+        "contractSha256": PUBLIC_API_CONTRACT_SHA256,
+        "editorType": editor,
+        "toolPrefix": {"word": "word_", "slide": "slides_", "cell": "sheets_"}[editor],
+        "limits": PUBLIC_API_LIMITS,
+        "unitConventions": (
+            (PUBLIC_API_CONTRACT.get("unitConventions") or {}).get(units_key) or {}
+        ),
+        "inputNormalization": (
+            (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get(
+                normalization_key
+            )
+            or {}
+        ),
+        "controls": PUBLIC_API_CONTRACT.get("controls") or [],
+        "errors": PUBLIC_API_CONTRACT.get("errors") or [],
+        "$defs": PUBLIC_API_CONTRACT.get("$defs") or {},
+        "tools": schemas,
+    }
+
+
+def load_contract_tools(editor: str) -> list[dict[str, Any]]:
     contract = PUBLIC_API_CONTRACT
     schemas = contract.get("tools", {}).get(editor)
     if not isinstance(schemas, dict) or not schemas:
         raise RuntimeError(f"public-api.json 缺少 {editor} 工具契约")
     definitions = contract.get("$defs", {})
-    missing_descriptions = sorted(set(schemas) - set(descriptions))
+    missing_descriptions = sorted(
+        name
+        for name, schema in schemas.items()
+        if not isinstance(schema, dict)
+        or not isinstance(schema.get("description"), str)
+        or not schema["description"].strip()
+    )
     if missing_descriptions:
-        raise RuntimeError(f"{editor} 工具缺少模型描述：{', '.join(missing_descriptions)}")
+        raise RuntimeError(
+            f"{editor} 工具契约缺少 description：{', '.join(missing_descriptions)}"
+        )
+    for name, schema in schemas.items():
+        if schema.get("x-effects") not in {"read", "write"}:
+            raise RuntimeError(
+                f"public-api.json 的 {editor}.{name}.x-effects 必须是 read 或 write"
+            )
+        if schema.get("x-argumentLimitClass") not in {"standard", "image"}:
+            raise RuntimeError(
+                f"public-api.json 的 {editor}.{name}.x-argumentLimitClass 无效"
+            )
     return [
         {
             "type": "function",
             "function": {
                 "name": name,
-                "description": descriptions[name],
+                "description": schema["description"],
                 "parameters": resolve_contract_schema(schema, definitions),
             },
         }
@@ -271,121 +296,13 @@ def load_contract_tools(editor: str, descriptions: dict[str, str]) -> list[dict[
     ]
 
 
-WORD_TOOLS = load_contract_tools("word", WORD_TOOL_DESCRIPTIONS)
+WORD_TOOLS = load_contract_tools("word")
 
 
-SLIDE_TOOL_DESCRIPTIONS = {
-    "slides_inspect": "只读检查 PPT 页数与文本摘要；修改前优先调用",
-    "slides_inspect_layouts": "只读检查 PPT 母版和版式",
-    "slides_inspect_themes": "只读检查 PPT 主题、主题颜色和主题字体",
-    "slides_inspect_builtin_themes": "只读检查 ONLYOFFICE 编辑器内置主题库",
-    "slides_inspect_objects": "只读检查 PPT 图形、图表、图片、表格、组合等对象及填充、线条、位置和可选原始 JSON",
-    "slides_replace_text": "在 PPT 全部或指定幻灯片中查找替换",
-    "slides_scale_font": "按比例缩放 PPT 全部或指定页字号",
-    "slides_format_text": "格式化 PPT 全部或指定页文本",
-    "slides_format_selection": "格式化 PPT 当前选中的文本框或形状",
-    "slides_add_slide": "新建幻灯片",
-    "slides_duplicate_slide": "复制指定幻灯片",
-    "slides_delete_slide": "删除指定幻灯片",
-    "slides_move_slide": "移动指定幻灯片到新的页序",
-    "slides_set_visibility": "显示或隐藏指定幻灯片",
-    "slides_set_size": "设置演示文稿页面尺寸和方向",
-    "slides_apply_layout": "给指定幻灯片应用母版版式",
-    "slides_set_show_settings": "设置幻灯片放映循环选项",
-    "slides_apply_theme": "把现有 PPT 主题应用到指定幻灯片",
-    "slides_apply_builtin_theme": "把 ONLYOFFICE 编辑器内置主题应用到当前演示文稿",
-    "slides_set_theme": "创建或更新 PPT 主题及其颜色、字体方案",
-    "slides_create_layout": "在 PPT 母版中创建自定义幻灯片版式",
-    "slides_add_template_shape": "在 PPT 母版或版式中添加模板图形或占位符",
-    "slides_manage_template_object": "更新或删除 PPT 母版、版式中的模板对象",
-    "slides_set_template_background": "设置 PPT 母版或版式的背景填充",
-    "slides_add_textbox": "在指定 PPT 页添加可设置位置、尺寸、文本、渐变填充和线条的文本框；尺寸单位为毫米",
-    "slides_add_word_art": "在指定 PPT 页添加艺术字并设置变换、字体、填充、线条和位置",
-    "slides_add_math": "在指定 PPT 页插入 LaTeX、Unicode 或 MathML 数学公式",
-    "slides_add_image": "把 HTTPS URL 或 Base64 Data URL 图片安全导入指定 PPT 页，可设置位置、尺寸、旋转、翻转和名称",
-    "slides_add_image_shape": "把安全导入的图片填充到圆形或其他预设形状中，实现按形状裁剪并可设置边框",
-    "slides_add_ole_object": "在指定 PPT 页添加带安全预览图的 OLE 对象",
-    "slides_add_connector": "在指定 PPT 页添加连接线",
-    "slides_add_freeform": "在指定 PPT 页添加自由形状",
-    "slides_group_objects": "组合或取消组合指定 PPT 绘图对象",
-    "slides_align_objects": "对齐或分布指定 PPT 绘图对象",
-    "slides_reorder_object": "调整指定 PPT 绘图对象的层级顺序",
-    "slides_set_text_content": "替换指定 PPT 对象的富文本段落内容",
-    "slides_format_paragraphs": "设置指定 PPT 文本对象的段落格式、缩进、间距和列表",
-    "slides_update_object": "按对象 ID、序号或名称更新 PPT 绘图对象的通用属性",
-    "slides_set_hyperlink": "给 PPT 文本或对象设置或移除超链接",
-    "slides_set_notes": "设置或清除指定幻灯片的演讲者备注",
-    "slides_add_comment": "在指定幻灯片添加批注",
-    "slides_inspect_comments": "只读检查 PPT 批注及其回复",
-    "slides_manage_comment": "更新、回复、删除 PPT 批注或批注回复",
-    "slides_set_transition": "设置或清除指定幻灯片的切换效果和计时",
-    "slides_inspect_animations": "只读检查 PPT 对象动画时间线、序列和计时",
-    "slides_manage_animation": "添加、更新、排序、删除或清空 PPT 对象动画",
-    "slides_add_table": "在指定幻灯片添加表格；data 单元格支持标量或含 text 的格式对象",
-    "slides_set_table_cell": "设置 PPT 表格单元格内容和格式",
-    "slides_format_table": "设置 PPT 表格整体及单元格格式",
-    "slides_edit_table": "增删 PPT 表格行列，或合并、拆分和删除表格",
-    "slides_set_background": "设置、清除或恢复 PPT 页背景；自定义背景支持纯色、线性渐变、径向渐变、图案和 raw 填充",
-    "slides_add_shape": "在指定 PPT 页添加任意预设图形，并设置文本、几何、渐变填充、线条、旋转和内边距",
-    "slides_update_shape": "按 objectId、objectIndex 或 name 更新 PPT 图形的文本、类型、位置、尺寸、旋转、填充和线条",
-    "slides_delete_object": "按 objectId、objectIndex 或 name 删除 PPT 页中的任意对象",
-    "slides_inspect_charts": "只读检查 PPT 图表类型、标题、系列、位置、样式和可选原始 JSON",
-    "slides_add_chart": "用数值系列和分类在 PPT 页创建图表，并设置系列、坐标轴、图例、标签、渐变填充和位置",
-    "slides_update_chart": "按 chartId、chartIndex 或 name 更新 PPT 图表系列、分类、坐标轴、图例、标签、颜色、位置和尺寸",
-    "slides_delete_chart": "按 chartId、chartIndex 或 name 删除 PPT 图表",
-    "slides_inspect_macros": "只读检查 PPT 的 ONLYOFFICE 宏或 VBA 宏",
-    "slides_set_macros": "设置或清除 PPT 的 ONLYOFFICE 宏内容",
-    "slides_control_slideshow": "启动、结束、暂停、继续或导航当前 PPT 放映",
-}
 
-SHEET_TOOL_DESCRIPTIONS = {
-    "sheets_inspect": "只读检查 XLSX 工作表、使用区域和值；修改前优先调用",
-    "sheets_set_values": "向 XLSX 单元格区域写入单个值或二维数组",
-    "sheets_set_formula": "向 XLSX 单元格写入公式",
-    "sheets_replace_text": "在 XLSX 使用区域或指定区域查找替换",
-    "sheets_format_range": "设置 XLSX 区域字体、填充、对齐、数字格式和行列尺寸",
-    "sheets_add_sheet": "新建工作表",
-    "sheets_rename_sheet": "重命名工作表",
-    "sheets_delete_sheet": "删除工作表",
-    "sheets_add_chart": "基于区域数据创建 XLSX 图表，并设置系列、坐标轴、图例、标签、渐变填充和位置",
-    "sheets_inspect_charts": "只读检查 XLSX 图表类型、标题、系列、位置、样式和可选原始 JSON",
-    "sheets_update_chart": "按 chartIndex 或 name 更新 XLSX 图表系列、数据区域、坐标轴、图例、标签、颜色、位置和尺寸",
-    "sheets_delete_chart": "按 chartIndex 或 name 删除 XLSX 图表；部分 ONLYOFFICE 版本/许可不提供 ApiDrawing.Delete，此时会明确失败",
-    "sheets_inspect_range": "只读检查 XLSX 指定区域的值、公式和格式",
-    "sheets_manage_range": "管理 XLSX 区域的合并、行列插删、复制、剪切、清除、填充、隐藏和自动调整",
-    "sheets_set_array_formula": "给 XLSX 区域设置数组公式",
-    "sheets_set_rich_text": "给 XLSX 单元格设置富文本内容",
-    "sheets_sort": "对 XLSX 区域按指定字段排序",
-    "sheets_filter": "设置、更新或清除 XLSX 区域筛选",
-    "sheets_inspect_tables": "只读检查 XLSX 工作表中的结构化表格、范围、样式和显示属性",
-    "sheets_manage_validation": "管理 XLSX 单元格数据验证",
-    "sheets_manage_conditional_format": "管理 XLSX 条件格式规则",
-    "sheets_manage_table": "创建、格式化、更新、缩放、删除结构化表格，或把表格转换为普通区域",
-    "sheets_manage_hyperlink": "设置或移除 XLSX 单元格超链接",
-    "sheets_manage_comments": "添加、更新或删除 XLSX 单元格批注",
-    "sheets_inspect_comments": "只读检查 XLSX 单元格批注",
-    "sheets_manage_names": "创建、更新或删除 XLSX 定义名称",
-    "sheets_inspect_names": "只读检查 XLSX 定义名称",
-    "sheets_manage_freeze_panes": "冻结或取消冻结 XLSX 窗格",
-    "sheets_inspect_freeze_panes": "只读检查 XLSX 冻结窗格状态",
-    "sheets_manage_page_layout": "设置 XLSX 打印页面布局",
-    "sheets_inspect_page_layout": "只读检查 XLSX 打印页面布局",
-    "sheets_manage_properties": "设置 XLSX 工作簿属性",
-    "sheets_inspect_properties": "只读检查 XLSX 工作簿属性",
-    "sheets_manage_sheet": "管理 XLSX 工作表的可见性、顺序和其他属性",
-    "sheets_manage_protected_ranges": "创建或更新 XLSX 受保护区域，并管理其可编辑用户",
-    "sheets_inspect_protected_ranges": "只读检查 XLSX 受保护区域",
-    "sheets_manage_drawing": "添加、更新或删除 XLSX 绘图对象",
-    "sheets_inspect_drawings": "只读检查 XLSX 绘图对象",
-    "sheets_manage_pivot": "创建、配置、刷新或清空 XLSX 数据透视表",
-    "sheets_inspect_pivots": "只读检查 XLSX 数据透视表",
-    "sheets_set_macros": "设置或清除 XLSX 宏内容",
-    "sheets_inspect_macros": "只读检查 XLSX 宏信息",
-    "sheets_recalculate": "触发 XLSX 工作簿重新计算",
-}
 
-SLIDE_TOOLS = load_contract_tools("slide", SLIDE_TOOL_DESCRIPTIONS)
-SHEET_TOOLS = load_contract_tools("cell", SHEET_TOOL_DESCRIPTIONS)
+SLIDE_TOOLS = load_contract_tools("slide")
+SHEET_TOOLS = load_contract_tools("cell")
 
 
 TOOLS_BY_EDITOR = {"word": WORD_TOOLS, "slide": SLIDE_TOOLS, "cell": SHEET_TOOLS}
@@ -401,11 +318,77 @@ ARGUMENT_SCHEMAS_BY_EDITOR = {
     }
     for editor, entries in TOOLS_BY_EDITOR.items()
 }
-WORD_NORMALIZATION_POLICY = (
-    (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get("word") or {}
-)
+TOOL_SCHEMAS = {
+    name: schema
+    for schemas in ARGUMENT_SCHEMAS_BY_EDITOR.values()
+    for name, schema in schemas.items()
+}
+IMAGE_SOURCE_TOOLS = {
+    name
+    for name, schema in TOOL_SCHEMAS.items()
+    if schema.get("x-argumentLimitClass") == "image"
+}
+
+
+def argument_limit_class_for_tool_calls(
+    tool_calls: list[dict[str, Any]],
+) -> str:
+    return (
+        "image"
+        if any(
+            TOOL_SCHEMAS.get(str(call.get("name") or ""), {}).get(
+                "x-argumentLimitClass"
+            )
+            == "image"
+            for call in tool_calls
+            if isinstance(call, dict)
+        )
+        else "standard"
+    )
+
+
+def require_arguments_within_limit(
+    value: Any,
+    tool_calls: list[dict[str, Any]],
+    label: str,
+) -> None:
+    encoded = compact_json(value).encode("utf-8")
+    limit_class = argument_limit_class_for_tool_calls(tool_calls)
+    if limit_class == "image":
+        actual = len(encoded)
+        limit = IMAGE_MAX_REQUEST_BYTES
+        unit = "bytes"
+    else:
+        actual = len(encoded.decode("utf-8"))
+        limit = MAX_ARGUMENTS_JSON_CHARS
+        unit = "characters"
+    if actual > limit:
+        raise BridgeError(
+            400,
+            "ARGUMENTS_TOO_LARGE",
+            f"{label} exceeds {limit} {unit}",
+            {
+                "argumentLimitClass": limit_class,
+                "actual": actual,
+                "limit": limit,
+                "unit": unit,
+            },
+        )
+
+
+NORMALIZATION_POLICY_BY_EDITOR = {
+    "word": (
+        (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get("word") or {}
+    ),
+    "cell": (
+        (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get("sheet") or {}
+    ),
+    "slide": (
+        (PUBLIC_API_CONTRACT.get("inputNormalization") or {}).get("slide") or {}
+    ),
+}
+WORD_NORMALIZATION_POLICY = NORMALIZATION_POLICY_BY_EDITOR["word"]
 WORD_PROPERTY_ALIASES = dict(WORD_NORMALIZATION_POLICY.get("propertyAliases") or {})
-WORD_ENUM_ALIASES = dict(WORD_NORMALIZATION_POLICY.get("enumAliases") or {})
 WORD_SUSPICIOUS_TWIPS_ALIASES = {
     "firstLineIndent",
     "leftIndent",
@@ -446,20 +429,26 @@ def schema_branches_for_value(schema: dict[str, Any], value: Any) -> list[dict[s
     return branches
 
 
-def normalize_word_value(
+def normalize_editor_value(
     value: Any,
     schema: dict[str, Any],
     path: str,
     tool_call_index: int,
     normalizations: list[dict[str, Any]],
+    property_aliases: dict[str, str],
+    enum_aliases: dict[str, str],
+    match_enum_tokens: bool,
 ) -> Any:
     for branch in schema_branches_for_value(schema, value):
-        value = normalize_word_value(
+        value = normalize_editor_value(
             value,
             branch,
             path,
             tool_call_index,
             normalizations,
+            property_aliases,
+            enum_aliases,
+            match_enum_tokens,
         )
 
     if isinstance(value, dict):
@@ -467,7 +456,7 @@ def normalize_word_value(
         if not isinstance(properties, dict):
             return value
         normalized = dict(value)
-        for alias, canonical in WORD_PROPERTY_ALIASES.items():
+        for alias, canonical in property_aliases.items():
             if alias not in normalized or canonical not in properties:
                 continue
             alias_path = f"{path}.{alias}"
@@ -486,12 +475,15 @@ def normalize_word_value(
             )
         for name, child_schema in properties.items():
             if name in normalized and isinstance(child_schema, dict):
-                normalized[name] = normalize_word_value(
+                normalized[name] = normalize_editor_value(
                     normalized[name],
                     child_schema,
                     f"{path}.{name}",
                     tool_call_index,
                     normalizations,
+                    property_aliases,
+                    enum_aliases,
+                    match_enum_tokens,
                 )
         return normalized
 
@@ -499,12 +491,15 @@ def normalize_word_value(
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             return [
-                normalize_word_value(
+                normalize_editor_value(
                     item,
                     item_schema,
                     f"{path}[{index}]",
                     tool_call_index,
                     normalizations,
+                    property_aliases,
+                    enum_aliases,
+                    match_enum_tokens,
                 )
                 for index, item in enumerate(value)
             ]
@@ -514,7 +509,7 @@ def normalize_word_value(
     if isinstance(value, str) and isinstance(enum_values, list):
         string_values = [item for item in enum_values if isinstance(item, str)]
         source_token = normalized_enum_token(value)
-        explicit_target = WORD_ENUM_ALIASES.get(source_token)
+        explicit_target = enum_aliases.get(source_token)
         if explicit_target in string_values and value != explicit_target:
             normalizations.append(
                 {
@@ -525,11 +520,15 @@ def normalize_word_value(
                 }
             )
             return explicit_target
-        matches = [
-            candidate
-            for candidate in string_values
-            if normalized_enum_token(candidate) == source_token
-        ]
+        matches = (
+            [
+                candidate
+                for candidate in string_values
+                if normalized_enum_token(candidate) == source_token
+            ]
+            if match_enum_tokens
+            else []
+        )
         if len(matches) == 1 and matches[0] != value:
             normalizations.append(
                 {
@@ -583,21 +582,41 @@ def suspicious_word_unit_errors(tool_calls: list[dict[str, Any]]) -> list[dict[s
 def normalize_word_tool_calls(
     tool_calls: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    return normalize_editor_tool_calls("word", tool_calls)
+
+
+def normalize_editor_tool_calls(
+    editor: str,
+    tool_calls: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     normalized_calls = json.loads(json.dumps(tool_calls, ensure_ascii=False))
     normalizations: list[dict[str, Any]] = []
-    schemas = ARGUMENT_SCHEMAS_BY_EDITOR["word"]
+    schemas = ARGUMENT_SCHEMAS_BY_EDITOR[editor]
+    policy = NORMALIZATION_POLICY_BY_EDITOR.get(editor) or {}
+    property_aliases = dict(policy.get("propertyAliases") or {})
+    enum_aliases = {
+        normalized_enum_token(str(alias)): str(canonical)
+        for alias, canonical in (policy.get("enumAliases") or {}).items()
+    }
+    match_enum_tokens = (
+        policy.get("enumTokenMatching")
+        == "case-insensitive-separator-insensitive"
+    )
     for index, call in enumerate(normalized_calls):
         name = str(call.get("name") or "")
         schema = schemas.get(name)
         if not isinstance(schema, dict):
             continue
         arguments = call.get("arguments", {})
-        call["arguments"] = normalize_word_value(
+        call["arguments"] = normalize_editor_value(
             arguments,
             schema,
             "arguments",
             index,
             normalizations,
+            property_aliases,
+            enum_aliases,
+            match_enum_tokens,
         )
     return normalized_calls, normalizations
 
@@ -649,6 +668,31 @@ def validate_json_schema(
 ) -> None:
     if not isinstance(schema, dict):
         return
+
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for branch in all_of:
+            validate_json_schema(value, branch, path, errors)
+
+    conditional = schema.get("if")
+    if isinstance(conditional, dict):
+        conditional_errors: list[dict[str, Any]] = []
+        validate_json_schema(value, conditional, path, conditional_errors)
+        selected = schema.get("then") if not conditional_errors else schema.get("else")
+        if isinstance(selected, dict):
+            validate_json_schema(value, selected, path, errors)
+
+    negated = schema.get("not")
+    if isinstance(negated, dict):
+        negated_errors: list[dict[str, Any]] = []
+        validate_json_schema(value, negated, path, negated_errors)
+        if not negated_errors:
+            append_argument_validation_error(
+                errors,
+                path,
+                "not",
+                f"{path} matches a forbidden shape",
+            )
 
     any_of = schema.get("anyOf")
     if isinstance(any_of, list) and any_of:
@@ -740,6 +784,22 @@ def validate_json_schema(
         )
 
     if isinstance(value, dict):
+        minimum_properties = schema.get("minProperties")
+        maximum_properties = schema.get("maxProperties")
+        if isinstance(minimum_properties, int) and len(value) < minimum_properties:
+            append_argument_validation_error(
+                errors,
+                path,
+                "minProperties",
+                f"{path} must contain at least {minimum_properties} properties",
+            )
+        if isinstance(maximum_properties, int) and len(value) > maximum_properties:
+            append_argument_validation_error(
+                errors,
+                path,
+                "maxProperties",
+                f"{path} must contain at most {maximum_properties} properties",
+            )
         required = schema.get("required")
         if isinstance(required, list):
             for name in required:
@@ -891,7 +951,9 @@ def validate_word_semantics(
 
     if name == "word_manage_fields" and arguments.get("action") == "add":
         instruction = arguments.get("instruction")
-        if not isinstance(instruction, str) or not instruction.strip():
+        if "instruction" in arguments and (
+            not isinstance(instruction, str) or not instruction.strip()
+        ):
             semantic_error("instruction", "instruction is required when action is add")
 
     if name == "word_insert_page_break":
@@ -915,15 +977,6 @@ def validate_word_semantics(
 
     if name == "word_edit_table":
         action = arguments.get("action")
-        required_by_action = {
-            "removeRow": ("row",),
-            "removeColumn": ("column",),
-            "splitCell": ("row", "column"),
-            "mergeCells": ("rowStart", "rowEnd", "columnStart", "columnEnd"),
-        }
-        for field in required_by_action.get(action, ()):
-            if field not in arguments:
-                semantic_error(field, f"{field} is required when action is {action}")
         if action == "mergeCells" and all(
             isinstance(arguments.get(field), int)
             and not isinstance(arguments.get(field), bool)
@@ -957,6 +1010,273 @@ def validate_word_semantics(
             )
 
 
+def validate_slide_semantics(
+    name: str,
+    arguments: Any,
+    errors: list[dict[str, Any]],
+) -> None:
+    if not isinstance(arguments, dict):
+        return
+
+    def semantic_error(path: str, message: str) -> None:
+        append_argument_validation_error(errors, f"arguments.{path}", "semantic", message)
+
+    if name in {"slides_add_textbox", "slides_add_shape"}:
+        if "text" in arguments and "paragraphs" in arguments:
+            semantic_error("paragraphs", "text and paragraphs are mutually exclusive")
+
+    if name == "slides_add_slide" and "masterIndex" in arguments and "layoutIndex" not in arguments:
+        semantic_error("layoutIndex", "layoutIndex is required when masterIndex is provided")
+
+    if name == "slides_validate_layout":
+        for index, pair in enumerate(arguments.get("allowedOverlapPairs") or []):
+            if (
+                isinstance(pair, dict)
+                and pair.get("firstName") == pair.get("secondName")
+            ):
+                semantic_error(
+                    f"allowedOverlapPairs[{index}]",
+                    "overlap pair must contain two different object names",
+                )
+
+
+SHEET_A1_RANGE_PATTERN = re.compile(
+    r"^\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)"
+    r"(?::\$?([A-Za-z]{1,3})\$?([1-9][0-9]*))?$"
+)
+
+
+def sheet_column_number(column: str) -> int:
+    number = 0
+    for character in column.upper():
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number
+
+
+def sheet_a1_range_shape(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, str) or value.casefold() == "selection":
+        return None
+    if "!" in value:
+        sheet_prefix, address = value.rsplit("!", 1)
+        if not sheet_prefix:
+            return None
+    else:
+        address = value
+    match = SHEET_A1_RANGE_PATTERN.fullmatch(address)
+    if match is None:
+        return None
+    first_column, first_row, last_column, last_row = match.groups()
+    if last_column is None:
+        last_column = first_column
+        last_row = first_row
+    first_column_number = sheet_column_number(first_column)
+    last_column_number = sheet_column_number(last_column)
+    if (
+        first_column_number > 16384
+        or last_column_number > 16384
+        or int(first_row) > 1048576
+        or int(last_row) > 1048576
+    ):
+        return None
+    return (
+        abs(int(last_row) - int(first_row)) + 1,
+        abs(last_column_number - first_column_number) + 1,
+    )
+
+
+def sheet_matrix_shape(value: Any) -> tuple[int, int] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if not all(isinstance(row, list) and row for row in value):
+        return None
+    widths = {len(row) for row in value}
+    if len(widths) != 1:
+        return None
+    return len(value), next(iter(widths))
+
+
+def validate_sheet_semantics(
+    name: str,
+    arguments: Any,
+    errors: list[dict[str, Any]],
+) -> None:
+    if not isinstance(arguments, dict):
+        return
+
+    def semantic_error(path: str, message: str) -> None:
+        append_argument_validation_error(errors, f"arguments.{path}", "semantic", message)
+
+    if name in {"sheets_set_values", "sheets_set_formula"}:
+        field = "values" if name == "sheets_set_values" else "formula"
+        value = arguments.get(field)
+        target_range = arguments.get("range")
+        target_shape = sheet_a1_range_shape(target_range)
+        if (
+            isinstance(target_range, str)
+            and target_range.casefold() != "selection"
+            and target_shape is None
+        ):
+            semantic_error(
+                "range",
+                "range must be a finite A1 cell range or selection",
+            )
+        if isinstance(value, list):
+            matrix_shape = sheet_matrix_shape(value)
+            if matrix_shape is None:
+                semantic_error(field, f"{field} must be a non-empty rectangular 2D matrix")
+            elif target_shape is not None and matrix_shape != target_shape:
+                semantic_error(
+                    field,
+                    f"{field} matrix shape {matrix_shape[0]}x{matrix_shape[1]} "
+                    f"must match target range shape {target_shape[0]}x{target_shape[1]}",
+                )
+        elif target_shape is not None and target_shape != (1, 1):
+            semantic_error(
+                field,
+                f"scalar {field} is only allowed for a single-cell target",
+            )
+
+    if name == "sheets_manage_validation":
+        action = arguments.get("action")
+        if action in {"add", "modify"}:
+            validation_type = arguments.get("type")
+            if validation_type is None:
+                semantic_error("type", "type is required when action is add or modify")
+            input_only_types = {"inputOnly", "xlValidateInputOnly"}
+            if validation_type not in input_only_types and "formula1" not in arguments:
+                semantic_error(
+                    "formula1",
+                    "formula1 is required for this validation type",
+                )
+            comparison_types = {
+                "wholeNumber",
+                "decimal",
+                "date",
+                "time",
+                "textLength",
+                "xlValidateWholeNumber",
+                "xlValidateDecimal",
+                "xlValidateDate",
+                "xlValidateTime",
+                "xlValidateTextLength",
+            }
+            between_operators = {
+                None,
+                "between",
+                "notBetween",
+                "xlBetween",
+                "xlNotBetween",
+            }
+            if (
+                validation_type in comparison_types
+                and arguments.get("operator") in between_operators
+                and "formula2" not in arguments
+            ):
+                semantic_error(
+                    "formula2",
+                    "formula2 is required for between/notBetween validation",
+                )
+
+    if name == "sheets_manage_table":
+        action = arguments.get("action")
+        table_mode = arguments.get("tableMode", "auto")
+        structured_fields = {
+            "sourceType",
+            "name",
+            "newName",
+            "style",
+            "showTotals",
+            "showHeaders",
+            "rowStripes",
+            "columnStripes",
+            "firstColumn",
+            "lastColumn",
+            "showAutoFilter",
+            "showAutoFilterDropDown",
+            "summary",
+            "alternativeText",
+        }
+        provided_structured_fields = sorted(structured_fields.intersection(arguments))
+        allowed_create_fields = {
+            "action",
+            "sheet",
+            "range",
+            "tableMode",
+            "sourceType",
+            "name",
+            "style",
+            "showTotals",
+            "showHeaders",
+            "rowStripes",
+            "columnStripes",
+            "firstColumn",
+            "lastColumn",
+            "showAutoFilter",
+            "showAutoFilterDropDown",
+            "summary",
+            "alternativeText",
+        }
+        if action == "create":
+            invalid_create_fields = sorted(set(arguments).difference(allowed_create_fields))
+            if invalid_create_fields:
+                semantic_error(
+                    invalid_create_fields[0],
+                    "field is not allowed when action is create",
+                )
+        if action != "create" and "tableMode" in arguments:
+            semantic_error("tableMode", "tableMode is only allowed when action is create")
+        if action == "create" and table_mode == "basic" and provided_structured_fields:
+            semantic_error(
+                provided_structured_fields[0],
+                "basic tables do not support structured-table properties",
+            )
+        if action == "format":
+            invalid_format_fields = sorted(
+                set(arguments).difference({"action", "sheet", "range"})
+            )
+            if invalid_format_fields:
+                semantic_error(
+                    invalid_format_fields[0],
+                    "action format only accepts sheet and range",
+                )
+
+SEMANTIC_VALIDATORS = {
+    "word.fieldInstruction": validate_word_semantics,
+    "word.pageBreakTarget": validate_word_semantics,
+    "word.tableRangeOrder": validate_word_semantics,
+    "word.headerFooterContent": validate_word_semantics,
+    "slides.distinctOverlapPair": validate_slide_semantics,
+    "sheets.a1MatrixShape": validate_sheet_semantics,
+    "sheets.validationRule": validate_sheet_semantics,
+    "sheets.tableOperation": validate_sheet_semantics,
+}
+
+
+def validate_semantic_validator_registry() -> None:
+    unknown: list[str] = []
+    for editor, schemas in ARGUMENT_SCHEMAS_BY_EDITOR.items():
+        for name, schema in schemas.items():
+            validator_ids = schema.get("x-semanticValidators", [])
+            if not isinstance(validator_ids, list) or not all(
+                isinstance(item, str) for item in validator_ids
+            ):
+                raise RuntimeError(
+                    f"public-api.json 的 {editor}.{name}.x-semanticValidators 必须是字符串数组"
+                )
+            unknown.extend(
+                f"{editor}.{name}:{validator_id}"
+                for validator_id in validator_ids
+                if validator_id not in SEMANTIC_VALIDATORS
+            )
+    if unknown:
+        raise RuntimeError(
+            "public-api.json 引用了未注册的语义校验器：" + ", ".join(sorted(unknown))
+        )
+
+
+validate_semantic_validator_registry()
+
+
 def validate_editor_tool_calls(
     editor: str,
     tool_calls: list[dict[str, Any]],
@@ -968,11 +1288,12 @@ def validate_editor_tool_calls(
         arguments = call.get("arguments", {})
         call_errors: list[dict[str, Any]] = []
         schema = schemas.get(name)
-        should_validate_schema = editor == "word" or name == "slides_add_table"
+        should_validate_schema = editor in {"word", "slide", "cell"}
         if schema is not None and should_validate_schema:
             validate_json_schema(arguments, schema, "arguments", call_errors)
-        if editor == "word":
-            validate_word_semantics(name, arguments, call_errors)
+        if schema is not None:
+            for validator_id in schema.get("x-semanticValidators", []):
+                SEMANTIC_VALIDATORS[validator_id](name, arguments, call_errors)
         for error in call_errors:
             validation_errors.append(
                 {
@@ -999,8 +1320,11 @@ def require_valid_editor_tool_calls(
     normalized_calls = tool_calls
     normalizations: list[dict[str, Any]] = []
     validation_errors: list[dict[str, Any]] = []
-    if editor == "word":
-        normalized_calls, normalizations = normalize_word_tool_calls(tool_calls)
+    if editor in NORMALIZATION_POLICY_BY_EDITOR:
+        normalized_calls, normalizations = normalize_editor_tool_calls(
+            editor,
+            tool_calls,
+        )
     validation_errors.extend(validate_editor_tool_calls(editor, normalized_calls))
     if editor == "word":
         validation_errors.extend(suspicious_word_unit_errors(tool_calls))
@@ -1087,6 +1411,7 @@ EDITOR_ERROR_HTTP_STATUS = {
     "INVALID_IMAGE_SOURCE": 422,
     "EXECUTION_FAILED": 500,
     "WORD_API_UNSUPPORTED": 501,
+    "SHEETS_API_UNSUPPORTED": 501,
     "IMAGE_API_UNSUPPORTED": 501,
     "PERSISTENCE_FAILED": 502,
     "IMAGE_FETCH_FAILED": 502,
@@ -1832,6 +2157,8 @@ def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str,
         "fileType": context.get("fileType"),
         "userId": context.get("userId"),
         "capabilities": state.get("capabilities"),
+        "contractVersion": state.get("contractVersion"),
+        "contractSha256": state.get("contractSha256"),
         "lastSeen": session.get("lastSeen"),
         "registeredAt": session.get("registeredAt"),
         "generation": session.get("generation"),
@@ -1937,6 +2264,25 @@ def bridge_assert_state_matches(claims: dict[str, Any], state: Any) -> dict[str,
         raise BridgeError(409, "DOCUMENT_MISMATCH", "编辑器页面与凭证绑定的 document.key 不一致")
     if (state.get("editorType") or context.get("editorType")) != claims["editorType"]:
         raise BridgeError(409, "EDITOR_MISMATCH", "编辑器页面与凭证的编辑器类型不一致")
+    state_contract_sha256 = str(state.get("contractSha256") or "")
+    if (
+        state_contract_sha256
+        and not hmac.compare_digest(
+            state_contract_sha256,
+            PUBLIC_API_CONTRACT_SHA256,
+        )
+    ):
+        raise BridgeError(
+            409,
+            "CONTRACT_VERSION_MISMATCH",
+            "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
+            {
+                "expectedContractVersion": PUBLIC_API_CONTRACT_VERSION,
+                "expectedContractSha256": PUBLIC_API_CONTRACT_SHA256,
+                "receivedContractVersion": state.get("contractVersion"),
+                "receivedContractSha256": state_contract_sha256,
+            },
+        )
     for key in ("fileName", "fileType", "userId"):
         if str(context.get(key, "")).strip() != str(claims.get(key, "")).strip():
             raise BridgeError(
@@ -2197,6 +2543,7 @@ def bridge_attach(payload: dict[str, Any]) -> dict[str, Any]:
         "bindingToken": binding_token,
         "bindingExpiresAt": expires_at,
         "session": public_session,
+        **contract_identity(),
     }
 
 
@@ -2237,6 +2584,7 @@ def bridge_sessions(claims: dict[str, Any]) -> dict[str, Any]:
         "bindingToken": binding_token,
         "bindingExpiresAt": expires_at,
         "sessions": sessions,
+        **contract_identity(),
     }
 
 
@@ -2308,7 +2656,7 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         timeout_ms = int(payload.get("timeoutMs", 90000))
     except (TypeError, ValueError) as error:
         raise BridgeError(400, "INVALID_TIMEOUT", "timeoutMs 必须是整数") from error
-    timeout_ms = min(300000, max(100, timeout_ms))
+    timeout_ms = min(MAX_TIMEOUT_MS, max(100, timeout_ms))
 
     params: dict[str, Any] = {}
     argument_normalizations: list[dict[str, Any]] = []
@@ -2318,9 +2666,11 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         if name not in allowed_tools:
             raise BridgeError(400, "TOOL_NOT_ALLOWED", f"当前编辑器不允许工具：{name or 'unknown'}")
         arguments = bridge_parse_json_parameter(payload, "arguments", "argumentsJson", dict, {})
-        argument_limit = IMAGE_MAX_REQUEST_BYTES if name in IMAGE_SOURCE_TOOLS else 250000
-        if len(compact_json(arguments)) > argument_limit:
-            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"arguments 超过 {argument_limit} 字符")
+        require_arguments_within_limit(
+            arguments,
+            [{"name": name, "arguments": arguments}],
+            "arguments",
+        )
         editor_type = (session.get("state") or {}).get("editorType")
         if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
             normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
@@ -2331,18 +2681,16 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
-        if not tool_calls or len(tool_calls) > 20:
-            raise BridgeError(400, "INVALID_TOOL_CALL", "toolCalls 数量必须为 1 到 20")
+        if not tool_calls or len(tool_calls) > MAX_TOOL_CALLS:
+            raise BridgeError(
+                400,
+                "INVALID_TOOL_CALL",
+                f"toolCalls 数量必须为 1 到 {MAX_TOOL_CALLS}",
+            )
         for call in tool_calls:
             if not isinstance(call, dict) or call.get("name") not in allowed_tools:
                 raise BridgeError(400, "TOOL_NOT_ALLOWED", "批量调用包含当前编辑器不允许的工具")
-        arguments_limit = (
-            IMAGE_MAX_REQUEST_BYTES
-            if any(call.get("name") in IMAGE_SOURCE_TOOLS for call in tool_calls)
-            else 250000
-        )
-        if len(compact_json(tool_calls)) > arguments_limit:
-            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", f"toolCalls 超过 {arguments_limit} 字符")
+        require_arguments_within_limit(tool_calls, tool_calls, "toolCalls")
         editor_type = (session.get("state") or {}).get("editorType")
         if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
             tool_calls, argument_normalizations = require_valid_editor_tool_calls(
@@ -2365,16 +2713,16 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
         raise BridgeError(
             401,
             "INVALID_BRIDGE_BINDING_TOKEN",
-            "Word 批量预检必须使用 attach 返回的 ai-bridge 绑定凭证",
+            "批量预检必须使用 attach 返回的 ai-bridge 绑定凭证",
         )
     with BRIDGE_CONDITION:
         session_id, session = bridge_select_session_locked(payload.get("sessionId"), claims)
         editor_type = str((session.get("state") or {}).get("editorType") or "")
-        if editor_type != "word":
+        if editor_type not in {"word", "slide", "cell"}:
             raise BridgeError(
                 400,
                 "EDITOR_MISMATCH",
-                "validate_word_batch 只支持当前 Word 编辑器会话",
+                "批量预检只支持当前 Word、PPTX 或 XLSX 编辑器会话",
             )
         tool_calls = bridge_parse_json_parameter(
             payload,
@@ -2383,8 +2731,12 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
             list,
             [],
         )
-        if not tool_calls or len(tool_calls) > 20:
-            raise BridgeError(400, "INVALID_TOOL_CALL", "toolCalls 数量必须为 1 到 20")
+        if not tool_calls or len(tool_calls) > MAX_TOOL_CALLS:
+            raise BridgeError(
+                400,
+                "INVALID_TOOL_CALL",
+                f"toolCalls 数量必须为 1 到 {MAX_TOOL_CALLS}",
+            )
         allowed_tools = set(
             ((session.get("state") or {}).get("capabilities") or {}).get("tools") or []
         )
@@ -2395,17 +2747,18 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
                     "TOOL_NOT_ALLOWED",
                     "批量调用包含当前编辑器不允许的工具",
                 )
-        if len(compact_json(tool_calls)) > 250000:
-            raise BridgeError(400, "ARGUMENTS_TOO_LARGE", "toolCalls 超过 250000 字符")
-        normalized_calls, argument_normalizations = require_valid_word_tool_calls(
+        require_arguments_within_limit(tool_calls, tool_calls, "toolCalls")
+        normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
+            editor_type,
             tool_calls
         )
         return {
             "ok": True,
             "valid": True,
-            "editorType": "word",
+            "editorType": editor_type,
             "toolCalls": len(normalized_calls),
             "argumentNormalizations": argument_normalizations,
+            **contract_identity(),
         }
 
 
@@ -2507,6 +2860,7 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
             "session": bridge_public_session(result_session_id, result_session),
             "result": response.get("result"),
             "argumentNormalizations": command.get("argumentNormalizations", []),
+            **contract_identity(),
         }
 
 
@@ -3399,7 +3753,30 @@ class Handler(BaseHTTPRequestHandler):
                 json_response(self, error.status, error.payload())
             return
         if request_path == "/health":
-            json_response(self, 200, {"ok": True, "modelConfigured": bool(os.environ.get("COPILOT_API_KEY") and os.environ.get("COPILOT_MODEL")), "editors": ["word", "slide", "cell"]})
+            json_response(
+                self,
+                200,
+                {
+                    "ok": True,
+                    "modelConfigured": bool(
+                        os.environ.get("COPILOT_API_KEY")
+                        and os.environ.get("COPILOT_MODEL")
+                    ),
+                    "editors": ["word", "slide", "cell"],
+                    **contract_identity(),
+                },
+            )
+            return
+        contract_match = re.fullmatch(
+            r"/bridge/contract/(?P<editor>word|slide|cell)",
+            request_path,
+        )
+        if contract_match:
+            json_response(
+                self,
+                200,
+                editor_public_contract(contract_match.group("editor")),
+            )
             return
         if request_path.startswith("/images/"):
             try:
@@ -3467,7 +3844,8 @@ class Handler(BaseHTTPRequestHandler):
             request_path = parsed_path.path.rstrip("/")
             max_bytes = (
                 IMAGE_MAX_REQUEST_BYTES
-                if request_path in ("/images/import", "/bridge/execute")
+                if request_path
+                in ("/images/import", "/bridge/execute", "/bridge/validate")
                 else 2_000_000
             )
             content_type = (

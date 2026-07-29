@@ -5,14 +5,446 @@
 
   function parseResult(rawResult) {
     const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
-    if (!value || !value.ok) throw new Error((value && value.error) || "Sheets Bridge 执行失败");
+    if (!value || !value.ok) {
+      const rawError = value && value.error;
+      const error = new Error(
+        rawError && typeof rawError === "object"
+          ? rawError.message || "Sheets Bridge 执行失败"
+          : (value && value.message) || rawError || "Sheets Bridge 执行失败"
+      );
+      error.code = value && value.code
+        ? value.code
+        : (rawError && rawError.code ? rawError.code : "EXECUTION_FAILED");
+      const rawDetails = value && value.details && typeof value.details === "object"
+        ? value.details
+        : (
+          rawError && rawError.details && typeof rawError.details === "object"
+            ? rawError.details
+            : {}
+        );
+      error.details = { ...rawDetails };
+      if (!error.details.phase) error.details.phase = "sheets-command";
+      throw error;
+    }
     return value;
+  }
+
+  const VIEW_VERIFY_INTERVAL_MS = 100;
+  const VIEW_VERIFY_TIMEOUT_MS = 5000;
+
+  function a1ColumnNumber(column) {
+    let number = 0;
+    const normalized = String(column || "").toUpperCase();
+    for (let index = 0; index < normalized.length; index += 1) {
+      number = number * 26 + normalized.charCodeAt(index) - 64;
+    }
+    return number;
+  }
+
+  function a1ColumnName(number) {
+    let remaining = Math.max(1, Number(number) || 1);
+    let result = "";
+    while (remaining > 0) {
+      const remainder = (remaining - 1) % 26;
+      result = String.fromCharCode(65 + remainder) + result;
+      remaining = Math.floor((remaining - 1) / 26);
+    }
+    return result;
+  }
+
+  function a1LastCell(address) {
+    const localAddress = String(address || "")
+      .split("!")
+      .pop()
+      .replace(/\$/g, "");
+    const parts = localAddress.split(":");
+    const matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
+    if (!matched) return null;
+    return {
+      column: a1ColumnNumber(matched[1]),
+      row: Number(matched[2]),
+    };
+  }
+
+  function freezeStateFromAddress(address) {
+    const lastCell = a1LastCell(address);
+    if (!lastCell) {
+      return {
+        locationAddress: null,
+        frozenRows: 0,
+        frozenColumns: 0,
+        topLeftCell: null,
+      };
+    }
+    const frozenRows = lastCell.column >= 16384 ? lastCell.row : (
+      lastCell.row >= 1048576 ? 0 : lastCell.row
+    );
+    const frozenColumns = lastCell.row >= 1048576 ? lastCell.column : (
+      lastCell.column >= 16384 ? 0 : lastCell.column
+    );
+    return {
+      locationAddress: String(address),
+      frozenRows: frozenRows,
+      frozenColumns: frozenColumns,
+      topLeftCell: a1ColumnName(frozenColumns + 1) + String(frozenRows + 1),
+    };
+  }
+
+  function viewChecksFor(toolCalls, executionResult) {
+    const resultItems = Array.isArray(executionResult.results) ? executionResult.results : [];
+    const checks = [];
+    toolCalls.forEach(function (call, resultIndex) {
+      const args = (call && (call.arguments || call.args)) || {};
+      const resultItem = resultItems[resultIndex] || {};
+      if (call && call.name === "sheets_manage_freeze_panes") {
+        const action = String(args.action || "");
+        let expected;
+        if (action === "unfreeze") {
+          expected = { frozenRows: 0, frozenColumns: 0 };
+        } else if (action === "freezeRows") {
+          expected = { frozenRows: Number(args.count), frozenColumns: 0 };
+        } else if (action === "freezeColumns") {
+          expected = { frozenRows: 0, frozenColumns: Number(args.count) };
+        } else {
+          const lastCell = a1LastCell(args.range);
+          if (!lastCell) return;
+          expected = {
+            frozenRows: lastCell.row,
+            frozenColumns: lastCell.column,
+          };
+        }
+        checks.push({
+          kind: "freeze",
+          name: call.name,
+          resultIndex: resultIndex,
+          sheet: resultItem.sheet || args.sheet || "",
+          expected: expected,
+        });
+      } else if (
+        call
+        && call.name === "sheets_manage_page_layout"
+        && (
+          Object.prototype.hasOwnProperty.call(args, "displayGridlines")
+          || Object.prototype.hasOwnProperty.call(args, "displayHeadings")
+        )
+      ) {
+        const expected = {};
+        if (Object.prototype.hasOwnProperty.call(args, "displayGridlines")) {
+          expected.displayGridlines = Boolean(args.displayGridlines);
+        }
+        if (Object.prototype.hasOwnProperty.call(args, "displayHeadings")) {
+          expected.displayHeadings = Boolean(args.displayHeadings);
+        }
+        checks.push({
+          kind: "pageLayout",
+          name: call.name,
+          resultIndex: resultIndex,
+          sheet: resultItem.sheet || args.sheet || "",
+          expected: expected,
+        });
+      }
+    });
+    toolCalls.forEach(function (call, resultIndex) {
+      if (
+        !call
+        || (
+          call.name !== "sheets_inspect_freeze_panes"
+          && call.name !== "sheets_inspect_page_layout"
+        )
+      ) {
+        return;
+      }
+      const resultItem = resultItems[resultIndex] || {};
+      const kind = call.name === "sheets_inspect_freeze_panes" ? "freeze" : "pageLayout";
+      const sheetName = resultItem.sheet || "";
+      const priorCheck = checks.slice().reverse().find(function (check) {
+        return check.resultIndex < resultIndex
+          && check.kind === kind
+          && check.sheet === sheetName;
+      });
+      if (!priorCheck) return;
+      checks.push({
+        kind: kind,
+        name: call.name,
+        resultIndex: resultIndex,
+        sheet: sheetName,
+        expected: priorCheck.expected,
+      });
+    });
+    checks.sort(function (left, right) {
+      return left.resultIndex - right.resultIndex;
+    });
+    return checks;
+  }
+
+  function viewStateMatches(check, observed) {
+    if (!observed) return false;
+    return Object.keys(check.expected).every(function (key) {
+      return observed[key] === check.expected[key];
+    });
+  }
+
+  function applyVerifiedViewStates(executionResult, checks, states) {
+    checks.forEach(function (check, index) {
+      const resultItem = executionResult.results[check.resultIndex];
+      const state = states[index];
+      if (check.kind === "freeze") {
+        const existingLocation = resultItem.location && typeof resultItem.location === "object"
+          ? resultItem.location
+          : {};
+        resultItem.location = state.locationAddress
+          ? Object.assign({}, existingLocation, { address: state.locationAddress })
+          : null;
+        resultItem.frozenRows = state.frozenRows;
+        resultItem.frozenColumns = state.frozenColumns;
+        resultItem.topLeftCell = state.topLeftCell;
+      } else {
+        resultItem.displayGridlines = state.displayGridlines;
+        resultItem.displayHeadings = state.displayHeadings;
+      }
+      resultItem.verified = true;
+    });
+    return executionResult;
+  }
+
+  function verificationError(checks, states) {
+    const failedIndex = checks.findIndex(function (check, index) {
+      return !viewStateMatches(check, states[index]);
+    });
+    const failedCheck = checks[Math.max(0, failedIndex)] || {};
+    const error = new Error("ONLYOFFICE 工作表视图状态未在保存前生效");
+    error.code = "SHEETS_VIEW_STATE_NOT_APPLIED";
+    error.details = {
+      phase: "sheets-view-verification",
+      tool: failedCheck.name,
+      toolCallIndex: failedCheck.resultIndex,
+      completedToolCalls: checks.length,
+      partialMutationPossible: true,
+      expected: failedCheck.expected,
+      observed: states[Math.max(0, failedIndex)] || null,
+    };
+    return error;
+  }
+
+  function markSheetViewModified(checks) {
+    return new Promise(function (resolve, reject) {
+      Asc.plugin.callCommand(
+        function () {
+          try {
+            var editor = typeof Asc !== "undefined" ? Asc.editor : null;
+            var markModified = editor && (
+              typeof editor.SetDocumentModified === "function"
+                ? editor.SetDocumentModified
+                : editor.onUpdateDocumentModified
+            );
+            if (typeof markModified === "function") {
+              markModified.call(editor, true);
+              return JSON.stringify({ ok: true });
+            }
+            var activeSheet = typeof Api !== "undefined" && typeof Api.GetActiveSheet === "function"
+              ? Api.GetActiveSheet()
+              : null;
+            var workbook = activeSheet
+              && activeSheet.worksheet
+              && activeSheet.worksheet.workbook;
+            var workbookApi = workbook && workbook.oApi;
+            if (workbookApi && typeof workbookApi.SetDocumentModified === "function") {
+              workbookApi.SetDocumentModified(true);
+              return JSON.stringify({ ok: true });
+            }
+            if (workbook && workbook.handlers && typeof workbook.handlers.trigger === "function") {
+              workbook.handlers.trigger("setDocumentModified", true);
+              return JSON.stringify({ ok: true });
+            }
+            throw new Error("当前 ONLYOFFICE 版本无法标记工作簿视图变更");
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              message: error && error.message ? error.message : String(error),
+            });
+          }
+        },
+        false,
+        true,
+        function (rawResult) {
+          let payload;
+          try {
+            payload = typeof rawResult === "string"
+              ? JSON.parse(rawResult || "{}")
+              : rawResult;
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          if (!payload || !payload.ok) {
+            const error = verificationError(checks, []);
+            error.message = payload && payload.message
+              ? payload.message
+              : "无法标记工作簿视图变更";
+            reject(error);
+            return;
+          }
+          resolve();
+        },
+      );
+    });
+  }
+
+  function verifyViewChanges(toolCalls, executionResult) {
+    const checks = viewChecksFor(toolCalls, executionResult);
+    if (!checks.length) return Promise.resolve(executionResult);
+
+    const timeoutMs = Number(window.AICopilotSheetsViewVerificationTimeoutMs)
+      || VIEW_VERIFY_TIMEOUT_MS;
+    const intervalMs = Number(window.AICopilotSheetsViewVerificationIntervalMs)
+      || VIEW_VERIFY_INTERVAL_MS;
+    const startedAt = Date.now();
+    Asc.scope.copilotSheetViewChecks = checks;
+
+    return new Promise(function (resolve, reject) {
+      function readStates() {
+        Asc.plugin.callCommand(
+          function () {
+            try {
+              var checks = Asc.scope.copilotSheetViewChecks || [];
+
+              function findSheet(name) {
+                if (!name) return Api.GetActiveSheet();
+                var sheets = Api.GetSheets();
+                for (var sheetIndex = 0; sheetIndex < sheets.length; sheetIndex += 1) {
+                  if (String(sheets[sheetIndex].GetName()) === String(name)) {
+                    return sheets[sheetIndex];
+                  }
+                }
+                throw new Error("找不到工作表：" + name);
+              }
+
+              function columnNumber(column) {
+                var number = 0;
+                var normalized = String(column || "").toUpperCase();
+                for (var columnIndex = 0; columnIndex < normalized.length; columnIndex += 1) {
+                  number = number * 26 + normalized.charCodeAt(columnIndex) - 64;
+                }
+                return number;
+              }
+
+              function columnName(number) {
+                var remaining = Math.max(1, Number(number) || 1);
+                var result = "";
+                while (remaining > 0) {
+                  var remainder = (remaining - 1) % 26;
+                  result = String.fromCharCode(65 + remainder) + result;
+                  remaining = Math.floor((remaining - 1) / 26);
+                }
+                return result;
+              }
+
+              function freezeState(sheet) {
+                var panes = sheet.GetFreezePanes();
+                var location = panes && typeof panes.GetLocation === "function"
+                  ? panes.GetLocation()
+                  : null;
+                if (!location) {
+                  return {
+                    locationAddress: null,
+                    frozenRows: 0,
+                    frozenColumns: 0,
+                    topLeftCell: null,
+                  };
+                }
+                var address = location.GetAddress(true, true, "xlA1", false);
+                var localAddress = String(address || "").split("!").pop().replace(/\$/g, "");
+                var parts = localAddress.split(":");
+                var matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
+                if (!matched) throw new Error("无法解析冻结区域：" + address);
+                var lastColumn = columnNumber(matched[1]);
+                var lastRow = Number(matched[2]);
+                var frozenRows = lastColumn >= 16384 ? lastRow : (
+                  lastRow >= 1048576 ? 0 : lastRow
+                );
+                var frozenColumns = lastRow >= 1048576 ? lastColumn : (
+                  lastColumn >= 16384 ? 0 : lastColumn
+                );
+                return {
+                  locationAddress: address,
+                  frozenRows: frozenRows,
+                  frozenColumns: frozenColumns,
+                  topLeftCell: columnName(frozenColumns + 1) + String(frozenRows + 1),
+                };
+              }
+
+              function displayState(sheet) {
+                var model = sheet && sheet.worksheet;
+                var settings = model && typeof model.getSheetViewSettings === "function"
+                  ? model.getSheetViewSettings(true)
+                  : null;
+                if (!settings) throw new Error("当前 ONLYOFFICE 版本无法读取工作表屏幕视图");
+                return {
+                  displayGridlines: settings.showGridLines !== false,
+                  displayHeadings: settings.showRowColHeaders !== false,
+                };
+              }
+
+              var states = checks.map(function (check) {
+                var sheet = findSheet(check.sheet);
+                return check.kind === "freeze" ? freezeState(sheet) : displayState(sheet);
+              });
+              return JSON.stringify({ ok: true, states: states });
+            } catch (error) {
+              return JSON.stringify({
+                ok: false,
+                message: error && error.message ? error.message : String(error),
+              });
+            }
+          },
+          false,
+          true,
+          function (rawResult) {
+            let payload;
+            try {
+              payload = typeof rawResult === "string"
+                ? JSON.parse(rawResult || "{}")
+                : rawResult;
+            } catch (error) {
+              reject(error);
+              return;
+            }
+            if (!payload || !payload.ok) {
+              reject(verificationError(checks, []));
+              return;
+            }
+            const states = Array.isArray(payload.states) ? payload.states : [];
+            if (checks.every(function (check, index) {
+              return viewStateMatches(check, states[index]);
+            })) {
+              markSheetViewModified(checks).then(function () {
+                resolve(applyVerifiedViewStates(executionResult, checks, states));
+              }, reject);
+              return;
+            }
+            if (Date.now() - startedAt >= timeoutMs) {
+              reject(verificationError(checks, states));
+              return;
+            }
+            window.setTimeout(readStates, intervalMs);
+          },
+        );
+      }
+
+      readStates();
+    });
   }
 
   function executeMacroTool(toolCalls) {
     return new Promise(function (resolve, reject) {
+      function rejectBeforeMutation(message, code) {
+        const error = new Error(message);
+        error.code = code || "INVALID_TOOL_ARGUMENTS";
+        error.details = { partialMutationPossible: false };
+        reject(error);
+      }
       if (toolCalls.length !== 1) {
-        reject(new Error("宏工具必须单独调用，不能与普通工作表命令混批"));
+        rejectBeforeMutation("宏工具必须单独调用，不能与普通工作表命令混批");
         return;
       }
       const call = toolCalls[0] || {};
@@ -25,41 +457,52 @@
         params = null;
       } else if (call.name === "sheets_set_macros") {
         if (!args.content || typeof args.content !== "object" || Array.isArray(args.content)) {
-          reject(new Error("sheets_set_macros.content 必须是宏配置对象"));
+          rejectBeforeMutation("sheets_set_macros.content 必须是宏配置对象");
           return;
         }
         method = "SetMacros";
         params = [JSON.stringify(args.content)];
         needsSave = true;
       } else {
-        reject(new Error("未知宏工具：" + call.name));
+        rejectBeforeMutation("未知宏工具：" + call.name);
         return;
       }
       if (!window.Asc || !Asc.plugin || typeof Asc.plugin.executeMethod !== "function") {
-        reject(new Error("当前 ONLYOFFICE 版本不支持宏插件方法"));
+        rejectBeforeMutation(
+          "当前 ONLYOFFICE 版本不支持宏插件方法",
+          "SHEETS_API_UNSUPPORTED"
+        );
         return;
       }
-      Asc.plugin.executeMethod(method, params, function (data) {
-        try {
-          let content = data;
-          if (method === "GetMacros" && typeof data === "string") {
-            try {
-              content = JSON.parse(data);
-            } catch (error) {
-              content = { raw: data };
+      try {
+        Asc.plugin.executeMethod(method, params, function (data) {
+          try {
+            let content = data;
+            if (method === "GetMacros" && typeof data === "string") {
+              try {
+                content = JSON.parse(data);
+              } catch (error) {
+                content = { raw: data };
+              }
             }
+            resolve({
+              ok: true,
+              editorType: "cell",
+              changed: needsSave ? 1 : 0,
+              needsSave: needsSave,
+              results: [{ name: call.name, kind: method === "GetVBAMacros" ? "vba" : "onlyoffice", content: content }],
+            });
+          } catch (error) {
+            if (!error.details || typeof error.details !== "object") error.details = {};
+            error.details.partialMutationPossible = needsSave;
+            reject(error);
           }
-          resolve({
-            ok: true,
-            editorType: "cell",
-            changed: needsSave ? 1 : 0,
-            needsSave: needsSave,
-            results: [{ name: call.name, kind: method === "GetVBAMacros" ? "vba" : "onlyoffice", content: content }],
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
+        });
+      } catch (error) {
+        if (!error.details || typeof error.details !== "object") error.details = {};
+        error.details.partialMutationPossible = needsSave;
+        reject(error);
+      }
     });
   }
 
@@ -67,7 +510,31 @@
     if (toolCalls.some(function (call) {
       return call && (call.name === "sheets_inspect_macros" || call.name === "sheets_set_macros");
     })) {
-      return executeMacroTool(toolCalls);
+      return executeMacroTool(toolCalls).catch(function (error) {
+        const macroIndex = toolCalls.findIndex(function (call) {
+          return call && (
+            call.name === "sheets_inspect_macros"
+            || call.name === "sheets_set_macros"
+          );
+        });
+        const failedIndex = macroIndex >= 0 ? macroIndex : 0;
+        const failedCall = toolCalls[failedIndex] || {};
+        const existingDetails = error
+          && error.details
+          && typeof error.details === "object"
+          ? error.details
+          : {};
+        error.code = error.code || "EXECUTION_FAILED";
+        error.details = {
+          ...existingDetails,
+          phase: existingDetails.phase || "sheets-command",
+          tool: failedCall.name ? String(failedCall.name) : undefined,
+          toolCallIndex: failedIndex,
+          completedToolCalls: 0,
+          partialMutationPossible: Boolean(existingDetails.partialMutationPossible),
+        };
+        throw error;
+      });
     }
     return new Promise(function (resolve, reject) {
       Asc.scope.copilotSheetCalls = toolCalls;
@@ -159,6 +626,151 @@
               return aliases[type] || type;
             }
 
+            function enumKey(value) {
+              return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+            }
+
+            function normalizeEnum(value, fallback, aliases, canonicalValues, label) {
+              var candidate = value === undefined || value === null || value === "" ? fallback : value;
+              var lookup = {};
+              var canonical = Array.isArray(canonicalValues) ? canonicalValues : [];
+              for (var canonicalIndex = 0; canonicalIndex < canonical.length; canonicalIndex += 1) {
+                lookup[enumKey(canonical[canonicalIndex])] = canonical[canonicalIndex];
+              }
+              var aliasNames = Object.keys(aliases || {});
+              for (var aliasIndex = 0; aliasIndex < aliasNames.length; aliasIndex += 1) {
+                lookup[enumKey(aliasNames[aliasIndex])] = aliases[aliasNames[aliasIndex]];
+              }
+              var normalized = lookup[enumKey(candidate)];
+              if (!normalized) {
+                throw new Error(
+                  (label || "枚举值")
+                  + " 不支持："
+                  + candidate
+                  + "；可用值："
+                  + canonical.concat(aliasNames).join("、")
+                );
+              }
+              return normalized;
+            }
+
+            function normalizeComparisonOperator(value, fallback, label) {
+              return normalizeEnum(value, fallback || "xlGreater", {
+                between: "xlBetween",
+                notBetween: "xlNotBetween",
+                equal: "xlEqual",
+                notEqual: "xlNotEqual",
+                greaterThan: "xlGreater",
+                lessThan: "xlLess",
+                greaterThanOrEqual: "xlGreaterEqual",
+                lessThanOrEqual: "xlLessEqual",
+              }, [
+                "xlBetween",
+                "xlNotBetween",
+                "xlEqual",
+                "xlNotEqual",
+                "xlGreater",
+                "xlLess",
+                "xlGreaterEqual",
+                "xlLessEqual",
+              ], label || "比较运算符");
+            }
+
+            function normalizeFilterOperator(value) {
+              if (value === undefined || value === null || value === "") return undefined;
+              return normalizeEnum(value, undefined, {
+                and: "xlAnd",
+                or: "xlOr",
+                filterValues: "xlFilterValues",
+                values: "xlFilterValues",
+                top10Items: "xlTop10Items",
+                bottom10Items: "xlBottom10Items",
+                top10Percent: "xlTop10Percent",
+                bottom10Percent: "xlBottom10Percent",
+                filterCellColor: "xlFilterCellColor",
+                filterFontColor: "xlFilterFontColor",
+                filterIcon: "xlFilterIcon",
+                dynamic: "xlFilterDynamic",
+              }, [
+                "xlAnd",
+                "xlOr",
+                "xlFilterValues",
+                "xlTop10Items",
+                "xlBottom10Items",
+                "xlTop10Percent",
+                "xlBottom10Percent",
+                "xlFilterCellColor",
+                "xlFilterFontColor",
+                "xlFilterIcon",
+                "xlFilterDynamic",
+              ], "筛选运算符");
+            }
+
+            function normalizeValidationType(value) {
+              return normalizeEnum(value, "xlValidateList", {
+                inputOnly: "xlValidateInputOnly",
+                wholeNumber: "xlValidateWholeNumber",
+                decimal: "xlValidateDecimal",
+                list: "xlValidateList",
+                date: "xlValidateDate",
+                time: "xlValidateTime",
+                textLength: "xlValidateTextLength",
+                custom: "xlValidateCustom",
+              }, [
+                "xlValidateInputOnly",
+                "xlValidateWholeNumber",
+                "xlValidateDecimal",
+                "xlValidateList",
+                "xlValidateDate",
+                "xlValidateTime",
+                "xlValidateTextLength",
+                "xlValidateCustom",
+              ], "数据验证类型");
+            }
+
+            function normalizeValidationAlertStyle(value) {
+              return normalizeEnum(value, "xlValidAlertStop", {
+                stop: "xlValidAlertStop",
+                warning: "xlValidAlertWarning",
+                information: "xlValidAlertInformation",
+                info: "xlValidAlertInformation",
+              }, [
+                "xlValidAlertStop",
+                "xlValidAlertWarning",
+                "xlValidAlertInformation",
+              ], "数据验证警告样式");
+            }
+
+            function normalizeSortHeader(value) {
+              if (value === true) return "xlYes";
+              if (value === false) return "xlNo";
+              return normalizeEnum(value, "xlGuess", {
+                yes: "xlYes",
+                no: "xlNo",
+                guess: "xlGuess",
+              }, ["xlYes", "xlNo", "xlGuess"], "排序表头");
+            }
+
+            function normalizeSortOrientation(value) {
+              return normalizeEnum(value, "xlSortColumns", {
+                rows: "xlSortRows",
+                columns: "xlSortColumns",
+              }, ["xlSortRows", "xlSortColumns"], "排序方向");
+            }
+
+            function normalizePageOrientation(value) {
+              return normalizeEnum(value, "xlPortrait", {
+                portrait: "xlPortrait",
+                landscape: "xlLandscape",
+              }, ["xlPortrait", "xlLandscape"], "页面方向");
+            }
+
+            function normalizeFormulaInput(value) {
+              if (Array.isArray(value)) return value.map(normalizeFormulaInput);
+              var formulaText = String(value);
+              return formulaText.charAt(0) === "=" ? formulaText : "=" + formulaText;
+            }
+
             function mmToEmu(value) {
               return Math.round(asFinite(value, 0) * EMU_PER_MM);
             }
@@ -185,6 +797,147 @@
               return value[method];
             }
 
+            function mutationCall(value, method, feature) {
+              var result = requireMethod(value, method, feature).apply(
+                value,
+                Array.prototype.slice.call(arguments, 3)
+              );
+              if (result === false) {
+                throw new Error("ONLYOFFICE 拒绝" + (feature || method));
+              }
+              return result;
+            }
+
+            function sheetError(code, message, details) {
+              var error = new Error(message);
+              error.code = code || "EXECUTION_FAILED";
+              error.details = details || {};
+              return error;
+            }
+
+            function objectMutationCall(value, method, feature) {
+              var result = mutationCall.apply(null, arguments);
+              if (result === null || result === undefined) {
+                throw sheetError(
+                  "EXECUTION_FAILED",
+                  "ONLYOFFICE 未创建" + (feature || method)
+                );
+              }
+              return result;
+            }
+
+            function isSheetCellValue(value) {
+              return value === null
+                || typeof value === "string"
+                || typeof value === "boolean"
+                || (typeof value === "number" && isFinite(value));
+            }
+
+            function isFormulaValue(value) {
+              return typeof value === "string";
+            }
+
+            function describeShape(shape) {
+              return shape.rows + "x" + shape.columns;
+            }
+
+            function targetRangeShape(range, label) {
+              var rows = safeCall(range, "GetRowsCount");
+              var columns = safeCall(range, "GetColumnsCount");
+              if (
+                typeof rows !== "number"
+                || typeof columns !== "number"
+                || !isFinite(rows)
+                || !isFinite(columns)
+                || rows < 1
+                || columns < 1
+              ) {
+                throw sheetError(
+                  "SHEETS_API_UNSUPPORTED",
+                  "当前 ONLYOFFICE 版本无法读取" + label + "目标区域尺寸",
+                  { partialMutationPossible: false }
+                );
+              }
+              return {
+                rows: Math.floor(rows),
+                columns: Math.floor(columns),
+              };
+            }
+
+            function inputShape(value, label, cellValidator) {
+              if (!Array.isArray(value)) {
+                if (!cellValidator(value)) {
+                  throw sheetError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    label + " 标量类型不受支持",
+                    { partialMutationPossible: false }
+                  );
+                }
+                return { rows: 1, columns: 1, scalar: true };
+              }
+              if (!value.length) {
+                throw sheetError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  label + " 矩阵不能为空",
+                  { partialMutationPossible: false }
+                );
+              }
+              var columns = null;
+              for (var rowIndex = 0; rowIndex < value.length; rowIndex += 1) {
+                var row = value[rowIndex];
+                if (!Array.isArray(row) || !row.length) {
+                  throw sheetError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    label + " 必须是非空二维矩阵",
+                    { partialMutationPossible: false }
+                  );
+                }
+                if (columns === null) columns = row.length;
+                if (row.length !== columns) {
+                  throw sheetError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    label + " 矩阵每一行的列数必须一致",
+                    { partialMutationPossible: false }
+                  );
+                }
+                for (var columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+                  if (!cellValidator(row[columnIndex])) {
+                    throw sheetError(
+                      "INVALID_TOOL_ARGUMENTS",
+                      label + " 矩阵包含不受支持的单元格类型",
+                      { partialMutationPossible: false }
+                    );
+                  }
+                }
+              }
+              return {
+                rows: value.length,
+                columns: columns,
+                scalar: false,
+              };
+            }
+
+            function validateSizedInput(range, value, label, cellValidator) {
+              var target = targetRangeShape(range, label);
+              var input = inputShape(value, label, cellValidator);
+              if (input.rows !== target.rows || input.columns !== target.columns) {
+                throw sheetError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  label
+                    + " 尺寸 "
+                    + describeShape(input)
+                    + " 与目标区域 "
+                    + describeShape(target)
+                    + " 不一致",
+                  { partialMutationPossible: false }
+                );
+              }
+              return {
+                input: { rows: input.rows, columns: input.columns },
+                target: target,
+              };
+            }
+
             function arrayValue(value) {
               if (Array.isArray(value)) return value;
               if (!value) return [];
@@ -201,37 +954,6 @@
             function isoValue(value) {
               if (value instanceof Date) return value.toISOString();
               return value;
-            }
-
-            function normalizeCellInput(value) {
-              if (Array.isArray(value)) return value.map(normalizeCellInput);
-              if (!isObject(value) || !value.type || !hasOwn(value, "value")) return value;
-              var taggedType = String(value.type);
-              if (taggedType === "date" || taggedType === "datetime") {
-                var taggedDate = new Date(value.value);
-                if (isNaN(taggedDate.getTime())) throw new Error("无效日期值：" + value.value);
-                return taggedDate;
-              }
-              if (taggedType === "time") {
-                var timeMatch = /^(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?$/.exec(String(value.value));
-                if (!timeMatch) throw new Error("time 值必须是 HH:MM 或 HH:MM:SS");
-                var timeSeconds = Number(timeMatch[1]) * 3600 + Number(timeMatch[2]) * 60 + Number(timeMatch[3] || 0);
-                if (timeSeconds < 0 || timeSeconds >= 86400) throw new Error("time 值超出一天范围");
-                return timeSeconds / 86400;
-              }
-              if (taggedType === "percent") {
-                var percentText = String(value.value);
-                var percentNumber = Number(percentText.replace(/%$/, ""));
-                if (!isFinite(percentNumber)) throw new Error("无效百分比值：" + value.value);
-                return /%$/.test(percentText) ? percentNumber / 100 : percentNumber;
-              }
-              if (taggedType === "boolean") {
-                if (value.value === true || value.value === false) return value.value;
-                if (String(value.value).toLowerCase() === "true") return true;
-                if (String(value.value).toLowerCase() === "false") return false;
-                throw new Error("无效布尔值：" + value.value);
-              }
-              throw new Error("不支持的单元格值类型：" + taggedType);
             }
 
             function serialized(value) {
@@ -264,9 +986,11 @@
               var red = parseInt(hex.slice(0, 2), 16);
               var green = parseInt(hex.slice(2, 4), 16);
               var blue = parseInt(hex.slice(4, 6), 16);
-              if (typeof Api.CreateRGBColor === "function") return Api.CreateRGBColor(red, green, blue);
               if (typeof Api.CreateColorFromRGB === "function") return Api.CreateColorFromRGB(red, green, blue);
-              return Api.RGB(red, green, blue);
+              if (typeof Api.Color === "function") return Api.Color(red, green, blue);
+              if (typeof Api.RGB === "function") return Api.RGB(red, green, blue);
+              if (typeof Api.CreateRGBColor === "function") return Api.CreateRGBColor(red, green, blue);
+              throw new Error("当前 ONLYOFFICE 版本无法创建单元格颜色");
             }
 
             function createGradientStops(stops) {
@@ -354,7 +1078,112 @@
               return source;
             }
 
-            function describeRange(range, includeValues) {
+            function describeColor(value) {
+              if (value === null || value === undefined) return null;
+              var json = serialized(value);
+              if (json !== null) return json;
+              var rgb = safeCall(value, "GetRGB");
+              if (rgb !== null && rgb !== undefined) {
+                var rgbJson = serialized(rgb);
+                return rgbJson !== null ? rgbJson : rgb;
+              }
+              if (
+                typeof value.r === "number"
+                && typeof value.g === "number"
+                && typeof value.b === "number"
+              ) {
+                return { r: value.r, g: value.g, b: value.b };
+              }
+              return String(value);
+            }
+
+            function describeFormat(range) {
+              var font = safeCall(range, "GetFont");
+              return {
+                fontName: safeCall(range, "GetFontName") || safeCall(font, "GetName"),
+                fontSize: safeCall(range, "GetFontSize") || safeCall(font, "GetSize"),
+                bold: safeCall(range, "GetBold"),
+                italic: safeCall(range, "GetItalic"),
+                underline: safeCall(range, "GetUnderline"),
+                strikeout: safeCall(range, "GetStrikeout"),
+                fontColor: describeColor(safeCall(range, "GetFontColor") || safeCall(font, "GetColor")),
+                fillColor: describeColor(safeCall(range, "GetFillColor")),
+                horizontalAlign: safeCall(range, "GetAlignHorizontal"),
+                verticalAlign: safeCall(range, "GetAlignVertical"),
+                numberFormat: safeCall(range, "GetNumberFormat"),
+                wrap: safeCall(range, "GetWrapText"),
+                orientation: safeCall(range, "GetOrientation"),
+                rowHeightPt: safeCall(range, "GetRowHeight"),
+                columnWidthChars: safeCall(range, "GetColumnWidth"),
+              };
+            }
+
+            function describeCondition(condition, index) {
+              if (!condition) return null;
+              var conditionFont = safeCall(condition, "GetFont");
+              return {
+                index: index,
+                type: safeCall(condition, "GetType"),
+                operator: safeCall(condition, "GetOperator"),
+                formula1: safeCall(condition, "GetFormula1"),
+                formula2: safeCall(condition, "GetFormula2"),
+                fillColor: describeColor(safeCall(condition, "GetFillColor")),
+                fontColor: describeColor(safeCall(conditionFont, "GetColor")),
+                bold: safeCall(conditionFont, "GetBold"),
+              };
+            }
+
+            function describeConditions(range) {
+              var conditions = safeCall(range, "GetFormatConditions");
+              if (!conditions) return { count: 0, rules: [] };
+              var count = safeCall(conditions, "GetCount");
+              var rules = [];
+              if (typeof conditions.GetItem === "function" && typeof count === "number") {
+                for (var conditionIndex = 0; conditionIndex < count; conditionIndex += 1) {
+                  rules.push(describeCondition(safeCall(conditions, "GetItem", conditionIndex + 1), conditionIndex));
+                }
+              } else {
+                var conditionItems = arrayValue(conditions);
+                for (var itemIndex = 0; itemIndex < conditionItems.length; itemIndex += 1) {
+                  rules.push(describeCondition(conditionItems[itemIndex], itemIndex));
+                }
+              }
+              return { count: typeof count === "number" ? count : rules.length, rules: rules };
+            }
+
+            function describeValidation(validation) {
+              if (!validation) return null;
+              var rule = {
+                type: safeCall(validation, "GetType"),
+                alertStyle: safeCall(validation, "GetAlertStyle"),
+                operator: safeCall(validation, "GetOperator"),
+                formula1: safeCall(validation, "GetFormula1"),
+                formula2: safeCall(validation, "GetFormula2"),
+                ignoreBlank: safeCall(validation, "GetIgnoreBlank"),
+                inCellDropdown: safeCall(validation, "GetInCellDropdown"),
+                showInput: safeCall(validation, "GetShowInput"),
+                showError: safeCall(validation, "GetShowError"),
+                inputTitle: safeCall(validation, "GetInputTitle"),
+                inputMessage: safeCall(validation, "GetInputMessage"),
+                errorTitle: safeCall(validation, "GetErrorTitle"),
+                errorMessage: safeCall(validation, "GetErrorMessage"),
+              };
+              var identifyingValues = [
+                rule.type,
+                rule.formula1,
+                rule.formula2,
+                rule.inputTitle,
+                rule.inputMessage,
+                rule.errorTitle,
+                rule.errorMessage,
+              ];
+              var hasRule = identifyingValues.some(function (value) {
+                return value !== null && value !== undefined && value !== "";
+              });
+              return hasRule ? rule : null;
+            }
+
+            function describeRange(range, includeValues, includeFormat, includeConditionalFormats, includeValidation) {
               if (!range) return null;
               return {
                 address: safeCall(range, "GetAddress", true, true, "xlA1", false),
@@ -371,6 +1200,98 @@
                 orientation: safeCall(range, "GetOrientation"),
                 rows: safeCall(range, "GetRowsCount"),
                 columns: safeCall(range, "GetColumnsCount"),
+                format: includeFormat ? describeFormat(range) : undefined,
+                conditionalFormats: includeConditionalFormats ? describeConditions(range) : undefined,
+                validation: includeValidation
+                  ? describeValidation(safeCall(range, "GetValidation"))
+                  : undefined,
+              };
+            }
+
+            function sheetViewSettings(sheet, partialMutationPossible) {
+              var model = sheet && sheet.worksheet;
+              var settings = model && typeof model.getSheetViewSettings === "function"
+                ? model.getSheetViewSettings(true)
+                : null;
+              if (!settings) {
+                throw sheetError(
+                  "SHEETS_API_UNSUPPORTED",
+                  "当前 ONLYOFFICE 版本无法读取工作表屏幕视图",
+                  { partialMutationPossible: Boolean(partialMutationPossible) }
+                );
+              }
+              return settings;
+            }
+
+            function describeDisplayState(sheet, partialMutationPossible) {
+              var settings = sheetViewSettings(sheet, partialMutationPossible);
+              return {
+                displayGridlines: settings.showGridLines !== false,
+                displayHeadings: settings.showRowColHeaders !== false,
+              };
+            }
+
+            function freezeColumnNumber(column) {
+              var number = 0;
+              var normalized = String(column || "").toUpperCase();
+              for (var columnIndex = 0; columnIndex < normalized.length; columnIndex += 1) {
+                number = number * 26 + normalized.charCodeAt(columnIndex) - 64;
+              }
+              return number;
+            }
+
+            function freezeColumnName(number) {
+              var remaining = Math.max(1, Number(number) || 1);
+              var result = "";
+              while (remaining > 0) {
+                var remainder = (remaining - 1) % 26;
+                result = String.fromCharCode(65 + remainder) + result;
+                remaining = Math.floor((remaining - 1) / 26);
+              }
+              return result;
+            }
+
+            function describeFreezeState(freezePanes) {
+              var frozenRange = safeCall(freezePanes, "GetLocation");
+              if (!frozenRange) {
+                return {
+                  location: null,
+                  frozenRows: 0,
+                  frozenColumns: 0,
+                  topLeftCell: null,
+                };
+              }
+              var location = {
+                address: safeCall(frozenRange, "GetAddress", true, true, "xlA1", false),
+                rows: safeCall(frozenRange, "GetRowsCount"),
+                columns: safeCall(frozenRange, "GetColumnsCount"),
+              };
+              var localAddress = String(location.address || "")
+                .split("!")
+                .pop()
+                .replace(/\$/g, "");
+              var parts = localAddress.split(":");
+              var matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
+              if (!matched) {
+                throw sheetError(
+                  "SHEETS_API_UNSUPPORTED",
+                  "无法解析 ONLYOFFICE 返回的冻结区域",
+                  { location: location.address, partialMutationPossible: false }
+                );
+              }
+              var lastColumn = freezeColumnNumber(matched[1]);
+              var lastRow = Number(matched[2]);
+              var frozenRows = lastColumn >= 16384 ? lastRow : (
+                lastRow >= 1048576 ? 0 : lastRow
+              );
+              var frozenColumns = lastRow >= 1048576 ? lastColumn : (
+                lastColumn >= 16384 ? 0 : lastColumn
+              );
+              return {
+                location: location,
+                frozenRows: frozenRows,
+                frozenColumns: frozenColumns,
+                topLeftCell: freezeColumnName(frozenColumns + 1) + String(frozenRows + 1),
               };
             }
 
@@ -441,6 +1362,55 @@
                 || args.showAutoFilterDropDown !== undefined
                 || args.summary !== undefined
                 || args.alternativeText !== undefined;
+            }
+
+            function structuredTableCreateFields(args) {
+              return [
+                "sourceType",
+                "name",
+                "style",
+                "showTotals",
+                "showHeaders",
+                "rowStripes",
+                "columnStripes",
+                "firstColumn",
+                "lastColumn",
+                "showAutoFilter",
+                "showAutoFilterDropDown",
+                "summary",
+                "alternativeText",
+              ].filter(function (name) {
+                return hasOwn(args, name);
+              });
+            }
+
+            function unexpectedArgumentFields(args, allowedFields) {
+              return Object.keys(args).filter(function (name) {
+                return allowedFields.indexOf(name) === -1;
+              });
+            }
+
+            function isStructuredTableObject(value) {
+              return Boolean(
+                value
+                && typeof value === "object"
+                && typeof value.GetRange === "function"
+              );
+            }
+
+            function formatBasicTable(sheet, reference) {
+              var formatted = requireMethod(
+                sheet,
+                "FormatAsTable",
+                "基础格式表格"
+              ).call(sheet, String(reference));
+              if (formatted !== true) {
+                throw sheetError(
+                  "EXECUTION_FAILED",
+                  "ONLYOFFICE 拒绝创建基础格式表格"
+                );
+              }
+              return true;
             }
 
             function applyTableSettings(table, args, createMode) {
@@ -851,7 +1821,13 @@
                   results.push({
                     name: call.name,
                     sheet: inspectRangeSheet.GetName(),
-                    range: describeRange(inspectedRange, args.includeValues !== false),
+                    range: describeRange(
+                      inspectedRange,
+                      args.includeValues !== false,
+                      args.includeFormat === true,
+                      args.includeConditionalFormats === true,
+                      args.includeValidation === true
+                    ),
                   });
                   break;
                 }
@@ -862,9 +1838,24 @@
                   var valuesSheet = getSheet(args.sheet);
                   var range = getRange(valuesSheet, args.range);
                   if (!range) throw new Error("无效单元格区域：" + args.range);
-                  var accepted = range.SetValue(normalizeCellInput(args.values));
+                  var valueShapes = validateSizedInput(
+                    range,
+                    args.values,
+                    "values",
+                    isSheetCellValue
+                  );
+                  var accepted = range.SetValue(args.values);
+                  if (accepted === false) throw new Error("ONLYOFFICE 拒绝写入单元格值");
                   changed += 1;
-                  results.push({ name: call.name, sheet: valuesSheet.GetName(), range: String(args.range), accepted: Boolean(accepted) });
+                  results.push({
+                    name: call.name,
+                    sheet: valuesSheet.GetName(),
+                    range: String(args.range),
+                    accepted: accepted !== false,
+                    inputShape: valueShapes.input,
+                    targetShape: valueShapes.target,
+                    readback: safeCall(range, "GetValue"),
+                  });
                   break;
                 }
 
@@ -875,7 +1866,7 @@
                   if (!arrayFormulaRange) throw new Error("无效单元格区域：" + args.range);
                   var arrayFormula = String(args.formula);
                   if (arrayFormula.charAt(0) !== "=") arrayFormula = "=" + arrayFormula;
-                  requireMethod(arrayFormulaRange, "SetFormulaArray", "数组公式").call(arrayFormulaRange, arrayFormula);
+                  mutationCall(arrayFormulaRange, "SetFormulaArray", "设置数组公式", arrayFormula);
                   changed += 1;
                   results.push({
                     name: call.name,
@@ -889,15 +1880,31 @@
                 case "sheets_set_formula": {
                   if (!args.range || args.formula === undefined) throw new Error("sheets_set_formula 需要 range 和 formula");
                   var formulaSheet = getSheet(args.sheet);
-                  var formula = String(args.formula);
-                  if (formula.charAt(0) !== "=") formula = "=" + formula;
                   var formulaRange = getRange(formulaSheet, args.range);
                   if (!formulaRange) throw new Error("无效单元格区域：" + args.range);
+                  var formulaShapes = validateSizedInput(
+                    formulaRange,
+                    args.formula,
+                    "formula",
+                    isFormulaValue
+                  );
+                  var formula = normalizeFormulaInput(args.formula);
                   var formulaAccepted = typeof formulaRange.SetFormula === "function"
                     ? formulaRange.SetFormula(formula)
                     : formulaRange.SetValue(formula);
+                  if (formulaAccepted === false) throw new Error("ONLYOFFICE 拒绝写入公式");
+                  var formulaReadback = safeCall(formulaRange, "GetFormula");
                   changed += 1;
-                  results.push({ name: call.name, sheet: formulaSheet.GetName(), range: String(args.range), accepted: Boolean(formulaAccepted) });
+                  results.push({
+                    name: call.name,
+                    sheet: formulaSheet.GetName(),
+                    range: String(args.range),
+                    accepted: formulaAccepted !== false,
+                    inputShape: formulaShapes.input,
+                    targetShape: formulaShapes.target,
+                    formula: formulaReadback,
+                    readback: formulaReadback,
+                  });
                   break;
                 }
 
@@ -917,29 +1924,54 @@
                   var formatSheet = getSheet(args.sheet);
                   var formatRange = getRange(formatSheet, args.range);
                   if (!formatRange) throw new Error("无效单元格区域：" + args.range);
-                  if (args.fontSize !== undefined) formatRange.SetFontSize(Math.max(1, Number(args.fontSize)));
-                  if (args.fontName) formatRange.SetFontName(String(args.fontName));
-                  if (args.bold !== undefined) formatRange.SetBold(Boolean(args.bold));
-                  if (args.italic !== undefined) formatRange.SetItalic(Boolean(args.italic));
-                  if (args.underline !== undefined) formatRange.SetUnderline(Boolean(args.underline));
-                  if (args.strikeout !== undefined) requireMethod(formatRange, "SetStrikeout", "删除线").call(formatRange, Boolean(args.strikeout));
-                  if (args.fontColor) formatRange.SetFontColor(color(args.fontColor));
-                  if (args.fillColor) formatRange.SetFillColor(color(args.fillColor));
-                  if (args.horizontalAlign) formatRange.SetAlignHorizontal(String(args.horizontalAlign));
-                  if (args.verticalAlign) formatRange.SetAlignVertical(String(args.verticalAlign));
-                  if (args.numberFormat) formatRange.SetNumberFormat(String(args.numberFormat));
-                  if (args.wrap !== undefined) formatRange.SetWrap(Boolean(args.wrap));
-                  if (args.orientation !== undefined) requireMethod(formatRange, "SetOrientation", "文本旋转").call(formatRange, args.orientation);
                   var columnWidthChars = unitAlias(args, "columnWidthChars", "columnWidth");
                   var rowHeightPt = unitAlias(args, "rowHeightPt", "rowHeight");
-                  if (columnWidthChars !== undefined) formatRange.SetColumnWidth(Number(columnWidthChars));
-                  if (rowHeightPt !== undefined) formatRange.SetRowHeight(Number(rowHeightPt));
+                  var formatFields = [
+                    "fontSize",
+                    "fontName",
+                    "bold",
+                    "italic",
+                    "underline",
+                    "strikeout",
+                    "fontColor",
+                    "fillColor",
+                    "horizontalAlign",
+                    "verticalAlign",
+                    "numberFormat",
+                    "wrap",
+                    "orientation",
+                  ];
+                  var hasRequestedFormat = formatFields.some(function (field) {
+                    return hasOwn(args, field);
+                  }) || columnWidthChars !== undefined
+                    || rowHeightPt !== undefined
+                    || (Array.isArray(args.borders) && args.borders.length > 0);
+                  if (!hasRequestedFormat) {
+                    throw new Error("sheets_format_range 至少需要一个格式属性");
+                  }
+                  if (args.fontSize !== undefined) mutationCall(formatRange, "SetFontSize", "设置字号", Math.max(1, Number(args.fontSize)));
+                  if (args.fontName) mutationCall(formatRange, "SetFontName", "设置字体", String(args.fontName));
+                  if (args.bold !== undefined) mutationCall(formatRange, "SetBold", "设置粗体", Boolean(args.bold));
+                  if (args.italic !== undefined) mutationCall(formatRange, "SetItalic", "设置斜体", Boolean(args.italic));
+                  if (args.underline !== undefined) mutationCall(formatRange, "SetUnderline", "设置下划线", Boolean(args.underline));
+                  if (args.strikeout !== undefined) mutationCall(formatRange, "SetStrikeout", "设置删除线", Boolean(args.strikeout));
+                  if (args.fontColor) mutationCall(formatRange, "SetFontColor", "设置字体颜色", color(args.fontColor));
+                  if (args.fillColor) mutationCall(formatRange, "SetFillColor", "设置单元格填充", color(args.fillColor));
+                  if (args.horizontalAlign) mutationCall(formatRange, "SetAlignHorizontal", "设置水平对齐", String(args.horizontalAlign));
+                  if (args.verticalAlign) mutationCall(formatRange, "SetAlignVertical", "设置垂直对齐", String(args.verticalAlign));
+                  if (args.numberFormat) mutationCall(formatRange, "SetNumberFormat", "设置数字格式", String(args.numberFormat));
+                  if (args.wrap !== undefined) mutationCall(formatRange, "SetWrap", "设置自动换行", Boolean(args.wrap));
+                  if (args.orientation !== undefined) mutationCall(formatRange, "SetOrientation", "设置文本旋转", args.orientation);
+                  if (columnWidthChars !== undefined) mutationCall(formatRange, "SetColumnWidth", "设置列宽", Number(columnWidthChars));
+                  if (rowHeightPt !== undefined) mutationCall(formatRange, "SetRowHeight", "设置行高", Number(rowHeightPt));
                   if (Array.isArray(args.borders)) {
                     for (var borderIndex = 0; borderIndex < args.borders.length; borderIndex += 1) {
                       var border = args.borders[borderIndex] || {};
                       if (!border.side || !border.style || !border.color) throw new Error("每个边框需要 side、style 和 color");
-                      requireMethod(formatRange, "SetBorders", "单元格边框").call(
+                      mutationCall(
                         formatRange,
+                        "SetBorders",
+                        "设置单元格边框",
                         String(border.side),
                         String(border.style),
                         color(border.color)
@@ -947,7 +1979,29 @@
                     }
                   }
                   changed += 1;
-                  results.push({ name: call.name, sheet: formatSheet.GetName(), range: String(args.range) });
+                  results.push({
+                    name: call.name,
+                    sheet: formatSheet.GetName(),
+                    range: String(args.range),
+                    requestedFormat: {
+                      fontSize: args.fontSize,
+                      fontName: args.fontName,
+                      bold: args.bold,
+                      italic: args.italic,
+                      underline: args.underline,
+                      strikeout: args.strikeout,
+                      fontColor: args.fontColor,
+                      fillColor: args.fillColor,
+                      horizontalAlign: args.horizontalAlign,
+                      verticalAlign: args.verticalAlign,
+                      numberFormat: args.numberFormat,
+                      wrap: args.wrap,
+                      orientation: args.orientation,
+                      columnWidthChars: columnWidthChars,
+                      rowHeightPt: rowHeightPt,
+                    },
+                    readback: describeFormat(formatRange),
+                  });
                   break;
                 }
 
@@ -1177,9 +2231,9 @@
                     sortArguments.push(sortKey ? String(sortKey.range) : undefined);
                     sortArguments.push(sortKey ? String(sortKey.order || "xlAscending") : undefined);
                   }
-                  sortArguments.push(String(args.header || "xlGuess"));
-                  sortArguments.push(String(args.orientation || "xlSortColumns"));
-                  requireMethod(sortRange, "SetSort", "排序").apply(sortRange, sortArguments);
+                  sortArguments.push(normalizeSortHeader(args.header));
+                  sortArguments.push(normalizeSortOrientation(args.orientation));
+                  mutationCall.apply(null, [sortRange, "SetSort", "排序"].concat(sortArguments));
                   changed += 1;
                   results.push({ name: call.name, sheet: sortSheet.GetName(), range: String(args.range), keys: args.keys });
                   break;
@@ -1192,11 +2246,13 @@
                   if (filterAction === "set") {
                     if (!args.range) throw new Error("set 需要 range");
                     var filterRange = getRange(filterSheet, args.range);
-                    requireMethod(filterRange, "SetAutoFilter", "自动筛选").call(
+                    mutationCall(
                       filterRange,
+                      "SetAutoFilter",
+                      "设置自动筛选",
                       hasOwn(args, "field") ? Number(args.field) : null,
                       args.criteria1,
-                      args.operator ? String(args.operator) : undefined,
+                      normalizeFilterOperator(args.operator),
                       args.criteria2,
                       hasOwn(args, "visibleDropDown") ? Boolean(args.visibleDropDown) : undefined
                     );
@@ -1260,23 +2316,109 @@
                   var tableAction = String(args.action);
                   var table;
                   var managedTableIndex = null;
+                  var tableKind = "structured";
+                  var tableDegraded = false;
+                  var tableFormatted = false;
                   if (tableAction === "create") {
                     if (!args.range) throw new Error("create 需要 range");
-                    if (typeof tableSheet.AddListObject === "function") {
-                      table = tableSheet.AddListObject(String(args.sourceType || "xlSrcRange"), String(args.range));
-                      if (!table) throw new Error("创建格式化表格失败");
-                    } else {
-                      if (args.name || hasTableChanges(args)) {
-                        throw new Error("当前 ONLYOFFICE 版本只能创建基础格式化表格，不支持结构化表格属性");
+                    var invalidCreateFields = unexpectedArgumentFields(args, [
+                      "action",
+                      "sheet",
+                      "range",
+                      "tableMode",
+                      "sourceType",
+                      "name",
+                      "style",
+                      "showTotals",
+                      "showHeaders",
+                      "rowStripes",
+                      "columnStripes",
+                      "firstColumn",
+                      "lastColumn",
+                      "showAutoFilter",
+                      "showAutoFilterDropDown",
+                      "summary",
+                      "alternativeText",
+                    ]);
+                    if (invalidCreateFields.length) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "create 不支持字段：" + invalidCreateFields.join("、"),
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    var tableMode = String(args.tableMode || "auto");
+                    if (["auto", "structured", "basic"].indexOf(tableMode) === -1) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "tableMode 必须是 auto、structured 或 basic"
+                      );
+                    }
+                    var structuredFields = structuredTableCreateFields(args);
+                    if (tableMode === "basic" && structuredFields.length) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "基础格式表格不支持结构化属性：" + structuredFields.join("、")
+                      );
+                    }
+                    var structuredFailure = null;
+                    if (tableMode !== "basic") {
+                      if (typeof tableSheet.AddListObject === "function") {
+                        try {
+                          var createdTable = tableSheet.AddListObject(
+                            String(args.sourceType || "xlSrcRange"),
+                            String(args.range)
+                          );
+                          if (isStructuredTableObject(createdTable)) {
+                            table = createdTable;
+                          } else {
+                            structuredFailure = "AddListObject 未返回 ApiListObject";
+                          }
+                        } catch (error) {
+                          structuredFailure = error && error.message
+                            ? error.message
+                            : String(error);
+                        }
+                      } else {
+                        structuredFailure = "AddListObject 不可用";
                       }
-                      table = requireMethod(tableSheet, "FormatAsTable", "Excel 格式化表格").call(tableSheet, String(args.range));
-                      if (table === false) throw new Error("格式化表格失败");
+                    }
+                    if (!table) {
+                      if (tableMode === "structured" || structuredFields.length) {
+                        throw sheetError(
+                          "SHEETS_API_UNSUPPORTED",
+                          "当前 ONLYOFFICE 版本无法创建结构化表格"
+                            + (structuredFailure ? "：" + structuredFailure : ""),
+                          {
+                            requestedTableMode: tableMode,
+                            unsupportedFields: structuredFields,
+                          }
+                        );
+                      }
+                      formatBasicTable(tableSheet, args.range);
+                      tableKind = "basic";
+                      tableDegraded = tableMode === "auto";
+                      tableFormatted = true;
                     }
                     if (table && typeof table === "object") applyTableSettings(table, args, true);
                   } else if (tableAction === "format") {
                     if (!args.range) throw new Error("format 需要 range");
-                    table = requireMethod(tableSheet, "FormatAsTable", "Excel 格式化表格").call(tableSheet, String(args.range));
-                    if (table === false) throw new Error("格式化表格失败");
+                    var formatFields = unexpectedArgumentFields(args, [
+                      "action",
+                      "sheet",
+                      "range",
+                    ]);
+                    if (formatFields.length) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "action:format 只支持 sheet 和 range；不支持："
+                          + formatFields.join("、")
+                      );
+                    }
+                    formatBasicTable(tableSheet, args.range);
+                    table = null;
+                    tableKind = "basic";
+                    tableFormatted = true;
                   } else if (
                     tableAction === "update"
                     || tableAction === "resize"
@@ -1305,17 +2447,17 @@
                     name: call.name,
                     action: tableAction,
                     sheet: tableSheet.GetName(),
-                    table: tableAction === "delete" || tableAction === "unlist"
+                    tableKind: tableKind,
+                    degraded: tableDegraded,
+                    formatted: tableFormatted || undefined,
+                    range: tableKind === "basic"
+                      ? describeRange(getRange(tableSheet, args.range), false)
+                      : undefined,
+                    table: tableAction === "delete"
+                      || tableAction === "unlist"
+                      || tableKind === "basic"
                       ? null
-                      : (
-                        table && typeof table === "object"
-                          ? describeTable(table, managedTableIndex)
-                          : {
-                            name: args.name || null,
-                            range: describeRange(getRange(tableSheet, args.range), false),
-                            style: args.style || null,
-                          }
-                      ),
+                      : describeTable(table, managedTableIndex),
                   });
                   break;
                 }
@@ -1327,43 +2469,80 @@
                   var conditions = requireMethod(conditionalRange, "GetFormatConditions", "条件格式").call(conditionalRange);
                   var conditionalAction = String(args.action);
                   var condition = null;
+                  var conditionExternalIndex = null;
+                  var conditionCountBefore = safeCall(conditions, "GetCount");
                   if (conditionalAction === "deleteAll") {
-                    requireMethod(conditions, "Delete", "删除条件格式").call(conditions);
+                    mutationCall(conditions, "Delete", "删除条件格式");
+                    var deletedConditionCount = safeCall(conditions, "GetCount");
+                    if (typeof deletedConditionCount === "number" && deletedConditionCount !== 0) {
+                      throw sheetError(
+                        "EXECUTION_FAILED",
+                        "删除条件格式后规则数量仍为 " + deletedConditionCount
+                      );
+                    }
                   } else if (conditionalAction === "add") {
                     var conditionType = String(args.type || "cellValue");
                     if (conditionType === "cellValue" || conditionType === "expression") {
-                      condition = requireMethod(conditions, "Add", "条件格式规则").call(
+                      condition = objectMutationCall(
                         conditions,
+                        "Add",
+                        "添加条件格式规则",
                         conditionType === "expression" ? "xlExpression" : "xlCellValue",
-                        String(args.operator || "xlGreater"),
+                        normalizeComparisonOperator(args.operator, "xlGreater", "条件格式运算符"),
                         args.formula1,
                         args.formula2
                       );
                     } else if (conditionType === "uniqueValues" || conditionType === "duplicateValues") {
-                      condition = requireMethod(conditions, "AddUniqueValues", "重复值条件格式").call(conditions);
-                      if (condition && typeof condition.SetDupeUnique === "function") {
-                        condition.SetDupeUnique(conditionType === "duplicateValues" ? "xlDuplicate" : "xlUnique");
-                      }
+                      condition = objectMutationCall(conditions, "AddUniqueValues", "添加重复值条件格式");
+                      mutationCall(
+                        condition,
+                        "SetDupeUnique",
+                        "设置重复值条件格式类型",
+                        conditionType === "duplicateValues" ? "xlDuplicate" : "xlUnique"
+                      );
                     } else if (conditionType === "colorScale") {
-                      condition = requireMethod(conditions, "AddColorScale", "色阶条件格式").call(conditions, clamp(Math.round(asFinite(args.scale, 3)), 2, 3));
+                      condition = objectMutationCall(
+                        conditions,
+                        "AddColorScale",
+                        "添加色阶条件格式",
+                        clamp(Math.round(asFinite(args.scale, 3)), 2, 3)
+                      );
                     } else if (conditionType === "dataBar") {
-                      condition = requireMethod(conditions, "AddDatabar", "数据条条件格式").call(conditions);
+                      condition = objectMutationCall(conditions, "AddDatabar", "添加数据条条件格式");
                     } else if (conditionType === "iconSet") {
-                      condition = requireMethod(conditions, "AddIconSetCondition", "图标集条件格式").call(conditions);
+                      condition = objectMutationCall(conditions, "AddIconSetCondition", "添加图标集条件格式");
                     } else if (conditionType === "top10") {
-                      condition = requireMethod(conditions, "AddTop10", "前十项条件格式").call(conditions);
+                      condition = objectMutationCall(conditions, "AddTop10", "添加前十项条件格式");
                     } else if (conditionType === "aboveAverage") {
-                      condition = requireMethod(conditions, "AddAboveAverage", "高于平均值条件格式").call(conditions);
+                      condition = objectMutationCall(conditions, "AddAboveAverage", "添加高于平均值条件格式");
                     } else {
                       throw new Error("不支持的条件格式类型：" + conditionType);
                     }
-                    if (condition) {
-                      if (args.fillColor && typeof condition.SetFillColor === "function") condition.SetFillColor(color(args.fillColor));
-                      var conditionFont = safeCall(condition, "GetFont");
-                      if (conditionFont) {
-                        if (args.fontColor) requireMethod(conditionFont, "SetColor", "条件格式字体颜色").call(conditionFont, color(args.fontColor));
-                        if (hasOwn(args, "bold")) requireMethod(conditionFont, "SetBold", "条件格式粗体").call(conditionFont, Boolean(args.bold));
-                      }
+                    if (args.fillColor) mutationCall(condition, "SetFillColor", "设置条件格式填充", color(args.fillColor));
+                    var conditionFont = safeCall(condition, "GetFont");
+                    if (conditionFont) {
+                      if (args.fontColor) mutationCall(conditionFont, "SetColor", "设置条件格式字体颜色", color(args.fontColor));
+                      if (hasOwn(args, "bold")) mutationCall(conditionFont, "SetBold", "设置条件格式粗体", Boolean(args.bold));
+                    }
+                    var conditionCountAfter = safeCall(conditions, "GetCount");
+                    if (
+                      typeof conditionCountBefore === "number"
+                      && typeof conditionCountAfter === "number"
+                      && conditionCountAfter !== conditionCountBefore + 1
+                    ) {
+                      throw sheetError(
+                        "EXECUTION_FAILED",
+                        "添加条件格式后规则数量未增加"
+                      );
+                    }
+                    if (typeof conditionCountAfter === "number" && conditionCountAfter > 0) {
+                      conditionExternalIndex = conditionCountAfter - 1;
+                      var addedConditionReadback = safeCall(
+                        conditions,
+                        "GetItem",
+                        conditionCountAfter
+                      );
+                      if (addedConditionReadback) condition = addedConditionReadback;
                     }
                   } else {
                     throw new Error("条件格式 action 必须是 add 或 deleteAll");
@@ -1375,6 +2554,10 @@
                     sheet: conditionalSheet.GetName(),
                     range: String(args.range),
                     count: safeCall(conditions, "GetCount"),
+                    rule: condition
+                      ? describeCondition(condition, conditionExternalIndex)
+                      : null,
+                    conditionalFormats: describeConditions(conditionalRange),
                   });
                   break;
                 }
@@ -1385,27 +2568,75 @@
                   var validationRange = getRange(validationSheet, args.range);
                   var validation = requireMethod(validationRange, "GetValidation", "数据验证").call(validationRange);
                   var validationAction = String(args.action);
+                  var validationResult = validation;
                   if (validationAction === "delete") {
-                    requireMethod(validation, "Delete", "删除数据验证").call(validation);
+                    mutationCall(validation, "Delete", "删除数据验证");
                   } else if (validationAction === "add" || validationAction === "modify") {
+                    if (!hasOwn(args, "type")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "数据验证 add/modify 必须显式提供 type"
+                      );
+                    }
                     var validationMethod = validationAction === "add" ? "Add" : "Modify";
-                    requireMethod(validation, validationMethod, "数据验证规则").call(
+                    var validationType = normalizeValidationType(args.type);
+                    var validationOperator = normalizeComparisonOperator(
+                      args.operator,
+                      "xlBetween",
+                      "数据验证运算符"
+                    );
+                    var validationNeedsFormula = validationType !== "xlValidateInputOnly";
+                    if (validationNeedsFormula && !hasOwn(args, "formula1")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "当前数据验证类型必须提供 formula1"
+                      );
+                    }
+                    var validationComparisonTypes = {
+                      xlValidateWholeNumber: true,
+                      xlValidateDecimal: true,
+                      xlValidateDate: true,
+                      xlValidateTime: true,
+                      xlValidateTextLength: true,
+                    };
+                    if (
+                      validationComparisonTypes[validationType]
+                      && (validationOperator === "xlBetween" || validationOperator === "xlNotBetween")
+                      && !hasOwn(args, "formula2")
+                    ) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "between/notBetween 数据验证必须提供 formula2"
+                      );
+                    }
+                    validationResult = objectMutationCall(
                       validation,
-                      String(args.type || "xlValidateList"),
-                      String(args.alertStyle || "xlValidAlertStop"),
-                      String(args.operator || "xlBetween"),
+                      validationMethod,
+                      validationAction === "add" ? "添加数据验证规则" : "修改数据验证规则",
+                      validationType,
+                      normalizeValidationAlertStyle(args.alertStyle),
+                      validationOperator,
                       args.formula1,
                       args.formula2
                     );
-                    if (hasOwn(args, "ignoreBlank") && typeof validation.SetIgnoreBlank === "function") validation.SetIgnoreBlank(Boolean(args.ignoreBlank));
-                    if (hasOwn(args, "showInput")) requireMethod(validation, "SetShowInput", "数据验证输入提示").call(validation, Boolean(args.showInput));
-                    if (hasOwn(args, "showError")) requireMethod(validation, "SetShowError", "数据验证错误提示").call(validation, Boolean(args.showError));
-                    if (args.inputTitle !== undefined) requireMethod(validation, "SetInputTitle", "数据验证输入标题").call(validation, String(args.inputTitle));
-                    if (args.inputMessage !== undefined) requireMethod(validation, "SetInputMessage", "数据验证输入消息").call(validation, String(args.inputMessage));
-                    if (args.errorTitle !== undefined) requireMethod(validation, "SetErrorTitle", "数据验证错误标题").call(validation, String(args.errorTitle));
-                    if (args.errorMessage !== undefined) requireMethod(validation, "SetErrorMessage", "数据验证错误消息").call(validation, String(args.errorMessage));
+                    if (hasOwn(args, "ignoreBlank")) mutationCall(validationResult, "SetIgnoreBlank", "设置数据验证空值策略", Boolean(args.ignoreBlank));
+                    if (hasOwn(args, "showInput")) mutationCall(validationResult, "SetShowInput", "设置数据验证输入提示", Boolean(args.showInput));
+                    if (hasOwn(args, "showError")) mutationCall(validationResult, "SetShowError", "设置数据验证错误提示", Boolean(args.showError));
+                    if (args.inputTitle !== undefined) mutationCall(validationResult, "SetInputTitle", "设置数据验证输入标题", String(args.inputTitle));
+                    if (args.inputMessage !== undefined) mutationCall(validationResult, "SetInputMessage", "设置数据验证输入消息", String(args.inputMessage));
+                    if (args.errorTitle !== undefined) mutationCall(validationResult, "SetErrorTitle", "设置数据验证错误标题", String(args.errorTitle));
+                    if (args.errorMessage !== undefined) mutationCall(validationResult, "SetErrorMessage", "设置数据验证错误消息", String(args.errorMessage));
                   } else {
                     throw new Error("数据验证 action 必须是 add、modify 或 delete");
+                  }
+                  var validationReadback = describeValidation(
+                    safeCall(validationRange, "GetValidation") || validationResult
+                  );
+                  if (validationAction !== "delete" && !validationReadback) {
+                    throw sheetError(
+                      "EXECUTION_FAILED",
+                      "数据验证写入后无法读回有效规则"
+                    );
                   }
                   changed += 1;
                   results.push({
@@ -1413,6 +2644,8 @@
                     action: validationAction,
                     sheet: validationSheet.GetName(),
                     range: String(args.range),
+                    rule: validationAction === "delete" ? null : validationReadback,
+                    validation: validationReadback,
                   });
                   break;
                 }
@@ -1785,10 +3018,15 @@
                 case "sheets_inspect_freeze_panes": {
                   var freezeSheet = getSheet(args.sheet);
                   var freezePanes = requireMethod(freezeSheet, "GetFreezePanes", "冻结窗格").call(freezeSheet);
+                  var inspectedFreezeState = describeFreezeState(freezePanes);
                   results.push({
                     name: call.name,
                     sheet: freezeSheet.GetName(),
-                    location: describeRange(safeCall(freezePanes, "GetLocation"), false),
+                    location: inspectedFreezeState.location,
+                    frozenRows: inspectedFreezeState.frozenRows,
+                    frozenColumns: inspectedFreezeState.frozenColumns,
+                    topLeftCell: inspectedFreezeState.topLeftCell,
+                    verified: true,
                   });
                   break;
                 }
@@ -1798,21 +3036,92 @@
                   var managedFreezeSheet = getSheet(args.sheet);
                   var managedFreeze = requireMethod(managedFreezeSheet, "GetFreezePanes", "冻结窗格").call(managedFreezeSheet);
                   var freezeAction = String(args.action);
-                  if (freezeAction === "unfreeze") requireMethod(managedFreeze, "Unfreeze", "取消冻结窗格").call(managedFreeze);
+                  if (freezeAction === "unfreeze") {
+                    if (hasOwn(args, "range") || hasOwn(args, "count")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "unfreeze 不接受 range 或 count",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    requireMethod(managedFreeze, "Unfreeze", "取消冻结窗格").call(managedFreeze);
+                  }
                   else if (freezeAction === "freezeAt") {
-                    if (!args.range) throw new Error("freezeAt 需要 range");
+                    if (!args.range) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeAt 需要 range",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    if (hasOwn(args, "count")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeAt 不接受 count",
+                        { partialMutationPossible: false }
+                      );
+                    }
                     requireMethod(managedFreeze, "FreezeAt", "按区域冻结窗格").call(managedFreeze, getRange(managedFreezeSheet, args.range));
                   } else if (freezeAction === "freezeRows") {
-                    requireMethod(managedFreeze, "FreezeRows", "冻结行").call(managedFreeze, Math.max(0, Math.round(asFinite(args.count, 1))));
+                    if (hasOwn(args, "range")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeRows 不接受 range",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    var frozenRowCount = asFinite(args.count, NaN);
+                    if (
+                      !isFinite(frozenRowCount)
+                      || Math.floor(frozenRowCount) !== frozenRowCount
+                      || frozenRowCount < 1
+                    ) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeRows.count 必须是正整数；解冻请使用 unfreeze",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    requireMethod(managedFreeze, "FreezeRows", "冻结行").call(managedFreeze, frozenRowCount);
                   } else if (freezeAction === "freezeColumns") {
-                    requireMethod(managedFreeze, "FreezeColumns", "冻结列").call(managedFreeze, Math.max(0, Math.round(asFinite(args.count, 1))));
-                  } else throw new Error("不支持的冻结窗格操作：" + freezeAction);
+                    if (hasOwn(args, "range")) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeColumns 不接受 range",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    var frozenColumnCount = asFinite(args.count, NaN);
+                    if (
+                      !isFinite(frozenColumnCount)
+                      || Math.floor(frozenColumnCount) !== frozenColumnCount
+                      || frozenColumnCount < 1
+                    ) {
+                      throw sheetError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "freezeColumns.count 必须是正整数；解冻请使用 unfreeze",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                    requireMethod(managedFreeze, "FreezeColumns", "冻结列").call(managedFreeze, frozenColumnCount);
+                  } else {
+                    throw sheetError(
+                      "INVALID_TOOL_ARGUMENTS",
+                      "不支持的冻结窗格操作：" + freezeAction,
+                      { partialMutationPossible: false }
+                    );
+                  }
                   changed += 1;
+                  var provisionalFreezeState = describeFreezeState(managedFreeze);
                   results.push({
                     name: call.name,
                     action: freezeAction,
                     sheet: managedFreezeSheet.GetName(),
-                    location: describeRange(safeCall(managedFreeze, "GetLocation"), false),
+                    location: provisionalFreezeState.location,
+                    frozenRows: provisionalFreezeState.frozenRows,
+                    frozenColumns: provisionalFreezeState.frozenColumns,
+                    topLeftCell: provisionalFreezeState.topLeftCell,
+                    verified: false,
                   });
                   break;
                 }
@@ -1948,6 +3257,7 @@
 
                 case "sheets_inspect_page_layout": {
                   var pageSheet = getSheet(args.sheet);
+                  var inspectedDisplayState = describeDisplayState(pageSheet, false);
                   var inspectedMarginsPt = {
                     top: safeCall(pageSheet, "GetTopMargin"),
                     right: safeCall(pageSheet, "GetRightMargin"),
@@ -1962,30 +3272,52 @@
                     margins: inspectedMarginsPt,
                     printGridlines: safeCall(pageSheet, "GetPrintGridlines"),
                     printHeadings: safeCall(pageSheet, "GetPrintHeadings"),
+                    displayGridlines: inspectedDisplayState.displayGridlines,
+                    displayHeadings: inspectedDisplayState.displayHeadings,
+                    verified: true,
                   });
                   break;
                 }
 
                 case "sheets_manage_page_layout": {
                   var managedMarginsPt = unitAlias(args, "marginsPt", "margins");
+                  var hasManagedMargins = isObject(managedMarginsPt) && [
+                    "top",
+                    "right",
+                    "bottom",
+                    "left",
+                  ].some(function (side) {
+                    return hasOwn(managedMarginsPt, side);
+                  });
                   if (
                     args.orientation === undefined
-                    && !isObject(managedMarginsPt)
+                    && !hasManagedMargins
                     && !hasOwn(args, "printGridlines")
                     && !hasOwn(args, "printHeadings")
+                    && !hasOwn(args, "displayGridlines")
+                    && !hasOwn(args, "displayHeadings")
                   ) {
                     throw new Error("sheets_manage_page_layout 至少需要一个页面布局属性");
                   }
                   var managedPageSheet = getSheet(args.sheet);
-                  if (args.orientation !== undefined) requireMethod(managedPageSheet, "SetPageOrientation", "页面方向").call(managedPageSheet, String(args.orientation));
-                  if (isObject(managedMarginsPt)) {
-                    if (hasOwn(managedMarginsPt, "top")) requireMethod(managedPageSheet, "SetTopMargin", "上页边距").call(managedPageSheet, Number(managedMarginsPt.top));
-                    if (hasOwn(managedMarginsPt, "right")) requireMethod(managedPageSheet, "SetRightMargin", "右页边距").call(managedPageSheet, Number(managedMarginsPt.right));
-                    if (hasOwn(managedMarginsPt, "bottom")) requireMethod(managedPageSheet, "SetBottomMargin", "下页边距").call(managedPageSheet, Number(managedMarginsPt.bottom));
-                    if (hasOwn(managedMarginsPt, "left")) requireMethod(managedPageSheet, "SetLeftMargin", "左页边距").call(managedPageSheet, Number(managedMarginsPt.left));
+                  if (args.orientation !== undefined) {
+                    mutationCall(
+                      managedPageSheet,
+                      "SetPageOrientation",
+                      "设置页面方向",
+                      normalizePageOrientation(args.orientation)
+                    );
                   }
-                  if (hasOwn(args, "printGridlines")) requireMethod(managedPageSheet, "SetPrintGridlines", "打印网格线").call(managedPageSheet, Boolean(args.printGridlines));
-                  if (hasOwn(args, "printHeadings")) requireMethod(managedPageSheet, "SetPrintHeadings", "打印标题").call(managedPageSheet, Boolean(args.printHeadings));
+                  if (hasManagedMargins) {
+                    if (hasOwn(managedMarginsPt, "top")) mutationCall(managedPageSheet, "SetTopMargin", "设置上页边距", Number(managedMarginsPt.top));
+                    if (hasOwn(managedMarginsPt, "right")) mutationCall(managedPageSheet, "SetRightMargin", "设置右页边距", Number(managedMarginsPt.right));
+                    if (hasOwn(managedMarginsPt, "bottom")) mutationCall(managedPageSheet, "SetBottomMargin", "设置下页边距", Number(managedMarginsPt.bottom));
+                    if (hasOwn(managedMarginsPt, "left")) mutationCall(managedPageSheet, "SetLeftMargin", "设置左页边距", Number(managedMarginsPt.left));
+                  }
+                  if (hasOwn(args, "printGridlines")) mutationCall(managedPageSheet, "SetPrintGridlines", "设置打印网格线", Boolean(args.printGridlines));
+                  if (hasOwn(args, "printHeadings")) mutationCall(managedPageSheet, "SetPrintHeadings", "设置打印行列标题", Boolean(args.printHeadings));
+                  if (hasOwn(args, "displayGridlines")) mutationCall(managedPageSheet, "SetDisplayGridlines", "设置屏幕网格线", Boolean(args.displayGridlines));
+                  if (hasOwn(args, "displayHeadings")) mutationCall(managedPageSheet, "SetDisplayHeadings", "设置屏幕行列标题", Boolean(args.displayHeadings));
                   changed += 1;
                   var persistedMarginsPt = {
                     top: safeCall(managedPageSheet, "GetTopMargin"),
@@ -1993,12 +3325,20 @@
                     bottom: safeCall(managedPageSheet, "GetBottomMargin"),
                     left: safeCall(managedPageSheet, "GetLeftMargin"),
                   };
+                  var managedDisplayState = describeDisplayState(managedPageSheet, true);
+                  var needsDisplayVerification = hasOwn(args, "displayGridlines")
+                    || hasOwn(args, "displayHeadings");
                   results.push({
                     name: call.name,
                     sheet: managedPageSheet.GetName(),
                     orientation: safeCall(managedPageSheet, "GetPageOrientation"),
                     marginsPt: persistedMarginsPt,
                     margins: persistedMarginsPt,
+                    printGridlines: safeCall(managedPageSheet, "GetPrintGridlines"),
+                    printHeadings: safeCall(managedPageSheet, "GetPrintHeadings"),
+                    displayGridlines: managedDisplayState.displayGridlines,
+                    displayHeadings: managedDisplayState.displayHeadings,
+                    verified: !needsDisplayVerification,
                   });
                   break;
                 }
@@ -2016,14 +3356,61 @@
               results: results,
             });
           } catch (error) {
-            return JSON.stringify({ ok: false, error: error && error.message ? error.message : String(error) });
+            var failedCallIndex = typeof callIndex === "number"
+              && callIndex >= 0
+              && calls
+              && callIndex < calls.length
+              ? callIndex
+              : null;
+            var failedCall = failedCallIndex !== null && calls[failedCallIndex]
+              ? calls[failedCallIndex]
+              : null;
+            var priorMutationPossible = false;
+            if (failedCallIndex !== null) {
+              for (var mutationIndex = 0; mutationIndex < failedCallIndex; mutationIndex += 1) {
+                if (calls[mutationIndex] && mutatingNames[calls[mutationIndex].name]) {
+                  priorMutationPossible = true;
+                  break;
+                }
+              }
+            }
+            var currentMutationPossible = Boolean(
+              failedCall
+              && mutatingNames[failedCall.name]
+            );
+            var existingDetails = error
+              && error.details
+              && typeof error.details === "object"
+              ? error.details
+              : {};
+            if (typeof existingDetails.partialMutationPossible === "boolean") {
+              currentMutationPossible = existingDetails.partialMutationPossible;
+            }
+            var details = {};
+            Object.keys(existingDetails).forEach(function (name) {
+              details[name] = existingDetails[name];
+            });
+            details.phase = existingDetails.phase || "sheets-command";
+            details.completedToolCalls = failedCallIndex === null ? 0 : failedCallIndex;
+            details.partialMutationPossible = priorMutationPossible || currentMutationPossible;
+            if (failedCall && failedCall.name) details.tool = String(failedCall.name);
+            if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
+            var errorMessage = error && error.message ? error.message : String(error);
+            return JSON.stringify({
+              ok: false,
+              code: error && error.code ? error.code : "EXECUTION_FAILED",
+              message: errorMessage,
+              error: errorMessage,
+              details: details,
+            });
           }
         },
         false,
         true,
         function (rawResult) {
           try {
-            resolve(parseResult(rawResult));
+            const executionResult = parseResult(rawResult);
+            verifyViewChanges(toolCalls, executionResult).then(resolve, reject);
           } catch (error) {
             reject(error);
           }

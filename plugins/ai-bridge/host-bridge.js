@@ -1,8 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.4.2";
+  const VERSION = "0.6.0";
   const PROTOCOL_VERSION = 1;
+  const CONTRACT_SHA256 = "a658c425a8800e7087d4b4afd0700c7987b3f3081f38cf4cfbfea827d67b4e99";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -23,13 +24,15 @@
   const listeners = new Map();
   const relayClients = new Map();
   const preparedImageCommands = new Map();
-  const IMAGE_TOOL_NAMES = new Set(["word_add_image", "slides_add_image", "slides_add_image_shape", "word_add_ole_object", "slides_add_ole_object"]);
-  const OPTIONAL_IMAGE_TOOL_NAMES = new Set(["word_set_watermark", "sheets_manage_drawing"]);
+  const IMAGE_TOOL_NAMES = new Set(["word_add_image","word_add_ole_object","slides_add_image","slides_add_image_shape","slides_add_ole_object"]);
+  const OPTIONAL_IMAGE_TOOL_NAMES = new Set(["word_set_watermark","sheets_manage_drawing"]);
   const sessionId = createRequestId("session");
   let pluginWindow = null;
   let ready = false;
   let editorType = null;
   let bridgeCapabilities = null;
+  let bridgeContractVersion = VERSION;
+  let bridgeContractSha256 = CONTRACT_SHA256;
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -360,6 +363,8 @@
       version: VERSION,
       protocolVersion: PROTOCOL_VERSION,
       pluginGuid: PLUGIN_GUID,
+      contractVersion: bridgeContractVersion,
+      contractSha256: bridgeContractSha256,
       ready,
       editorType,
       context: publicContext(),
@@ -417,6 +422,13 @@
 
   function markReady(message) {
     markStartup("bridgeReadyMs");
+    bridgeContractVersion = message.contractVersion || message.pluginVersion || VERSION;
+    bridgeContractSha256 = message.contractSha256 || CONTRACT_SHA256;
+    if (bridgeContractSha256 !== CONTRACT_SHA256) {
+      ready = false;
+      document.documentElement.dataset.aiBridgeState = "contract-mismatch";
+      return;
+    }
     ready = true;
     editorType = message.editorType || editorType;
     bridgeCapabilities = message.capabilities || bridgeCapabilities;
@@ -432,6 +444,10 @@
     const message = event.data;
     if (!message || message.source !== "ai-bridge-plugin") return;
     if (message.pluginGuid !== PLUGIN_GUID || message.protocolVersion !== PROTOCOL_VERSION) return;
+    if (message.contractSha256 && message.contractSha256 !== CONTRACT_SHA256) {
+      document.documentElement.dataset.aiBridgeState = "contract-mismatch";
+      return;
+    }
     if (pluginHandshake.strict) {
       if (!pluginHandshake.valid || message.channelId !== pluginHandshake.channelId) return;
     } else if (message.channelId !== undefined) {
@@ -914,6 +930,7 @@
       inspectThemes: function (args, options) { return executeTool("slides_inspect_themes", args, options); },
       inspectBuiltinThemes: function (args, options) { return executeTool("slides_inspect_builtin_themes", args, options); },
       inspectObjects: function (args, options) { return executeTool("slides_inspect_objects", args, options); },
+      validateLayout: function (args, options) { return executeTool("slides_validate_layout", args, options); },
       replaceText: function (args, options) { return executeTool("slides_replace_text", args, options); },
       scaleFont: function (args, options) { return executeTool("slides_scale_font", args, options); },
       formatText: function (args, options) { return executeTool("slides_format_text", args, options); },
