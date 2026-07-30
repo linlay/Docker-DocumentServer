@@ -492,10 +492,26 @@ not exposed by `getState()` or the sessions response.
 ## Local run
 
 ```bash
-export DOCUMENT_ADMIN_USERNAME=admin
-export DOCUMENT_ADMIN_PASSWORD='replace-with-a-strong-password'
+cp .env.copilot.example .env
+# Edit .env and replace the JWT and administrator placeholder secrets.
 docker compose -f docker-compose.copilot.yml up -d
 ```
+
+`DOCUMENTSERVER_HTTP_PORT` and `DOCUMENTSERVER_HTTPS_PORT` are bound to the
+host loopback interface. If the HTTP port changes, set
+`DOCUMENT_PUBLIC_ORIGIN` to the matching browser-facing origin. For example, a
+host Nginx deployment can use port `11949` with:
+
+```dotenv
+DOCUMENTSERVER_HTTP_PORT=11949
+DOCUMENTSERVER_HTTPS_PORT=11950
+DOCUMENT_PUBLIC_ORIGIN=https://docs.example.com
+```
+
+Compose renders the same HTTP port into the container's loopback Nginx route,
+so DocumentServer callbacks continue to work when a non-default host port is
+used. Until a public hostname is configured, an SSH-tunnel deployment can use
+`DOCUMENT_PUBLIC_ORIGIN=http://127.0.0.1:11949`.
 
 Create a document without authentication:
 
