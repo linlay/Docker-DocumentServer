@@ -500,18 +500,18 @@ docker compose -f docker-compose.copilot.yml up -d
 `DOCUMENTSERVER_HTTP_PORT` and `DOCUMENTSERVER_HTTPS_PORT` are bound to the
 host loopback interface. If the HTTP port changes, set
 `DOCUMENT_PUBLIC_ORIGIN` to the matching browser-facing origin. For example, a
-host Nginx deployment can use port `11949` with:
+host Nginx deployment can use port `11981` with:
 
 ```dotenv
-DOCUMENTSERVER_HTTP_PORT=11949
-DOCUMENTSERVER_HTTPS_PORT=11950
+DOCUMENTSERVER_HTTP_PORT=11981
+DOCUMENTSERVER_HTTPS_PORT=11980
 DOCUMENT_PUBLIC_ORIGIN=https://docs.example.com
 ```
 
 Compose renders the same HTTP port into the container's loopback Nginx route,
 so DocumentServer callbacks continue to work when a non-default host port is
 used. Until a public hostname is configured, an SSH-tunnel deployment can use
-`DOCUMENT_PUBLIC_ORIGIN=http://127.0.0.1:11949`.
+`DOCUMENT_PUBLIC_ORIGIN=http://127.0.0.1:11981`.
 
 Create a document without authentication:
 
