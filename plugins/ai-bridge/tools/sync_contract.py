@@ -107,6 +107,56 @@ def resolve_schema(schema: Any, definitions: dict[str, Any]) -> Any:
     }
 
 
+PLUGIN_SCHEMA_KEYWORDS = {
+    "additionalProperties",
+    "allOf",
+    "anyOf",
+    "const",
+    "else",
+    "enum",
+    "exclusiveMaximum",
+    "exclusiveMinimum",
+    "if",
+    "items",
+    "maxItems",
+    "maxLength",
+    "maxProperties",
+    "maximum",
+    "minItems",
+    "minLength",
+    "minProperties",
+    "minimum",
+    "not",
+    "oneOf",
+    "pattern",
+    "properties",
+    "required",
+    "then",
+    "type",
+    "uniqueItems",
+}
+
+
+def compact_plugin_schema(value: Any) -> Any:
+    """Keep only the keywords enforced by the generated plugin validator."""
+    if isinstance(value, list):
+        return [compact_plugin_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    compacted = {}
+    for key, child in value.items():
+        if key not in PLUGIN_SCHEMA_KEYWORDS:
+            continue
+        if key == "properties" and isinstance(child, dict):
+            compacted[key] = {
+                name: compact_plugin_schema(property_schema)
+                for name, property_schema in child.items()
+            }
+        else:
+            compacted[key] = compact_plugin_schema(child)
+    return compacted
+
+
 def indent(value: str, amount: int = 2) -> str:
     prefix = " " * amount
     return "\n".join(prefix + line if line else line for line in value.splitlines())
@@ -329,6 +379,14 @@ def replace_types_region(source: str, generated: str) -> str:
 
 def render_plugin_region(contract: dict[str, Any], sha256: str) -> str:
     limits = contract["limits"]
+    definitions = contract.get("$defs") or {}
+    argument_schemas = {
+        editor: {
+            name: compact_plugin_schema(resolve_schema(schema, definitions))
+            for name, schema in contract["tools"][editor].items()
+        }
+        for editor in ("word", "slide", "cell")
+    }
     read_only = [
         name
         for editor in ("word", "slide", "cell")
@@ -370,7 +428,20 @@ def render_plugin_region(contract: dict[str, Any], sha256: str) -> str:
             f'      "{name}",' for name in contract["tools"][editor]
         )
         lines.append("    ]),")
-    lines.extend(["  };", PLUGIN_END])
+    lines.extend([
+        "  };",
+        (
+            "  const ARGUMENT_SCHEMAS = "
+            + json.dumps(
+                argument_schemas,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + ";"
+        ),
+        PLUGIN_END,
+    ])
     return "\n".join(lines)
 
 

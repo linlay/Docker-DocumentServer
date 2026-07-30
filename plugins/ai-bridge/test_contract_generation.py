@@ -95,6 +95,20 @@ class ContractGenerationTests(unittest.TestCase):
                 [projection],
             )
 
+    def test_plugin_schema_projection_is_resolved_and_compact(self) -> None:
+        schema = self.contract["tools"]["word"]["word_add_image"]
+        resolved = sync_contract.resolve_schema(
+            schema,
+            self.contract["$defs"],
+        )
+        compacted = sync_contract.compact_plugin_schema(resolved)
+
+        self.assertIn("source", compacted["properties"])
+        self.assertIn("oneOf", compacted["properties"]["source"])
+        self.assertNotIn("$ref", json.dumps(compacted, ensure_ascii=False))
+        self.assertNotIn("description", compacted)
+        self.assertNotIn("x-effects", compacted)
+
     def test_editor_contracts_are_self_contained_and_identified(self) -> None:
         def assert_refs_resolve(value: Any, definitions: dict[str, Any]) -> None:
             if isinstance(value, list):
@@ -244,6 +258,48 @@ class ContractGenerationTests(unittest.TestCase):
                 for error in validation_errors
             )
         )
+
+    def test_relay_validation_matches_direct_plugin_regression_shape(self) -> None:
+        with self.assertRaises(copilot_server.BridgeError) as caught:
+            copilot_server.require_valid_editor_tool_calls(
+                "word",
+                [
+                    {
+                        "name": "word_append_paragraph",
+                        "arguments": {
+                            "text": 123,
+                            "internalNote": "must-not-leak",
+                        },
+                    },
+                    {
+                        "name": "word_manage_section",
+                        "arguments": {"action": "create"},
+                    },
+                    {
+                        "name": "word_insert_page_break",
+                        "arguments": {},
+                    },
+                ],
+            )
+
+        validation_errors = caught.exception.details["validationErrors"]
+        self.assertEqual(
+            [
+                (
+                    error["toolCallIndex"],
+                    error["path"],
+                    error["keyword"],
+                )
+                for error in validation_errors
+            ],
+            [
+                (0, "arguments.internalNote", "additionalProperties"),
+                (0, "arguments.text", "type"),
+                (1, "arguments.paragraphIndex", "required"),
+                (2, "arguments.target", "semantic"),
+            ],
+        )
+        self.assertNotIn("must-not-leak", json.dumps(validation_errors))
 
 
 if __name__ == "__main__":

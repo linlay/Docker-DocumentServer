@@ -466,10 +466,7 @@
     return errors;
   }
 
-  function requireStaticValidation(toolCalls, preliminaryErrors) {
-    const validationErrors = collectStaticValidationErrors(toolCalls).concat(
-      preliminaryErrors || [],
-    );
+  function requireStaticValidation(validationErrors) {
     if (!validationErrors.length) return;
     const error = new Error("Word 工具参数校验失败");
     error.code = "INVALID_TOOL_ARGUMENTS";
@@ -521,6 +518,19 @@
       visit(getArgs(calls[index]), "arguments", index, String((calls[index] || {}).name || ""));
     }
     return validationErrors;
+  }
+
+  function preflight(toolCalls) {
+    const originalCalls = Array.isArray(toolCalls) ? toolCalls : [];
+    const unsafeUnitErrors = collectUnsafeLegacyPointUnits(originalCalls);
+    const normalizedInput = normalizeWordToolCalls(originalCalls);
+    return {
+      toolCalls: normalizedInput.toolCalls,
+      argumentNormalizations: normalizedInput.argumentNormalizations,
+      validationErrors: collectStaticValidationErrors(
+        normalizedInput.toolCalls,
+      ).concat(unsafeUnitErrors),
+    };
   }
 
   let nativeSearchAndReplaceSupported = null;
@@ -4291,9 +4301,7 @@
   }
 
   async function execute(toolCalls) {
-    const originalCalls = Array.isArray(toolCalls) ? toolCalls : [];
-    const unsafeUnitErrors = collectUnsafeLegacyPointUnits(originalCalls);
-    const normalizedInput = normalizeWordToolCalls(originalCalls);
+    const normalizedInput = preflight(toolCalls);
     const aggregate = {
       ok: true,
       editorType: "word",
@@ -4305,7 +4313,7 @@
       aggregate.argumentNormalizations = normalizedInput.argumentNormalizations;
     }
     const calls = normalizedInput.toolCalls;
-    requireStaticValidation(calls, unsafeUnitErrors);
+    requireStaticValidation(normalizedInput.validationErrors);
     const hasReplacement = calls.some(function (call) {
       return call && call.name === "word_replace_text";
     });
@@ -4411,6 +4419,7 @@
 
   window.AICopilotBridges.word = {
     execute: execute,
+    preflight: preflight,
     inspect: function () {
       return execute([{ name: "word_inspect", arguments: { maxChars: 12000, includeStructure: true } }]);
     },

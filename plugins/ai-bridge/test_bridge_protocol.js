@@ -375,6 +375,9 @@ function createHarness(options = {}) {
       },
     },
   };
+  if (typeof options.bridgePreflight === "function") {
+    pluginWindow.AICopilotBridges[editorType].preflight = options.bridgePreflight;
+  }
 
   const Asc = {
     scope: {},
@@ -1445,6 +1448,78 @@ test("plugin rejects a command when the host document key changes", async () => 
     assert.match(error.message, /命令目标不是当前文档/);
     return true;
   });
+});
+
+test("plugin aggregates generated schema and bridge semantic errors before checkpoint", async () => {
+  const toolCalls = [
+    {
+      name: "word_append_paragraph",
+      arguments: { text: 123, internalNote: "敏感正文" },
+    },
+    {
+      name: "word_manage_section",
+      arguments: { action: "create" },
+    },
+    {
+      name: "word_insert_page_break",
+      arguments: {},
+    },
+  ];
+  const harness = createHarness({
+    bridgePreflight(calls) {
+      return {
+        toolCalls: calls,
+        argumentNormalizations: [],
+        validationErrors: [
+          {
+            toolCallIndex: 1,
+            tool: "word_manage_section",
+            path: "arguments.paragraphIndex",
+            keyword: "semantic",
+            message: "paragraphIndex is required when action is create",
+          },
+          {
+            toolCallIndex: 2,
+            tool: "word_insert_page_break",
+            path: "arguments.target",
+            keyword: "semantic",
+            message: "paragraphIndexes, search, all=true, or current=true is required",
+          },
+        ],
+      };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.executeBatch(toolCalls, {
+      timeoutMs: 1000,
+      requestId: "direct-preflight-invalid",
+    }),
+    error => {
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.deepEqual(
+        Array.from(error.details.validationErrors, item => [
+          item.toolCallIndex,
+          item.path,
+          item.keyword,
+        ]),
+        [
+          [0, "arguments.internalNote", "additionalProperties"],
+          [0, "arguments.text", "type"],
+          [1, "arguments.paragraphIndex", "required"],
+          [2, "arguments.target", "semantic"],
+        ],
+      );
+      assert.doesNotMatch(JSON.stringify(error.details), /敏感正文|internalNote.*敏感/);
+      return true;
+    },
+  );
+
+  assert.equal(harness.executedToolCalls.length, 0);
+  assert.deepEqual(harness.servicePaths, []);
 });
 
 test("public contract, plugin allow-lists, and all convenience methods stay aligned", async () => {
@@ -2765,6 +2840,34 @@ test("word bridge aggregates all static semantic failures before creating histor
     },
   );
 
+  assert.equal(harness.historyPoints, 0);
+});
+
+test("word bridge preflight normalizes and aggregates without creating history", () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["第一段"] });
+
+  const result = harness.bridge.preflight([
+    {
+      name: "word_append_paragraph",
+      arguments: { text: "兼容字段", spacingBefore: 6, spacingBeforePt: 8 },
+    },
+    {
+      name: "word_insert_page_break",
+      arguments: {},
+    },
+  ]);
+
+  assert.equal(result.toolCalls[0].arguments.spacingBefore, undefined);
+  assert.equal(result.toolCalls[0].arguments.spacingBeforePt, 8);
+  assert.equal(result.argumentNormalizations[0].kind, "canonicalWins");
+  assert.deepEqual(
+    Array.from(result.validationErrors, item => [
+      item.toolCallIndex,
+      item.path,
+      item.keyword,
+    ]),
+    [[1, "arguments.target", "semantic"]],
+  );
   assert.equal(harness.historyPoints, 0);
 });
 
