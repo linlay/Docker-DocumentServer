@@ -94,6 +94,10 @@ class ContractAlignmentTests(unittest.TestCase):
 
         self.assertIn('"DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"', compose)
         self.assertIn('"DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"', compose)
+        self.assertIn(
+            '"DOCUMENT_FRAME_ANCESTORS=$${DOCUMENT_FRAME_ANCESTORS}"',
+            compose,
+        )
         self.assertIn('"DOCUMENT_STORAGE_DIR=$${DOCUMENT_STORAGE_DIR}"', compose)
         self.assertIn("> /run/onlyoffice-copilot.env", compose)
         self.assertIn('EXAMPLE_ENABLED: "false"', compose)
@@ -110,7 +114,8 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.6.0-rev4"
+        revision = "0.6.0-rev5"
+        stale_revision = "0.6.0-rev4"
         paths = [
             "config.json",
             "index.html",
@@ -122,7 +127,8 @@ class ContractAlignmentTests(unittest.TestCase):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
                     contents = stream.read()
                 self.assertIn(revision, contents)
-                self.assertNotIn("0.4.0-rev30", contents)
+                self.assertNotIn(stale_revision, contents)
+        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, revision)
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
@@ -494,11 +500,48 @@ class DocumentGatewayTests(unittest.TestCase):
             for call in handler.send_header.call_args_list
         }
         self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(headers["X-Frame-Options"], "SAMEORIGIN")
+        self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
         self.assertNotIn("X-Accel-Redirect", headers)
         body = handler.wfile.write.call_args.args[0].decode("utf-8")
         self.assertIn("/web-apps/apps/api/documents/api.js", body)
         self.assertIn("editor-shell.js", body)
         self.assertNotIn("example", body.lower())
+
+    def test_editor_response_allows_only_configured_cross_origin_parent(self):
+        created = copilot_server.create_document("xlsx")
+        handler = mock.Mock()
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DOCUMENT_FRAME_ANCESTORS":
+                    "'self' http://localhost:* http://127.0.0.1:*",
+            },
+        ):
+            copilot_server.document_editor_response(
+                handler,
+                "xlsx",
+                created["documentId"],
+            )
+
+        headers = {
+            call.args[0]: call.args[1]
+            for call in handler.send_header.call_args_list
+        }
+        self.assertNotIn("X-Frame-Options", headers)
+        self.assertIn(
+            "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*",
+            headers["Content-Security-Policy"],
+        )
+
+    def test_frame_ancestor_configuration_rejects_wildcards(self):
+        with mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_FRAME_ANCESTORS": "'self' https://*.example.com"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "精确 HTTP"):
+                copilot_server.document_frame_ancestors()
 
     def test_storage_download_requires_jwt_and_uses_internal_file_acceleration(self):
         created = copilot_server.create_document("docx")

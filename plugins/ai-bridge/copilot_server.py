@@ -36,10 +36,14 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.6.0-rev4"
+EDITOR_ASSET_REVISION = "0.6.0-rev5"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
+LOOPBACK_FRAME_ANCESTOR_PATTERNS = {
+    "http://localhost:*",
+    "http://127.0.0.1:*",
+}
 DOCUMENT_TYPES = {
     "docx": "word",
     "xlsx": "cell",
@@ -3052,6 +3056,36 @@ def document_public_origin() -> str:
     return value
 
 
+def document_frame_ancestors() -> tuple[str, ...]:
+    raw = os.environ.get("DOCUMENT_FRAME_ANCESTORS", "'self'").strip()
+    ancestors: list[str] = []
+    for token in raw.split():
+        if token == "'self'" or token in LOOPBACK_FRAME_ANCESTOR_PATTERNS:
+            candidate = token
+        else:
+            parsed = urllib.parse.urlsplit(token)
+            if (
+                parsed.scheme not in ("http", "https")
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.path not in ("", "/")
+                or parsed.query
+                or parsed.fragment
+                or "*" in token
+            ):
+                raise RuntimeError(
+                    "DOCUMENT_FRAME_ANCESTORS 只允许 'self'、受支持的回环来源"
+                    "或精确 HTTP(S) origin"
+                )
+            candidate = token.rstrip("/")
+        if candidate not in ancestors:
+            ancestors.append(candidate)
+    if not ancestors:
+        raise RuntimeError("DOCUMENT_FRAME_ANCESTORS 不得为空")
+    return tuple(ancestors)
+
+
 def document_editor_url(file_type: str, document_id: str) -> str:
     return f"{document_public_origin()}/{file_type}/{document_id}"
 
@@ -3431,6 +3465,7 @@ def document_editor_response(
     document_id: str,
 ) -> None:
     body = document_editor_html(file_type, document_id).encode("utf-8")
+    frame_ancestors = document_frame_ancestors()
     try:
         handler.send_response(200)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -3438,7 +3473,8 @@ def document_editor_response(
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("Pragma", "no-cache")
         handler.send_header("X-Content-Type-Options", "nosniff")
-        handler.send_header("X-Frame-Options", "SAMEORIGIN")
+        if frame_ancestors == ("'self'",):
+            handler.send_header("X-Frame-Options", "SAMEORIGIN")
         handler.send_header("Referrer-Policy", "no-referrer")
         handler.send_header(
             "Content-Security-Policy",
@@ -3446,7 +3482,7 @@ def document_editor_response(
             "img-src 'self' data: blob:; connect-src 'self' ws: wss:; "
             "frame-src 'self' blob:; worker-src 'self' blob:; "
             "font-src 'self' data:; object-src 'none'; base-uri 'none'; "
-            "form-action 'none'; frame-ancestors 'self'",
+            f"form-action 'none'; frame-ancestors {' '.join(frame_ancestors)}",
         )
         handler.end_headers()
         handler.wfile.write(body)

@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.6.0-rev4"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.6.0-rev5"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -46,7 +46,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev4"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev5"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -63,7 +63,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.6.0-rev4"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.6.0-rev5"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -125,13 +125,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev4"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev5"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.6.0-rev4"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.6.0-rev5"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -784,5 +784,5 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 ## 版本兼容
 
 当前插件版本为 `0.6.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.6.0-rev4`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+`?v=0.6.0-rev5`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

@@ -46,6 +46,11 @@ Copy `.env.copilot.example` to `.env` and set:
 
 - `ONLYOFFICE_JWT_SECRET` to a long, stable secret.
 - `DOCUMENT_PUBLIC_ORIGIN` to the browser-facing origin.
+- `DOCUMENT_FRAME_ANCESTORS` to `'self'` plus the exact parent origins allowed
+  to embed document pages. `http://localhost:*` and
+  `http://127.0.0.1:*` are the only supported wildcard-port forms; wildcard
+  domains are rejected. When a cross-origin parent is configured, CSP replaces
+  the conflicting `X-Frame-Options: SAMEORIGIN` restriction.
 - `DOCUMENT_ADMIN_USERNAME` and `DOCUMENT_ADMIN_PASSWORD`.
 - `DOCUMENT_MAX_SAVE_BYTES` to the maximum accepted callback output size.
 
