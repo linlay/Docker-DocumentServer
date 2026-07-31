@@ -55,6 +55,10 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertIn("proxy_pass http://127.0.0.1:3001/documents/storage/;", config)
         self.assertIn("location ^~ /__document_files/ {", config)
         self.assertIn("internal;", config)
+        self.assertIn("location = /admin {", config)
+        self.assertIn("location = /admin/ {", config)
+        self.assertIn("location = /health {", config)
+        self.assertNotIn("return 308 /admin/;", config)
 
     def test_gateway_exposes_three_create_and_capability_routes(self):
         config_path = os.path.join(
