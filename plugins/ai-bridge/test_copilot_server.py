@@ -64,6 +64,8 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertIn("allow 127.0.0.1;", config)
         self.assertIn("deny all;", config)
         self.assertIn("internal;", config)
+        self.assertIn("proxy_set_header X-Forwarded-Host 127.0.0.1;", config)
+        self.assertIn("proxy_set_header X-Forwarded-Proto http;", config)
         with open(
             os.path.join(os.path.dirname(__file__), "copilot_server.py"),
             encoding="utf-8",
@@ -102,6 +104,14 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertIn('"DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"', compose)
         self.assertIn('"DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"', compose)
         self.assertIn("> /run/onlyoffice-copilot.env", compose)
+        self.assertIn(
+            '"./data/documents:/var/lib/onlyoffice/documentserver-example/files"',
+            compose,
+        )
+        self.assertIn(
+            "/var/lib/onlyoffice/documentserver-example/files",
+            compose,
+        )
         self.assertIn(
             "command=/bin/bash /opt/onlyoffice-copilot/run-copilot.sh",
             supervisor,

@@ -16,6 +16,8 @@ services:
           echo "DOCUMENTSERVER_HTTP_PORT must be between 1 and 65535" >&2;
           exit 64;
         fi &&
+        install -d -o ds -g ds -m 0755
+        /var/lib/onlyoffice/documentserver-example/files &&
         /usr/bin/printf '%s\0'
         "COPILOT_API_BASE=$${COPILOT_API_BASE}"
         "COPILOT_API_KEY=$${COPILOT_API_KEY}"
@@ -61,6 +63,8 @@ services:
       - onlyoffice_logs:/var/log/onlyoffice
       - onlyoffice_lib:/var/lib/onlyoffice
       - onlyoffice_fonts:/usr/share/fonts/truetype/custom
+      # Keep generated documents in a project-visible host directory.
+      - "./data/documents:/var/lib/onlyoffice/documentserver-example/files"
       - "./plugins/ai-bridge:/var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}:ro"
       - "./plugins/ai-bridge/nginx-ds-example.conf:/opt/onlyoffice-copilot/nginx-ds-example.conf:ro"
       - "./plugins/ai-bridge/nginx-copilot-loopback.conf:/opt/onlyoffice-copilot/nginx-copilot-loopback.conf:ro"
