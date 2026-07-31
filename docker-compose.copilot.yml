@@ -17,22 +17,24 @@ services:
           exit 64;
         fi &&
         install -d -o ds -g ds -m 0755
-        /var/lib/onlyoffice/documentserver-example/files &&
+        /var/lib/onlyoffice/copilot/documents &&
         /usr/bin/printf '%s\0'
         "COPILOT_API_BASE=$${COPILOT_API_BASE}"
         "COPILOT_API_KEY=$${COPILOT_API_KEY}"
         "COPILOT_MODEL=$${COPILOT_MODEL}"
         "JWT_SECRET=$${JWT_SECRET}"
         "DOCUMENT_PUBLIC_ORIGIN=$${DOCUMENT_PUBLIC_ORIGIN}"
+        "DOCUMENT_STORAGE_DIR=$${DOCUMENT_STORAGE_DIR}"
+        "DOCUMENT_MAX_SAVE_BYTES=$${DOCUMENT_MAX_SAVE_BYTES}"
         "DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"
         "DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"
         > /run/onlyoffice-copilot.env &&
         chown ds:ds /run/onlyoffice-copilot.env &&
-        cp /opt/onlyoffice-copilot/nginx-ds-example.conf
-        /etc/onlyoffice/documentserver-example/nginx/includes/ds-example.conf &&
-        sed "s/__DOCUMENTSERVER_HTTP_PORT__/$${DOCUMENTSERVER_HTTP_PORT}/g"
-        /opt/onlyoffice-copilot/nginx-copilot-loopback.conf
-        > /etc/nginx/conf.d/copilot-loopback.conf &&
+        install -m 0644 /opt/onlyoffice-copilot/nginx-document-app.conf
+        /etc/nginx/includes/ds-copilot.conf &&
+        if [ -L /etc/nginx/includes/ds-example.conf ]; then
+          unlink /etc/nginx/includes/ds-example.conf;
+        fi &&
         exec /app/ds/run-document-server.sh
     ports:
       # Bind only on host loopback; the host reverse proxy owns public ingress.
@@ -40,7 +42,7 @@ services:
       - "127.0.0.1:${DOCUMENTSERVER_HTTPS_PORT:-8443}:443"
     environment:
       DOCUMENTSERVER_HTTP_PORT: "${DOCUMENTSERVER_HTTP_PORT:-8088}"
-      EXAMPLE_ENABLED: "true"
+      EXAMPLE_ENABLED: "false"
       PLUGINS_ENABLED: "${ONLYOFFICE_DEFAULT_PLUGINS_ENABLED:-false}"
       JWT_ENABLED: "true"
       JWT_SECRET: "${ONLYOFFICE_JWT_SECRET:-onlyoffice-copilot-local}"
@@ -49,6 +51,8 @@ services:
       COPILOT_API_KEY: "${COPILOT_API_KEY:-}"
       COPILOT_MODEL: "${COPILOT_MODEL:-}"
       DOCUMENT_PUBLIC_ORIGIN: "${DOCUMENT_PUBLIC_ORIGIN:-http://localhost:8088}"
+      DOCUMENT_STORAGE_DIR: "/var/lib/onlyoffice/copilot/documents"
+      DOCUMENT_MAX_SAVE_BYTES: "${DOCUMENT_MAX_SAVE_BYTES:-209715200}"
       DOCUMENT_ADMIN_USERNAME: "${DOCUMENT_ADMIN_USERNAME:-}"
       DOCUMENT_ADMIN_PASSWORD: "${DOCUMENT_ADMIN_PASSWORD:-}"
     healthcheck:
@@ -64,10 +68,9 @@ services:
       - onlyoffice_lib:/var/lib/onlyoffice
       - onlyoffice_fonts:/usr/share/fonts/truetype/custom
       # Keep generated documents in a project-visible host directory.
-      - "./data/documents:/var/lib/onlyoffice/documentserver-example/files"
+      - "./data/documents:/var/lib/onlyoffice/copilot/documents"
       - "./plugins/ai-bridge:/var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}:ro"
-      - "./plugins/ai-bridge/nginx-ds-example.conf:/opt/onlyoffice-copilot/nginx-ds-example.conf:ro"
-      - "./plugins/ai-bridge/nginx-copilot-loopback.conf:/opt/onlyoffice-copilot/nginx-copilot-loopback.conf:ro"
+      - "./plugins/ai-bridge/nginx-document-app.conf:/opt/onlyoffice-copilot/nginx-document-app.conf:ro"
       - "./plugins/ai-bridge/copilot_server.py:/opt/onlyoffice-copilot/copilot_server.py:ro"
       - "./plugins/ai-bridge/run-copilot.sh:/opt/onlyoffice-copilot/run-copilot.sh:ro"
       - "./plugins/ai-bridge/supervisor-ds-copilot.conf:/etc/supervisor/conf.d/ds-copilot.conf:ro"

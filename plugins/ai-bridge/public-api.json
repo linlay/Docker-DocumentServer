@@ -3691,13 +3691,13 @@
         "properties": {
           "kind": {
             "enum": [
-              "onlyoffice",
+              "office",
               "vba"
             ]
           }
         },
         "additionalProperties": false,
-        "description": "只读检查 Word 的 ONLYOFFICE 或 VBA 宏",
+        "description": "只读检查 Word 的 OFFICE 或 VBA 宏",
         "x-effects": "read",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -3742,7 +3742,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "替换 Word 文档中保存的 ONLYOFFICE 宏集合",
+        "description": "替换 Word 文档中保存的 OFFICE 宏集合",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -5208,7 +5208,7 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false,
-        "description": "只读检查 ONLYOFFICE 编辑器内置主题库",
+        "description": "只读检查 OFFICE 编辑器内置主题库",
         "x-effects": "read",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -5665,7 +5665,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "把 ONLYOFFICE 编辑器内置主题应用到当前演示文稿",
+        "description": "把 OFFICE 编辑器内置主题应用到当前演示文稿",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -8624,13 +8624,13 @@
         "properties": {
           "kind": {
             "enum": [
-              "onlyoffice",
+              "office",
               "vba"
             ]
           }
         },
         "additionalProperties": false,
-        "description": "只读检查 PPT 的 ONLYOFFICE 宏或 VBA 宏",
+        "description": "只读检查 PPT 的 OFFICE 宏或 VBA 宏",
         "x-effects": "read",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -8646,7 +8646,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "设置或清除 PPT 的 ONLYOFFICE 宏内容",
+        "description": "设置或清除 PPT 的 OFFICE 宏内容",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -10278,7 +10278,7 @@
         "properties": {
           "kind": {
             "enum": [
-              "onlyoffice",
+              "office",
               "vba"
             ]
           }
@@ -10637,7 +10637,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "按 chartIndex 或 name 删除 XLSX 图表；部分 ONLYOFFICE 版本/许可不提供 ApiDrawing.Delete，此时会明确失败",
+        "description": "按 chartIndex 或 name 删除 XLSX 图表；部分 OFFICE 版本/许可不提供 ApiDrawing.Delete，此时会明确失败",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []

@@ -77,6 +77,49 @@ class ContractGenerationTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, second.stdout)
 
+    def test_httpx_toml_uses_configured_origin_and_skill_attach_names(
+        self,
+    ) -> None:
+        base_url = "https://office.example.test/"
+        sha256 = sync_contract.contract_sha256(self.contract)
+        expected_attach_actions = {
+            "word": "attach_current_word",
+            "slide": "attach_current_pptx",
+            "cell": "attach_current_xlsx",
+        }
+        for editor, attach_action in expected_attach_actions.items():
+            with self.subTest(editor=editor):
+                rendered = sync_contract.render_toml(
+                    self.contract,
+                    editor,
+                    sha256,
+                    base_url,
+                )
+                self.assertIn(
+                    'base_url = "https://office.example.test"',
+                    rendered,
+                )
+                self.assertIn(f"[actions.{attach_action}]", rendered)
+                self.assertIn(f"[actions.{attach_action}.save]", rendered)
+                self.assertIn(
+                    f'editorType = {{ from = "literal", value = "{editor}" }}',
+                    rendered,
+                )
+
+    def test_httpx_base_url_rejects_non_origin_values(self) -> None:
+        invalid_values = (
+            None,
+            "",
+            "office.example.test",
+            "https://user@office.example.test",
+            "https://office.example.test/path",
+            "https://office.example.test?query=1",
+            "https://office.example.test#fragment",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                sync_contract.normalize_httpx_base_url(value)
+
     def test_check_logic_detects_a_manual_generated_file_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             projection = Path(directory) / "contract.generated.json"

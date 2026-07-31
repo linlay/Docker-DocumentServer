@@ -74,8 +74,9 @@ const editorConfig = {
 const docEditor = new DocsAPI.DocEditor("editor", editorConfig);
 ```
 
-The bundled example injects this configuration through
-`nginx-ds-example.conf`.
+The first-party editor shell generates and signs this configuration in
+`copilot_server.py`; `nginx-document-app.conf` only routes the editor and
+loopback storage endpoints.
 
 The plugin options bind the hidden plugin frame to the exact editor host page.
 They must be set before `DocsAPI.DocEditor` is constructed. If the editor host
@@ -86,21 +87,18 @@ hosts must allow both scripts and same-origin behavior. An opaque `"null"`
 origin is intentionally unsupported. When options are absent, only the legacy
 top-level-page handshake is used.
 
-The bundled Nginx example selects `uid-0` as the default local visitor. Before
-constructing the editor, `local-guest.js` stores one UUID v4 in
+Before constructing the editor, `local-guest.js` stores one UUID v4 in
 `onlyoffice.localGuestId.v1`, submits the already-signed editor token to
 `POST /copilot-api/editor-config/anonymous`, and applies the returned
 server-signed user `{ id: "local-guest:<uuid>", name: "访客" }`. The endpoint
 only accepts an existing valid editor JWT and a UUID; it does not accept a
-document config, permissions, or caller-selected name. Explicit `userid`
-choices such as `uid-1`, `uid-2`, and `uid-3` keep the example application's
-original signed identity.
+document config, permissions, or caller-selected name.
 
-The injection also removes the complete left-menu layout container, including
-its reserved width, and hides the unused Collaboration, Plugins, and default AI
-toolbar tabs in the same-origin demo without changing document permissions. It
-enables ONLYOFFICE's native compact toolbar: the ribbon starts folded, a normal
-tab click expands it, and clicking the active tab folds it again and clears the
+The signed configuration removes the complete left-menu layout container,
+including its reserved width, and hides the unused Collaboration, Plugins, and
+default AI toolbar tabs without changing document permissions. It enables
+ONLYOFFICE's native compact toolbar: the ribbon starts folded, a normal tab
+click expands it, and clicking the active tab folds it again and clears the
 selected tab. Existing ONLYOFFICE toolbar preferences still take precedence.
 External integrations that want the same behavior must set
 `editorConfig.customization.compactToolbar` to `true` before constructing
@@ -275,11 +273,19 @@ runtime semantics, regenerate the checked-in projections and the zenmind-env
 HTTPX/skill artifacts:
 
 ```bash
-python3 tools/sync_contract.py --write --zenmind-root /path/to/zenmind-env
-python3 tools/sync_contract.py --check --zenmind-root /path/to/zenmind-env
+python3 tools/sync_contract.py --write \
+  --zenmind-root /path/to/zenmind-env \
+  --httpx-base-url https://docs.example.com
+python3 tools/sync_contract.py --check \
+  --zenmind-root /path/to/zenmind-env \
+  --httpx-base-url https://docs.example.com
 ```
 
 Generated files contain an edit warning and must not be changed directly.
+`--httpx-base-url` is required when generating zenmind-env projections. It must
+be the agent-visible HTTP(S) origin without credentials, a path, a query, or a
+fragment. The generator writes that configured origin into all three HTTPX
+bridge sites.
 
 Word, nested Word, and Slides table `data` cells accept
 `string | number | boolean | null` or a formatting object with a required string
@@ -480,6 +486,12 @@ restore an old page: Agent calls return `NO_ACTIVE_EDITOR` until a page is
 refreshed or opened and registers a new session. The editor page must remain
 open.
 
+`host-bridge.js` enables this HTTP Relay by default only on loopback hosts.
+A non-loopback editor must set `window.aiBridgeOptions.httpRelay = true` before
+loading `host-bridge.js`, and the page must use HTTPS. The bundled first-party
+`editor-shell.js` performs this explicit opt-in while preserving any existing
+`aiBridgeOptions`; setting `httpRelay = false` still disables the Relay.
+
 The Relay writes one sanitized `[bridge-command]` JSON line for the first
 completion, failure, or timeout of each request. It reports the queue wait,
 editor round trip, total duration, method, and tool count. Editor registration
@@ -508,9 +520,9 @@ DOCUMENTSERVER_HTTPS_PORT=11980
 DOCUMENT_PUBLIC_ORIGIN=https://docs.example.com
 ```
 
-Compose renders the same HTTP port into the container's loopback Nginx route,
-so DocumentServer callbacks continue to work when a non-default host port is
-used. Until a public hostname is configured, an SSH-tunnel deployment can use
+DocumentServer downloads and callbacks always use the container's port 80
+loopback route, so they do not depend on the published host port. Until a
+public hostname is configured, an SSH-tunnel deployment can use
 `DOCUMENT_PUBLIC_ORIGIN=http://127.0.0.1:11981`.
 
 Create a document without authentication:
@@ -528,8 +540,10 @@ stable browser-local guest identity and loads ai-bridge automatically.
 
 Open `http://localhost:8088/admin/` to view UUID documents after Basic Auth.
 Set `DOCUMENT_PUBLIC_ORIGIN` when the public origin is not
-`http://localhost:8088`. The legacy `/example*` surface is intentionally
-closed, and legacy named files are neither listed nor migrated.
+`http://localhost:8088`. The bundled sample application is disabled with
+`EXAMPLE_ENABLED=false`; legacy named files are neither listed nor migrated.
+See `../../COPILOT_PRODUCTION.md` for the production request flow, persistence,
+security boundaries, and operational checks.
 
 ## Files
 
@@ -545,6 +559,8 @@ closed, and legacy named files are neither listed nor migrated.
 - `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
 - `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
 - `bridges/*.js`: editor-specific Office API implementations.
-- `copilot_server.py`: optional planning API plus example save/version service.
-- `nginx-ds-example.conf`: example plugin and host API injection.
+- `editor-shell.js`: first-party editor bootstrap and failure UI.
+- `copilot_server.py`: planning API, editor config, document storage, callbacks,
+  and version service.
+- `nginx-document-app.conf`: public editor routes and private storage routing.
 - `../../docker-compose.copilot.yml`: local deployment.

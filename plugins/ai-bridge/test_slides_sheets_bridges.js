@@ -2334,6 +2334,7 @@ test("Slides bridge uses plugin methods for built-in themes, macros, and slidesh
   assert.equal(themes.results[0].content[0].name, "Ion");
   assert.equal(applied.needsSave, true);
   assert.equal(macros.needsSave, true);
+  assert.equal(macros.results[0].kind, "office");
   assert.equal(slideshow.needsSave, false);
   assert.deepEqual(Array.from(presentation.pluginCalls, entry => entry[0]), [
     "GetEditorThemes",

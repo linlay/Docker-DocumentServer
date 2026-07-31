@@ -85,7 +85,7 @@
     "forms", "header", "heading", "hidden", "image", "inFront", "inline",
     "insertAttribute", "insertElement", "landscape", "latex", "left",
     "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
-    "number", "numbered", "numbering", "oddPage", "oleObject", "onlyoffice",
+    "number", "numbered", "numbering", "oddPage", "office", "oleObject",
     "page", "paragraph", "picture", "portrait", "previous", "protect",
     "readOnly", "rejectAll", "relative", "remove", "removeAll",
     "removeColumn", "removeRow", "reopen", "replace", "reply", "resolve",
@@ -753,7 +753,7 @@
             needsSave: needsSave,
             results: [{
               name: call.name,
-              kind: method === "GetVBAMacros" ? "vba" : "onlyoffice",
+              kind: method === "GetVBAMacros" ? "vba" : "office",
               content: content,
             }],
           });

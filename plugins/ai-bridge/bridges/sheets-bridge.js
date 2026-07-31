@@ -490,7 +490,7 @@
               editorType: "cell",
               changed: needsSave ? 1 : 0,
               needsSave: needsSave,
-              results: [{ name: call.name, kind: method === "GetVBAMacros" ? "vba" : "onlyoffice", content: content }],
+              results: [{ name: call.name, kind: method === "GetVBAMacros" ? "vba" : "office", content: content }],
             });
           } catch (error) {
             if (!error.details || typeof error.details !== "object") error.details = {};

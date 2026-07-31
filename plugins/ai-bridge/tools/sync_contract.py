@@ -15,6 +15,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 BRIDGE_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +38,7 @@ EDITOR_CONFIG = {
         "fileType": "docx",
         "prefix": "word_",
         "label": "Word",
+        "attachAction": "attach_current_word",
         "unitKey": "word",
         "normalizationKey": "word",
     },
@@ -47,6 +49,7 @@ EDITOR_CONFIG = {
         "fileType": "pptx",
         "prefix": "slides_",
         "label": "Slides",
+        "attachAction": "attach_current_pptx",
         "unitKey": "slide",
         "normalizationKey": "slide",
     },
@@ -57,6 +60,7 @@ EDITOR_CONFIG = {
         "fileType": "xlsx",
         "prefix": "sheets_",
         "label": "Sheets",
+        "attachAction": "attach_current_xlsx",
         "unitKey": "sheet",
         "normalizationKey": "sheet",
     },
@@ -739,19 +743,46 @@ def action_params(kind: str) -> list[str]:
     ]
 
 
-def render_toml(contract: dict[str, Any], editor: str, sha256: str) -> str:
+def normalize_httpx_base_url(value: str | None) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            "--httpx-base-url is required when --zenmind-root is used"
+        )
+    candidate = value.strip()
+    parsed = urlsplit(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            "--httpx-base-url must be an absolute HTTP(S) origin"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("--httpx-base-url must not contain credentials")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise ValueError(
+            "--httpx-base-url must not contain a path, query, or fragment"
+        )
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def render_toml(
+    contract: dict[str, Any],
+    editor: str,
+    sha256: str,
+    httpx_base_url: str,
+) -> str:
     config = EDITOR_CONFIG[editor]
     file_type = config["fileType"]
     label = config["label"]
+    attach_action = config["attachAction"]
+    base_url = normalize_httpx_base_url(httpx_base_url)
     lines = [
         "version = 1",
         (
             "description = "
             + toml_string(
-                f"本机 ONLYOFFICE {label} bridge；业务参数由 ai-bridge {contract['version']} 契约定义"
+                f"OFFICE {label} bridge；业务参数由 ai-bridge {contract['version']} 契约定义"
             )
         ),
-        'base_url = "http://localhost:8088"',
+        f"base_url = {toml_string(base_url)}",
         'timeout = "120s"',
         "retries = 0",
         'state_scope = "chat"',
@@ -761,7 +792,7 @@ def render_toml(contract: dict[str, Any], editor: str, sha256: str) -> str:
         f'User-Agent = "agent-platform-httpx/{config["site"]}"',
         "",
         "[actions.health]",
-        'description = "检查本机 bridge 服务和当前契约身份"',
+        'description = "检查 OFFICE bridge 服务和当前契约身份"',
         'path = "/copilot-api/health"',
         "expect_status = 200",
         'extract_type = "jq"',
@@ -782,7 +813,7 @@ def render_toml(contract: dict[str, Any], editor: str, sha256: str) -> str:
         'extract_type = "jq"',
         'extract_expr = ".body"',
         "",
-        f"[actions.attach_current_{editor}]",
+        f"[actions.{attach_action}]",
         f'description = "将当前 Chat 绑定到 ready 的 {label} Relay，并返回契约身份"',
         'method = "POST"',
         'path = "/copilot-api/bridge/attach"',
@@ -805,7 +836,7 @@ def render_toml(contract: dict[str, Any], editor: str, sha256: str) -> str:
             f"else error(\"ATTACH_FAILED: {config['site']}\") end'''"
         ),
         "",
-        f"[actions.attach_current_{editor}.save]",
+        f"[actions.{attach_action}.save]",
         '"auth.bridge" = \'\'\'"Bearer " + .body.bindingToken\'\'\'',
         "",
         "[actions.get_state]",
@@ -1001,6 +1032,7 @@ def contract_mismatch(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def build_artifacts(
     contract: dict[str, Any],
     zenmind_root: Path | None,
+    httpx_base_url: str | None = None,
 ) -> dict[Path, str]:
     sha256 = contract_sha256(contract)
     artifacts = {
@@ -1054,6 +1086,7 @@ def build_artifacts(
         return artifacts
     if not zenmind_root.is_dir():
         raise ValueError(f"zenmind root does not exist: {zenmind_root}")
+    normalized_httpx_base_url = normalize_httpx_base_url(httpx_base_url)
     httpx_root = (
         zenmind_root
         / "agents"
@@ -1084,6 +1117,7 @@ def build_artifacts(
             contract,
             editor,
             sha256,
+            normalized_httpx_base_url,
         )
     return artifacts
 
@@ -1137,10 +1171,24 @@ def main() -> int:
         type=Path,
         help="zenmind-env repository root; enables TOML and skill projections",
     )
+    parser.add_argument(
+        "--httpx-base-url",
+        help=(
+            "HTTP(S) origin used by generated HTTPX bridge sites; "
+            "required with --zenmind-root"
+        ),
+    )
     args = parser.parse_args()
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     validate_contract(contract)
-    artifacts = build_artifacts(contract, args.zenmind_root)
+    try:
+        artifacts = build_artifacts(
+            contract,
+            args.zenmind_root,
+            args.httpx_base_url,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     drift = drifted_paths(artifacts)
     for path in drift:
         expected = artifacts[path]

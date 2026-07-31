@@ -248,6 +248,7 @@ function createHarness(options = {}) {
       origin: "https://app.test",
       href: "https://app.test/editor",
       hostname: options.hostname || "app.test",
+      protocol: options.protocol || "https:",
       reload() { reloadCount += 1; },
     },
     crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
@@ -1341,6 +1342,59 @@ test("local Relay reports private startup timings and preserves editor event cal
     assert.equal(Number.isFinite(startup[field]), true, field);
     assert.ok(startup[field] >= 0, field);
   }
+});
+
+test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
+  let registerCalls = 0;
+  let pollCalls = 0;
+  const harness = createHarness({
+    hostname: "office.test",
+    protocol: "https:",
+    httpRelay: true,
+    hostFetch: async requestPath => {
+      if (requestPath.endsWith("/register")) {
+        registerCalls += 1;
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        pollCalls += 1;
+        return relayResponse(409, {
+          ok: false,
+          error: {
+            code: "SESSION_SUPERSEDED",
+            message: "test complete",
+          },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
+
+  assert.equal(registerCalls, 1);
+  assert.equal(pollCalls, 1);
+});
+
+test("explicit HTTP opt-in does not start Relay on a public host", async () => {
+  const harness = createHarness({
+    hostname: "office.test",
+    protocol: "http:",
+    httpRelay: true,
+    hostFetch: async () => {
+      throw new Error("public HTTP must not start Relay");
+    },
+  });
+
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  assert.deepEqual(harness.hostRelayPaths, []);
+  assert.equal(harness.documentElement.dataset.aiBridgeRelayState, undefined);
 });
 
 test("superseded HTTP Relay stops without re-registering or reloading", async () => {
@@ -2947,7 +3001,7 @@ test("word bridge inspects and replaces the document macro collection through pl
 
   const inspected = await harness.bridge.execute([{
     name: "word_inspect_macros",
-    arguments: { kind: "onlyoffice" },
+    arguments: { kind: "office" },
   }]);
   const updated = await harness.bridge.execute([{
     name: "word_set_macros",
@@ -2955,6 +3009,7 @@ test("word bridge inspects and replaces the document macro collection through pl
   }]);
 
   assert.deepEqual(inspected.results[0].content, macros);
+  assert.equal(inspected.results[0].kind, "office");
   assert.equal(inspected.needsSave, false);
   assert.equal(updated.needsSave, true);
   assert.equal(updated.changed, 1);

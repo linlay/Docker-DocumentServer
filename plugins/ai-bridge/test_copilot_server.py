@@ -15,71 +15,58 @@ import copilot_server
 
 
 class ContractAlignmentTests(unittest.TestCase):
-    def test_capability_gateway_defaults_to_stable_guest_without_forcing_a_user(self):
-        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
-        with open(config_path, encoding="utf-8") as stream:
-            config = stream.read()
+    def test_editor_shell_prepares_identity_before_starting_doc_editor(self):
+        base_dir = os.path.dirname(__file__)
+        with open(
+            os.path.join(base_dir, "editor-shell.js"),
+            encoding="utf-8",
+        ) as stream:
+            shell = stream.read()
+        with open(
+            os.path.join(base_dir, "local-guest.js"),
+            encoding="utf-8",
+        ) as stream:
+            guest = stream.read()
 
-        self.assertIn(
-            """sub_filter '<option value="uid-0">Anonymous</option>' '<option value="uid-0" selected>访客</option>';""",
-            config,
+        self.assertIn("root.config = config;", shell)
+        self.assertIn("await loadHostBridge();", shell)
+        self.assertIn("OnlyOfficeLocalGuest.prepareEditor(config)", shell)
+        self.assertLess(
+            shell.index("OnlyOfficeLocalGuest.prepareEditor(config)"),
+            shell.index("new root.DocsAPI.DocEditor"),
         )
-        self.assertIn("OnlyOfficeLocalGuest.prepareExample(config)", config)
-        self.assertNotRegex(config, r"editorConfig\.user\s*=")
-        self.assertNotIn("uid-1", config)
-        self.assertNotIn("uid-2", config)
-        self.assertNotIn("uid-3", config)
+        self.assertIn("prepareEditor: prepareEditor", guest)
+        self.assertNotIn("prepareExample", guest)
 
-    def test_capability_gateway_enables_native_compact_toolbar_before_editor_events(self):
-        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
-        with open(config_path, encoding="utf-8") as stream:
-            config = stream.read()
-
-        compact_toolbar = "config.editorConfig.customization.compactToolbar = true;"
-        self.assertEqual(config.count(compact_toolbar), 1)
-        self.assertLess(config.index(compact_toolbar), config.rindex("config.events = {"))
-
-    def test_capability_gateway_uses_simplified_chinese_editor_config(self):
-        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
-        with open(config_path, encoding="utf-8") as stream:
-            config = stream.read()
-
-        self.assertIn(
-            """sub_filter '<option value="zh">zh</option>' '<option value="zh" selected>zh</option>';""",
-            config,
+    def test_document_app_has_no_example_proxy_or_html_rewriting(self):
+        config_path = os.path.join(
+            os.path.dirname(__file__),
+            "nginx-document-app.conf",
         )
-        self.assertIn("absolute_redirect off;", config)
-        self.assertIn("&lang=zh;", config)
-        self.assertNotIn('config.editorConfig.lang = "zh"', config)
-
-    def test_legacy_example_is_closed_and_storage_is_loopback_only(self):
-        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
 
-        self.assertIn("location = /example {", config)
-        self.assertIn("location ^~ /example/ {", config)
-        self.assertEqual(config.count("return 404;"), 2)
+        self.assertNotIn("proxy_pass http://example", config)
+        self.assertNotIn("sub_filter", config)
+        self.assertNotIn("/__document_editor/", config)
         self.assertIn("location ^~ /__document_storage/ {", config)
         self.assertIn("allow 127.0.0.1;", config)
         self.assertIn("deny all;", config)
+        self.assertIn("proxy_pass http://127.0.0.1:3001/documents/storage/;", config)
+        self.assertIn("location ^~ /__document_files/ {", config)
         self.assertIn("internal;", config)
-        self.assertIn("proxy_set_header X-Forwarded-Host 127.0.0.1;", config)
-        self.assertIn("proxy_set_header X-Forwarded-Proto http;", config)
-        with open(
-            os.path.join(os.path.dirname(__file__), "copilot_server.py"),
-            encoding="utf-8",
-        ) as stream:
-            self.assertIn("X-Accel-Redirect", stream.read())
 
     def test_gateway_exposes_three_create_and_capability_routes(self):
-        config_path = os.path.join(os.path.dirname(__file__), "nginx-ds-example.conf")
+        config_path = os.path.join(
+            os.path.dirname(__file__),
+            "nginx-document-app.conf",
+        )
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
 
         self.assertIn("docx|xlsx|pptx", config)
         self.assertIn("^/new-(docx|xlsx|pptx)$", config)
-        self.assertIn("/__document_editor/", config)
+        self.assertIn("location = /documents/editor", config)
         self.assertIn("proxy_pass http://127.0.0.1:3001;", config)
         self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", config)
 
@@ -103,15 +90,14 @@ class ContractAlignmentTests(unittest.TestCase):
 
         self.assertIn('"DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"', compose)
         self.assertIn('"DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"', compose)
+        self.assertIn('"DOCUMENT_STORAGE_DIR=$${DOCUMENT_STORAGE_DIR}"', compose)
         self.assertIn("> /run/onlyoffice-copilot.env", compose)
+        self.assertIn('EXAMPLE_ENABLED: "false"', compose)
         self.assertIn(
-            '"./data/documents:/var/lib/onlyoffice/documentserver-example/files"',
+            '"./data/documents:/var/lib/onlyoffice/copilot/documents"',
             compose,
         )
-        self.assertIn(
-            "/var/lib/onlyoffice/documentserver-example/files",
-            compose,
-        )
+        self.assertNotIn("nginx-copilot-loopback.conf", compose)
         self.assertIn(
             "command=/bin/bash /opt/onlyoffice-copilot/run-copilot.sh",
             supervisor,
@@ -124,7 +110,6 @@ class ContractAlignmentTests(unittest.TestCase):
         paths = [
             "config.json",
             "index.html",
-            "nginx-ds-example.conf",
             "README.md",
             "INTEGRATION.zh-CN.md",
         ]
@@ -286,6 +271,7 @@ class DocumentGatewayTests(unittest.TestCase):
                 "DOCUMENT_PUBLIC_ORIGIN": "https://office.test",
                 "DOCUMENT_ADMIN_USERNAME": "document-admin",
                 "DOCUMENT_ADMIN_PASSWORD": "correct horse battery staple",
+                "JWT_SECRET": "document-test-secret",
             },
         )
         self.environment.start()
@@ -434,20 +420,190 @@ class DocumentGatewayTests(unittest.TestCase):
                 copilot_server.require_document_admin(handler)
         self.assertEqual(unconfigured.exception.status, 503)
 
-    def test_gateway_uses_internal_acceleration_without_redirecting_browser(self):
+    def test_editor_config_uses_first_party_loopback_storage_and_signed_jwt(self):
+        created = copilot_server.create_document("xlsx")
+        config = copilot_server.document_editor_config(
+            "xlsx",
+            created["documentId"],
+        )
+        claims = copilot_server.verify_editor_jwt_payload(config["token"])
+
+        self.assertRegex(config["document"]["key"], copilot_server.DOCUMENT_KEY_PATTERN)
+        self.assertTrue(
+            config["document"]["url"].startswith(
+                "http://127.0.0.1/__document_storage/download/xlsx/"
+            )
+        )
+        self.assertEqual(
+            config["editorConfig"]["callbackUrl"],
+            "http://127.0.0.1/__document_storage/callback/xlsx/"
+            + created["documentId"],
+        )
+        self.assertEqual(config["editorConfig"]["lang"], "zh")
+        self.assertTrue(
+            config["editorConfig"]["customization"]["compactToolbar"]
+        )
+        self.assertEqual(
+            config["editorConfig"]["user"]["id"],
+            "pending-local-guest",
+        )
+        self.assertEqual(
+            claims["document"]["key"],
+            config["document"]["key"],
+        )
+
+    def test_document_key_is_stable_until_canonical_file_changes(self):
+        created = copilot_server.create_document("docx")
+        first = copilot_server.document_revision_key(
+            "docx",
+            created["documentId"],
+        )
+        second = copilot_server.document_revision_key(
+            "docx",
+            created["documentId"],
+        )
+        path = os.path.join(self.storage.name, created["fileName"])
+        with open(path, "ab") as stream:
+            stream.write(b"-changed")
+        os.utime(path, ns=(time.time_ns(), time.time_ns()))
+        changed = copilot_server.document_revision_key(
+            "docx",
+            created["documentId"],
+        )
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, changed)
+
+    def test_editor_response_is_first_party_html_without_internal_redirect(self):
         created = copilot_server.create_document("pptx")
         handler = mock.Mock()
 
-        copilot_server.document_gateway_response(
+        copilot_server.document_editor_response(
             handler,
             "pptx",
             created["documentId"],
         )
 
         handler.send_response.assert_called_once_with(200)
+        headers = {
+            call.args[0]: call.args[1]
+            for call in handler.send_header.call_args_list
+        }
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertNotIn("X-Accel-Redirect", headers)
+        body = handler.wfile.write.call_args.args[0].decode("utf-8")
+        self.assertIn("/web-apps/apps/api/documents/api.js", body)
+        self.assertIn("editor-shell.js", body)
+        self.assertNotIn("example", body.lower())
+
+    def test_storage_download_requires_jwt_and_uses_internal_file_acceleration(self):
+        created = copilot_server.create_document("docx")
+        token = copilot_server.sign_jwt(
+            {"url": "http://127.0.0.1/__document_storage/download"},
+            "document-test-secret",
+        )
+        handler = mock.Mock()
+        handler.headers = {"Authorization": f"Bearer {token}"}
+
+        copilot_server.storage_download_response(
+            handler,
+            "docx",
+            created["documentId"],
+        )
+
         handler.send_header.assert_any_call(
             "X-Accel-Redirect",
-            f"/__document_editor/pptx/{created['documentId']}",
+            f"/__document_files/{created['fileName']}",
+        )
+        handler.headers = {}
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.storage_download_response(
+                handler,
+                "docx",
+                created["documentId"],
+            )
+        self.assertEqual(raised.exception.status, 401)
+
+    def test_signed_callback_atomically_replaces_canonical_document(self):
+        created = copilot_server.create_document("xlsx")
+        config = copilot_server.document_editor_config(
+            "xlsx",
+            created["documentId"],
+        )
+        callback = {
+            "filetype": "xlsx",
+            "key": config["document"]["key"],
+            "status": 6,
+            "url": "http://127.0.0.1/cache/files/output.xlsx?signature=test",
+        }
+        token = copilot_server.sign_jwt(callback, "document-test-secret")
+        handler = mock.Mock()
+        handler.headers = {}
+        response = io.BytesIO(b"PK\x03\x04saved-xlsx")
+        response.headers = {"Content-Length": "14"}
+
+        with mock.patch.object(
+            copilot_server.urllib.request,
+            "urlopen",
+            return_value=response,
+        ):
+            result = copilot_server.process_document_callback(
+                handler,
+                {"token": token},
+                "xlsx",
+                created["documentId"],
+            )
+
+        self.assertEqual(result, {"error": 0})
+        with open(
+            os.path.join(self.storage.name, created["fileName"]),
+            "rb",
+        ) as stream:
+            self.assertEqual(stream.read(), b"PK\x03\x04saved-xlsx")
+        self.assertEqual(
+            [
+                name
+                for name in os.listdir(self.storage.name)
+                if ".saving-" in name
+            ],
+            [],
+        )
+
+    def test_callback_rewrites_a_loopback_host_port_to_container_nginx(self):
+        self.assertEqual(
+            copilot_server.normalized_callback_download_url(
+                "http://127.0.0.1:11981/cache/files/output.xlsx?signature=test"
+            ),
+            "http://127.0.0.1/cache/files/output.xlsx?signature=test",
+        )
+
+    def test_callback_rejects_a_valid_token_for_another_document(self):
+        created = copilot_server.create_document("pptx")
+        other = copilot_server.create_document("pptx")
+        config = copilot_server.document_editor_config(
+            "pptx",
+            other["documentId"],
+        )
+        token = copilot_server.sign_jwt(
+            {
+                "key": config["document"]["key"],
+                "status": 4,
+            },
+            "document-test-secret",
+        )
+        handler = mock.Mock()
+        handler.headers = {}
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.process_document_callback(
+                handler,
+                {"token": token},
+                "pptx",
+                created["documentId"],
+            )
+        self.assertEqual(
+            raised.exception.code,
+            "DOCUMENT_CALLBACK_KEY_MISMATCH",
         )
 
 
@@ -2607,38 +2763,54 @@ class BridgeLoggingTests(unittest.TestCase):
 class VersionHistoryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.original_root = copilot_server.EXAMPLE_FILES
-        copilot_server.EXAMPLE_FILES = self.temporary.name
-        user_directory = os.path.join(self.temporary.name, "test-user")
-        os.makedirs(user_directory)
-        self.main_file = os.path.join(user_directory, "demo.docx")
+        self.environment = mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_STORAGE_DIR": self.temporary.name},
+        )
+        self.environment.start()
+        self.file_name = "123e4567-e89b-42d3-a456-426614174000.docx"
+        self.main_file = os.path.join(self.temporary.name, self.file_name)
         with open(self.main_file, "wb") as stream:
             stream.write(b"version-one")
 
     def tearDown(self):
-        copilot_server.EXAMPLE_FILES = self.original_root
+        self.environment.stop()
         self.temporary.cleanup()
 
     def test_checkpoint_undo_and_redo_restore_file_bytes(self):
-        checkpoint = copilot_server.create_checkpoint("demo.docx")
+        checkpoint = copilot_server.create_checkpoint(self.file_name)
         self.assertTrue(checkpoint["canUndo"])
 
         with open(self.main_file, "wb") as stream:
             stream.write(b"version-two")
 
-        undone = copilot_server.restore_version("demo.docx", "undo", None, None)
+        undone = copilot_server.restore_version(
+            self.file_name,
+            "undo",
+            None,
+            None,
+        )
         with open(self.main_file, "rb") as stream:
             self.assertEqual(stream.read(), b"version-one")
         self.assertTrue(undone["canRedo"])
 
-        redone = copilot_server.restore_version("demo.docx", "redo", None, None)
+        redone = copilot_server.restore_version(
+            self.file_name,
+            "redo",
+            None,
+            None,
+        )
         with open(self.main_file, "rb") as stream:
             self.assertEqual(stream.read(), b"version-two")
         self.assertTrue(redone["canUndo"])
 
     def test_forcesave_error_four_is_a_downloadable_noop(self):
         with mock.patch.object(copilot_server, "command_service", return_value={"error": 4, "key": "key"}):
-            result = copilot_server.force_save("key", "demo.docx", allow_no_changes=True)
+            result = copilot_server.force_save(
+                "key",
+                self.file_name,
+                allow_no_changes=True,
+            )
 
         self.assertTrue(result["noChanges"])
         self.assertTrue(result["persisted"])

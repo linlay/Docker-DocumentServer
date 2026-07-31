@@ -156,6 +156,11 @@ popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是�
 仓库自带的 `localhost` demo 实现了上述 HTTP 后端投递通道，供 Agent
 Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
 
+`host-bridge.js` 默认只在回环地址启动 HTTP Relay。非回环编辑器页面必须在加载
+`host-bridge.js` 前显式设置 `window.aiBridgeOptions.httpRelay = true`，并且页面
+必须使用 HTTPS；仓库自带的第一方 `editor-shell.js` 已完成这个显式开启，同时保留
+已有的 `aiBridgeOptions`。显式设置为 `false` 时仍会禁用 Relay。
+
 1. 浏览器中的 `host-bridge.js` 使用当前 ONLYOFFICE editor JWT 注册长轮询会话。
 2. 真实 `/docx|xlsx|pptx/<uuid>` 页面在浏览器中打开并保持 Relay ready 后，
    HTTPX 只把准确 UUID 文件名和配置中固定的 editor type 传给

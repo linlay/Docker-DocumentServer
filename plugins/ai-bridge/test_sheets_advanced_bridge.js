@@ -1723,6 +1723,7 @@ test("Sheets macro tools use the documented plugin methods and reject mixed batc
   const { bridge, state } = createHarness();
   const inspected = await bridge.execute([{ name: "sheets_inspect_macros", arguments: {} }]);
   assert.equal(inspected.needsSave, false);
+  assert.equal(inspected.results[0].kind, "office");
   assert.equal(inspected.results[0].content.macrosArray[0].name, "Demo");
 
   const content = { macrosArray: [{ name: "Updated", value: "return 2;", guid: "macro-2" }], current: 0 };

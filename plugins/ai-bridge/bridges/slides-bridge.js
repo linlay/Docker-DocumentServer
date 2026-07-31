@@ -3686,7 +3686,7 @@
         resultKind = "theme";
       } else if (call.name === "slides_inspect_macros") {
         method = args.kind === "vba" ? "GetVBAMacros" : "GetMacros";
-        resultKind = method === "GetVBAMacros" ? "vba" : "onlyoffice";
+        resultKind = method === "GetVBAMacros" ? "vba" : "office";
       } else if (call.name === "slides_set_macros") {
         if (!args.content || typeof args.content !== "object" || Array.isArray(args.content)) {
           reject(new Error("slides_set_macros.content 必须是宏配置对象"));
@@ -3695,7 +3695,7 @@
         method = "SetMacros";
         params = [JSON.stringify(args.content)];
         needsSave = true;
-        resultKind = "onlyoffice";
+        resultKind = "office";
       } else if (call.name === "slides_control_slideshow") {
         var slideshowMethods = {
           start: "StartSlideShow",

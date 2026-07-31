@@ -72,7 +72,7 @@ function loadGuest(options = {}) {
     fetch: options.fetch,
     localStorage: storage,
     location: {
-      href: options.href || "http://localhost:8088/example/editor?userid=uid-0",
+      href: options.href || "http://localhost:8088/docx/123e4567-e89b-42d3-a456-426614174000",
       reload() {},
     },
   };
@@ -138,23 +138,39 @@ test("prepare reissues the token and applies the fixed guest identity", async ()
   assert.equal(result.expiresAt, 2000);
 });
 
-test("explicit example users bypass guest reissue", async () => {
+test("editor startup always replaces the placeholder identity", async () => {
   let fetchCalls = 0;
   const harness = loadGuest({
-    href: "http://localhost:8088/example/editor?userid=uid-2",
     fetch: async () => {
       fetchCalls += 1;
-      throw new Error("must not fetch");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            ok: true,
+            user: {
+              group: "",
+              id: `local-guest:${firstUuid}`,
+              image: "",
+              name: "访客",
+              roles: [],
+            },
+            token: "reissued-token",
+            expiresAt: 2000,
+          };
+        },
+      };
     },
   });
   const config = {
     token: "original-token",
-    editorConfig: {user: {id: "uid-2", name: "Mark Pottato"}},
+    editorConfig: {user: {id: "pending-local-guest", name: "访客"}},
   };
 
-  assert.equal(await harness.api.prepareExample(config), true);
-  assert.equal(fetchCalls, 0);
-  assert.equal(config.editorConfig.user.id, "uid-2");
+  assert.equal(await harness.api.prepareEditor(config), true);
+  assert.equal(fetchCalls, 1);
+  assert.equal(config.editorConfig.user.id, `local-guest:${firstUuid}`);
 });
 
 test("failed guest reissue blocks editor startup and renders retry UI", async () => {
@@ -175,7 +191,7 @@ test("failed guest reissue blocks editor startup and renders retry UI", async ()
     editorConfig: {user: {id: "uid-1", name: "John Smith"}},
   };
 
-  assert.equal(await harness.api.prepareExample(config), false);
+  assert.equal(await harness.api.prepareEditor(config), false);
   assert.equal(config.token, "original-token");
   assert.equal(config.editorConfig.user.name, "John Smith");
   assert.equal(harness.document.editor.children.length, 1);

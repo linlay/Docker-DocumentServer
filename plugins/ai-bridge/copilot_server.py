@@ -31,11 +31,15 @@ from typing import Any
 
 PORT = int(os.environ.get("COPILOT_PORT", "3001"))
 LOCAL_CONFIG = "/etc/onlyoffice/documentserver/local.json"
-EXAMPLE_FILES = "/var/lib/onlyoffice/documentserver-example/files"
-EXAMPLE_STORAGE_ID = "185.199.108.133"
+DOCUMENT_STORAGE_ROOT = "/var/lib/onlyoffice/copilot/documents"
+DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
+EDITOR_ASSET_REVISION = "0.6.0-rev4"
+EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
+DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
+AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
 DOCUMENT_TYPES = {
     "docx": "word",
     "xlsx": "cell",
@@ -54,10 +58,21 @@ PUBLIC_DOCUMENT_PATH_PATTERN = re.compile(
     r"[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
 )
 NEW_DOCUMENT_PATH_PATTERN = re.compile(r"^/new-(?P<fileType>docx|xlsx|pptx)$")
+DOCUMENT_STORAGE_PATH_PATTERN = re.compile(
+    r"^/documents/storage/(?P<action>download|callback)/"
+    r"(?P<fileType>docx|xlsx|pptx)/"
+    r"(?P<documentId>[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12})$"
+)
+DOCUMENT_KEY_PATTERN = re.compile(
+    r"^(?P<documentId>[0-9a-f-]{36})\.(?P<revision>[0-9a-f]{24})$"
+)
 DOCUMENT_CREATE_RATE_PER_SECOND = 10 / 60
 DOCUMENT_CREATE_BURST = 20
 DOCUMENT_RATE_LIMIT_LOCK = threading.Lock()
 DOCUMENT_RATE_LIMITS: dict[str, tuple[float, float]] = {}
+DOCUMENT_SAVE_LOCKS_LOCK = threading.Lock()
+DOCUMENT_SAVE_LOCKS: dict[str, threading.Lock] = {}
 MAX_VERSION_SNAPSHOTS = 20
 BRIDGE_SESSION_TTL_SECONDS = 180
 BRIDGE_RESUME_TOKEN_TTL_SECONDS = 12 * 60 * 60
@@ -1616,7 +1631,7 @@ def log_bridge_command(command: dict[str, Any], event: str, completed_monotonic:
 def image_asset_root() -> str:
     return os.environ.get(
         "COPILOT_IMAGE_DIR",
-        os.path.join(EXAMPLE_FILES, ".ai-bridge-images"),
+        os.path.join(document_storage_directory(), ".ai-bridge-images"),
     )
 
 
@@ -2982,7 +2997,7 @@ def read_json(handler: BaseHTTPRequestHandler, max_bytes: int = 2_000_000) -> di
 def document_storage_directory() -> str:
     return os.environ.get(
         "DOCUMENT_STORAGE_DIR",
-        os.path.join(EXAMPLE_FILES, EXAMPLE_STORAGE_ID),
+        DOCUMENT_STORAGE_ROOT,
     )
 
 
@@ -3039,6 +3054,140 @@ def document_public_origin() -> str:
 
 def document_editor_url(file_type: str, document_id: str) -> str:
     return f"{document_public_origin()}/{file_type}/{document_id}"
+
+
+def document_revision_key(file_type: str, document_id: str) -> str:
+    path = document_path(file_type, document_id)
+    metadata = os.stat(path, follow_symlinks=False)
+    revision = hashlib.sha256(
+        (
+            f"{document_id}\0{file_type}\0"
+            f"{metadata.st_size}\0{metadata.st_mtime_ns}"
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"{document_id}.{revision}"
+
+
+def document_editor_config(file_type: str, document_id: str) -> dict[str, Any]:
+    document_id = normalize_document_id(document_id)
+    file_name = f"{document_id}.{file_type}"
+    document_file_identity(file_name)
+    document_key = document_revision_key(file_type, document_id)
+    internal_base = (
+        f"{DOCUMENT_INTERNAL_ORIGIN}/__document_storage"
+        f"/download/{file_type}/{document_id}"
+    )
+    channel_id = f"channel-{uuid.uuid4()}"
+    plugin_url = (
+        f"{document_public_origin()}/sdkjs-plugins/"
+        f"{{A17E5F31-64AA-4E37-9A42-8D430814C2F6}}"
+        f"/config.json?v={EDITOR_ASSET_REVISION}"
+    )
+    config: dict[str, Any] = {
+        "document": {
+            "fileType": file_type,
+            "key": document_key,
+            "title": file_name,
+            "url": f"{internal_base}?v={document_key.rsplit('.', 1)[-1]}",
+            "info": {
+                "owner": "Office",
+                "uploaded": time.strftime(
+                    "%Y-%m-%d %H:%M:%S UTC",
+                    time.gmtime(os.path.getmtime(document_path(file_type, document_id))),
+                ),
+            },
+            "permissions": {
+                "chat": False,
+                "comment": True,
+                "copy": True,
+                "download": True,
+                "edit": True,
+                "fillForms": True,
+                "modifyContentControl": True,
+                "modifyFilter": True,
+                "print": True,
+                "protect": True,
+                "review": True,
+            },
+        },
+        "documentType": DOCUMENT_TYPES[file_type],
+        "editorConfig": {
+            "callbackUrl": (
+                f"{DOCUMENT_INTERNAL_ORIGIN}/__document_storage"
+                f"/callback/{file_type}/{document_id}"
+            ),
+            "customization": {
+                "compactToolbar": True,
+                "feedback": False,
+                "forcesave": False,
+                "layout": {
+                    "leftMenu": False,
+                    "toolbar": {
+                        "collaboration": False,
+                        "plugins": False,
+                    },
+                },
+            },
+            "lang": "zh",
+            "mode": "edit",
+            "plugins": {
+                "pluginsData": [plugin_url],
+                "autostart": [AI_BRIDGE_GUID],
+                "options": {
+                    AI_BRIDGE_GUID: {
+                        "hostOrigin": document_public_origin(),
+                        "channelId": channel_id,
+                    },
+                },
+            },
+            "user": {
+                "group": "",
+                "id": "pending-local-guest",
+                "image": "",
+                "name": "访客",
+                "roles": [],
+            },
+        },
+        "height": "100%",
+        "type": "desktop",
+        "width": "100%",
+    }
+    now = int(time.time())
+    token_payload = {
+        **config,
+        "iat": now,
+        "exp": now + EDITOR_TOKEN_TTL_SECONDS,
+    }
+    config["token"] = sign_jwt(token_payload, get_jwt_secret())
+    return config
+
+
+def document_editor_html(file_type: str, document_id: str) -> str:
+    config = document_editor_config(file_type, document_id)
+    encoded_config = base64.urlsafe_b64encode(
+        compact_json(config).encode("utf-8")
+    ).decode("ascii")
+    encoded_config = html.escape(encoded_config, quote=True)
+    shard_key = urllib.parse.quote(str(config["document"]["key"]), safe="")
+    revision = html.escape(EDITOR_ASSET_REVISION, quote=True)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{html.escape(str(config["document"]["title"]))}</title>
+  <style>
+    html, body, #iframeEditor {{ width: 100%; height: 100%; margin: 0; overflow: hidden; }}
+    body {{ background: #f4f4f4; }}
+  </style>
+</head>
+<body>
+  <div id="iframeEditor" data-editor-config="{encoded_config}"></div>
+  <script src="/web-apps/apps/api/documents/api.js?shardkey={shard_key}"></script>
+  <script src="/sdkjs-plugins/{{A17E5F31-64AA-4E37-9A42-8D430814C2F6}}/local-guest.js?v={revision}"></script>
+  <script src="/sdkjs-plugins/{{A17E5F31-64AA-4E37-9A42-8D430814C2F6}}/editor-shell.js?v={revision}"></script>
+</body>
+</html>"""
 
 
 def create_document(file_type: str) -> dict[str, Any]:
@@ -3276,22 +3425,31 @@ def html_response(
         return
 
 
-def document_gateway_response(
+def document_editor_response(
     handler: BaseHTTPRequestHandler,
     file_type: str,
     document_id: str,
 ) -> None:
-    document_path(file_type, document_id)
+    body = document_editor_html(file_type, document_id).encode("utf-8")
     try:
         handler.send_response(200)
-        handler.send_header(
-            "X-Accel-Redirect",
-            f"/__document_editor/{file_type}/{document_id}",
-        )
-        handler.send_header("Content-Length", "0")
+        handler.send_header("Content-Type", "text/html; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Pragma", "no-cache")
         handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("X-Frame-Options", "SAMEORIGIN")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; connect-src 'self' ws: wss:; "
+            "frame-src 'self' blob:; worker-src 'self' blob:; "
+            "font-src 'self' data:; object-src 'none'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'self'",
+        )
         handler.end_headers()
+        handler.wfile.write(body)
     except (BrokenPipeError, ConnectionResetError):
         return
 
@@ -3461,6 +3619,309 @@ def sign_jwt(payload: dict[str, Any], secret: str) -> str:
     return f"{unsigned}.{b64url(signature)}"
 
 
+def verify_storage_jwt(token: str) -> dict[str, Any]:
+    try:
+        encoded_header, encoded_payload, encoded_signature = token.split(".")
+        unsigned = f"{encoded_header}.{encoded_payload}"
+        expected = b64url(
+            hmac.new(
+                get_jwt_secret().encode(),
+                unsigned.encode(),
+                hashlib.sha256,
+            ).digest()
+        )
+        if not hmac.compare_digest(encoded_signature, expected):
+            raise ValueError("signature")
+        header = json.loads(
+            base64.urlsafe_b64decode(
+                encoded_header + "=" * (-len(encoded_header) % 4)
+            )
+        )
+        payload = json.loads(
+            base64.urlsafe_b64decode(
+                encoded_payload + "=" * (-len(encoded_payload) % 4)
+            )
+        )
+        if header.get("alg") != "HS256" or not isinstance(payload, dict):
+            raise ValueError("claims")
+        expiration = payload.get("exp")
+        if expiration is not None and float(expiration) < time.time():
+            raise ValueError("expired")
+        return payload
+    except Exception as error:
+        raise BridgeError(
+            401,
+            "INVALID_DOCUMENT_STORAGE_TOKEN",
+            "无效的文档存储凭证",
+        ) from error
+
+
+def request_bearer_token(handler: BaseHTTPRequestHandler) -> str:
+    authorization = handler.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        raise BridgeError(
+            401,
+            "DOCUMENT_STORAGE_TOKEN_REQUIRED",
+            "缺少文档存储凭证",
+        )
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise BridgeError(
+            401,
+            "DOCUMENT_STORAGE_TOKEN_REQUIRED",
+            "缺少文档存储凭证",
+        )
+    return token
+
+
+def storage_download_response(
+    handler: BaseHTTPRequestHandler,
+    file_type: str,
+    document_id: str,
+) -> None:
+    verify_storage_jwt(request_bearer_token(handler))
+    document_path(file_type, document_id)
+    mime_types = {
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    file_name = f"{document_id}.{file_type}"
+    try:
+        handler.send_response(200)
+        handler.send_header(
+            "X-Accel-Redirect",
+            f"/__document_files/{file_name}",
+        )
+        handler.send_header("Content-Type", mime_types[file_type])
+        handler.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{file_name}"',
+        )
+        handler.send_header("Cache-Control", "private, no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError):
+        return
+
+
+def callback_payload(
+    handler: BaseHTTPRequestHandler,
+    request_payload: dict[str, Any],
+) -> dict[str, Any]:
+    body_token = str(request_payload.get("token", "")).strip()
+    token = body_token or request_bearer_token(handler)
+    signed_payload = verify_storage_jwt(token)
+    if "payload" in signed_payload and isinstance(signed_payload["payload"], dict):
+        signed_payload = signed_payload["payload"]
+    return signed_payload
+
+
+def validate_callback_key(key: Any, document_id: str) -> str:
+    candidate = str(key or "").strip()
+    match = DOCUMENT_KEY_PATTERN.fullmatch(candidate)
+    if not match or match.group("documentId") != document_id:
+        raise BridgeError(
+            409,
+            "DOCUMENT_CALLBACK_KEY_MISMATCH",
+            "保存回调与文档版本不匹配",
+        )
+    return candidate
+
+
+def normalized_callback_download_url(value: Any) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(value or "").strip())
+    except ValueError as error:
+        raise BridgeError(
+            400,
+            "INVALID_DOCUMENT_CALLBACK_URL",
+            "保存回调缺少有效下载地址",
+        ) from error
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or not parsed.path.startswith("/cache/files/")
+    ):
+        raise BridgeError(
+            400,
+            "INVALID_DOCUMENT_CALLBACK_URL",
+            "保存回调下载地址不受信任",
+        )
+
+    hostname = parsed.hostname.lower().rstrip(".")
+    port = parsed.port
+    if hostname in ("127.0.0.1", "localhost", "::1"):
+        # Document Server builds cache URLs from the browser-facing origin, so a
+        # loopback URL may carry Docker's host port (for example 8088 or 11981).
+        # The cache endpoint itself lives on this container's port 80.
+        return urllib.parse.urlunsplit(
+            ("http", "127.0.0.1", parsed.path, parsed.query, "")
+        )
+
+    public = urllib.parse.urlsplit(document_public_origin())
+    public_port = public.port or (443 if public.scheme == "https" else 80)
+    callback_port = port or (443 if parsed.scheme == "https" else 80)
+    if hostname != str(public.hostname or "").lower() or callback_port != public_port:
+        raise BridgeError(
+            400,
+            "INVALID_DOCUMENT_CALLBACK_URL",
+            "保存回调下载主机不受信任",
+        )
+    return urllib.parse.urlunsplit(
+        ("http", "127.0.0.1", parsed.path, parsed.query, "")
+    )
+
+
+def document_save_lock(path: str) -> threading.Lock:
+    with DOCUMENT_SAVE_LOCKS_LOCK:
+        return DOCUMENT_SAVE_LOCKS.setdefault(path, threading.Lock())
+
+
+def document_max_save_bytes() -> int:
+    raw = os.environ.get(
+        "DOCUMENT_MAX_SAVE_BYTES",
+        str(DOCUMENT_MAX_SAVE_BYTES),
+    )
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise RuntimeError("DOCUMENT_MAX_SAVE_BYTES 必须是整数") from error
+    if value < 1 or value > 2 * 1024 * 1024 * 1024:
+        raise RuntimeError("DOCUMENT_MAX_SAVE_BYTES 必须在 1 到 2147483648 之间")
+    return value
+
+
+def persist_callback_document(
+    file_type: str,
+    document_id: str,
+    download_url: Any,
+) -> dict[str, Any]:
+    destination = document_path(file_type, document_id)
+    safe_url = normalized_callback_download_url(download_url)
+    maximum = document_max_save_bytes()
+    temporary = (
+        f"{destination}.saving-"
+        f"{os.getpid()}-{threading.get_ident()}-{secrets.token_hex(6)}"
+    )
+    downloaded = 0
+    try:
+        with document_save_lock(destination):
+            request = urllib.request.Request(
+                safe_url,
+                headers={"User-Agent": "OnlyOfficeCopilotStorage/1.0"},
+                method="GET",
+            )
+            with urllib.request.urlopen(request, timeout=45) as response:
+                declared = response.headers.get("Content-Length")
+                if declared and int(declared) > maximum:
+                    raise BridgeError(
+                        413,
+                        "DOCUMENT_SAVE_TOO_LARGE",
+                        "保存后的文档超过大小限制",
+                    )
+                with open(temporary, "xb") as output:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > maximum:
+                            raise BridgeError(
+                                413,
+                                "DOCUMENT_SAVE_TOO_LARGE",
+                                "保存后的文档超过大小限制",
+                            )
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            if downloaded < 4:
+                raise BridgeError(
+                    502,
+                    "DOCUMENT_SAVE_EMPTY",
+                    "文档服务返回了空文件",
+                )
+            with open(temporary, "rb") as saved:
+                if saved.read(4) != b"PK\x03\x04":
+                    raise BridgeError(
+                        502,
+                        "DOCUMENT_SAVE_INVALID_FORMAT",
+                        "文档服务返回的文件格式无效",
+                    )
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, destination)
+            os.utime(destination, None)
+    except BridgeError:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    except Exception as error:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise BridgeError(
+            502,
+            "DOCUMENT_SAVE_DOWNLOAD_FAILED",
+            "无法下载并保存编辑后的文档",
+        ) from error
+    return {
+        "persisted": True,
+        "bytes": downloaded,
+        "fileName": os.path.basename(destination),
+    }
+
+
+def process_document_callback(
+    handler: BaseHTTPRequestHandler,
+    request_payload: dict[str, Any],
+    file_type: str,
+    document_id: str,
+) -> dict[str, Any]:
+    payload = callback_payload(handler, request_payload)
+    validate_callback_key(payload.get("key"), document_id)
+    status = payload.get("status")
+    if not isinstance(status, int) or isinstance(status, bool) or status not in range(1, 8):
+        raise BridgeError(
+            400,
+            "INVALID_DOCUMENT_CALLBACK_STATUS",
+            "保存回调状态无效",
+        )
+    persisted = None
+    if status in (2, 6):
+        callback_file_type = str(payload.get("filetype", file_type)).lower()
+        if callback_file_type != file_type:
+            raise BridgeError(
+                409,
+                "DOCUMENT_CALLBACK_TYPE_MISMATCH",
+                "保存回调文件类型不匹配",
+            )
+        persisted = persist_callback_document(
+            file_type,
+            document_id,
+            payload.get("url"),
+        )
+    print(
+        "[document-callback] "
+        + compact_json(
+            {
+                "documentId": document_id,
+                "fileType": file_type,
+                "status": status,
+                "persisted": bool(persisted),
+                "bytes": (persisted or {}).get("bytes", 0),
+            }
+        ),
+        flush=True,
+    )
+    return {"error": 0}
+
+
 def command_service(command: dict[str, Any]) -> dict[str, Any]:
     request_body = dict(command)
     request_body["token"] = sign_jwt(command, get_jwt_secret())
@@ -3478,35 +3939,16 @@ def command_service(command: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"CommandService 返回 {error.code}: {detail}") from error
 
 
-def storage_files(file_name: str | None) -> tuple[list[str], list[str]]:
-    if not file_name:
-        return [], []
-    safe_name = os.path.basename(file_name)
-    main_files = [
-        path
-        for path in glob.glob(os.path.join(EXAMPLE_FILES, "*", safe_name))
-        if os.path.isfile(path) and "-history" not in path
-    ]
-    force_save_files = [
-        path
-        for path in glob.glob(os.path.join(EXAMPLE_FILES, "*", f"{safe_name}-history", safe_name))
-        if os.path.isfile(path)
-    ]
-    return main_files, force_save_files
-
-
-def newest_mtime(paths: list[str]) -> float | None:
-    mtimes = [os.path.getmtime(path) for path in paths if os.path.isfile(path)]
-    return max(mtimes) if mtimes else None
-
-
 def canonical_file(file_name: str | None) -> str:
     if not file_name:
         raise ValueError("未取得文件名")
-    main_files, _ = storage_files(file_name)
-    if not main_files:
-        raise ValueError(f"找不到原文件：{os.path.basename(file_name)}")
-    return max(main_files, key=os.path.getmtime)
+    safe_name = os.path.basename(file_name)
+    if safe_name != file_name or not DOCUMENT_FILE_PATTERN.fullmatch(safe_name):
+        raise ValueError("无效的 UUID 文档文件名")
+    path = os.path.join(document_storage_directory(), safe_name)
+    if not os.path.isfile(path):
+        raise ValueError(f"找不到原文件：{safe_name}")
+    return path
 
 
 def version_root(main_file: str) -> str:
@@ -3576,8 +4018,8 @@ def disconnect_editor(key: str | None, user_id: str | None) -> dict[str, Any] | 
         raise RuntimeError(f"CommandService 拒绝断开旧编辑会话：{result}")
     if result.get("error") == 1:
         return result
-    # The example callback can perform one final write after the user is dropped.
-    # Let that write settle before replacing the canonical file with a snapshot.
+    # The storage callback can perform one final write after the user is dropped.
+    # Let that atomic write settle before replacing the canonical file.
     time.sleep(5.5)
     return result
 
@@ -3614,101 +4056,81 @@ def restore_version(file_name: str | None, direction: str, key: str | None, user
     }
 
 
-def promote_force_save(file_name: str) -> tuple[bool, str | None]:
-    main_files, force_save_files = storage_files(file_name)
-    if not force_save_files:
-        return False, None
-    source = max(force_save_files, key=os.path.getmtime)
-    source_user_dir = os.path.dirname(os.path.dirname(source))
-    destination = os.path.join(source_user_dir, os.path.basename(file_name))
-    if main_files and destination not in main_files:
-        destination = max(main_files, key=os.path.getmtime)
-    temporary = f"{destination}.copilot-saving"
-    shutil.copy2(source, temporary)
-    os.replace(temporary, destination)
-    return True, destination
-
-
 def force_save(key: str, file_name: str | None, allow_no_changes: bool = False) -> dict[str, Any]:
     if not key or len(key) > 512:
         raise ValueError("无效 document.key")
-    before_main_files, before_force_files = storage_files(file_name)
-    before = newest_mtime(before_main_files)
-    before_force = newest_mtime(before_force_files)
-    prepromoted = False
-    prepromoted_path = None
-    if file_name and before_force is not None and (before is None or before_force > before + 0.0001):
-        prepromoted, prepromoted_path = promote_force_save(os.path.basename(file_name))
+    main_file = canonical_file(file_name)
+    before = os.path.getmtime(main_file)
     command: dict[str, Any] = {"c": "forcesave", "key": key}
     if file_name:
         command["userdata"] = compact_json({"fileName": os.path.basename(file_name), "source": "office-copilot"})
     retry_deadline = time.time() + 12
     while True:
         result = command_service(command)
-        if result.get("error") != 4 or prepromoted or allow_no_changes or time.time() >= retry_deadline:
+        if result.get("error") != 4 or allow_no_changes or time.time() >= retry_deadline:
             break
         time.sleep(0.6)
     if result.get("error") == 4:
-        main_files, _ = storage_files(file_name)
         return {
             "accepted": False,
             "noChanges": True,
-            "persisted": bool(main_files),
-            "promoted": prepromoted,
-            "promotedPath": prepromoted_path,
+            "persisted": os.path.isfile(main_file),
             "command": result,
             "beforeMtime": before,
-            "afterMtime": newest_mtime(main_files),
-            "forceSaveMtime": before_force,
+            "afterMtime": os.path.getmtime(main_file),
             "note": "No editor changes needed saving; the current canonical file remains downloadable.",
         }
     if result.get("error") != 0:
         raise RuntimeError(f"CommandService 拒绝 forcesave：{result}")
 
     persisted = False
-    promoted = prepromoted
-    promoted_path = prepromoted_path
     after = before
-    after_force = before_force
-    if file_name:
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            main_files, force_files = storage_files(file_name)
-            after = newest_mtime(main_files)
-            after_force = newest_mtime(force_files)
-            main_changed = after is not None and (before is None or after > before + 0.0001)
-            force_changed = after_force is not None and (before_force is None or after_force > before_force + 0.0001)
-            force_is_newer = after_force is not None and (after is None or after_force > after + 0.0001)
-            if (force_changed or force_is_newer) and not main_changed:
-                promoted, promoted_path = promote_force_save(os.path.basename(file_name))
-                main_files, _ = storage_files(file_name)
-                after = newest_mtime(main_files)
-                main_changed = promoted
-            if main_changed:
-                persisted = True
-                break
-            time.sleep(0.35)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        after = os.path.getmtime(main_file)
+        if after > before + 0.0001:
+            persisted = True
+            break
+        time.sleep(0.35)
     return {
         "accepted": True,
         "persisted": persisted,
-        "promoted": promoted,
-        "promotedPath": promoted_path,
         "command": result,
         "beforeMtime": before,
         "afterMtime": after,
-        "forceSaveMtime": after_force,
     }
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OnlyOfficeCopilot/1.3"
+    server_version = "OnlyOfficeCopilot/2.0"
 
     def do_GET(self) -> None:
         parsed_path = urllib.parse.urlsplit(self.path)
+        storage_request = DOCUMENT_STORAGE_PATH_PATTERN.fullmatch(
+            parsed_path.path
+        )
+        if storage_request:
+            if storage_request.group("action") != "download":
+                json_response(
+                    self,
+                    405,
+                    {"error": "Method not allowed"},
+                    {"Allow": "POST"},
+                )
+                return
+            try:
+                storage_download_response(
+                    self,
+                    storage_request.group("fileType"),
+                    storage_request.group("documentId"),
+                )
+            except BridgeError as error:
+                json_response(self, error.status, error.payload())
+            return
         public_document = PUBLIC_DOCUMENT_PATH_PATTERN.fullmatch(parsed_path.path)
         if public_document:
             try:
-                document_gateway_response(
+                document_editor_response(
                     self,
                     public_document.group("fileType"),
                     public_document.group("documentId"),
@@ -3748,7 +4170,7 @@ class Handler(BaseHTTPRequestHandler):
                     [""],
                 )[0]
                 file_type, document_id = document_file_identity(file_name)
-                document_gateway_response(self, file_type, document_id)
+                document_editor_response(self, file_type, document_id)
             except BridgeError as error:
                 json_response(self, error.status, error.payload())
             return
@@ -3812,6 +4234,43 @@ class Handler(BaseHTTPRequestHandler):
         request_path = ""
         try:
             parsed_path = urllib.parse.urlsplit(self.path)
+            storage_request = DOCUMENT_STORAGE_PATH_PATTERN.fullmatch(
+                parsed_path.path
+            )
+            if storage_request:
+                request_path = parsed_path.path
+                if storage_request.group("action") != "callback":
+                    json_response(
+                        self,
+                        405,
+                        {"error": "Method not allowed"},
+                        {"Allow": "GET"},
+                    )
+                    return
+                content_type = (
+                    self.headers.get("Content-Type", "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                )
+                if content_type != "application/json":
+                    raise BridgeError(
+                        415,
+                        "UNSUPPORTED_MEDIA_TYPE",
+                        "Content-Type 必须是 application/json",
+                    )
+                payload = read_json(self)
+                json_response(
+                    self,
+                    200,
+                    process_document_callback(
+                        self,
+                        payload,
+                        storage_request.group("fileType"),
+                        storage_request.group("documentId"),
+                    ),
+                )
+                return
             new_document = NEW_DOCUMENT_PATH_PATTERN.fullmatch(parsed_path.path)
             if new_document:
                 try:
@@ -3936,11 +4395,19 @@ class Handler(BaseHTTPRequestHandler):
             json_response(self, 404, {"error": "Not found"})
         except BridgeError as error:
             self.log_bridge_error(error, payload)
-            json_response(self, error.status, error.payload())
+            if request_path.startswith("/documents/storage/callback/"):
+                json_response(self, error.status, {"error": 1})
+            else:
+                json_response(self, error.status, error.payload())
         except ValueError as error:
-            json_response(self, 400, {"error": str(error)})
+            if request_path.startswith("/documents/storage/callback/"):
+                json_response(self, 400, {"error": 1})
+            else:
+                json_response(self, 400, {"error": str(error)})
         except Exception as error:  # noqa: BLE001 - boundary must return JSON
-            if request_path == "/images/import":
+            if request_path.startswith("/documents/storage/callback/"):
+                json_response(self, 502, {"error": 1})
+            elif request_path == "/images/import":
                 safe_error = image_error(502, "IMAGE_FETCH_FAILED", "图片导入失败")
                 self.log_bridge_error(safe_error, payload)
                 json_response(self, safe_error.status, safe_error.payload())

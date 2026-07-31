@@ -3,7 +3,7 @@
 
   const VERSION = "0.6.0";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "a658c425a8800e7087d4b4afd0700c7987b3f3081f38cf4cfbfea827d67b4e99";
+  const CONTRACT_SHA256 = "b22a6e7c246838857a4e7e0e7dcf0a3e97c15ec3f42ba63259dd11de8f8f6500";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -1041,11 +1041,15 @@
   window.onlyofficeAI = api;
   window.AiBridgeError = window.AiBridgeError || AiBridgeError;
 
-  function localHttpRelayEnabled() {
-    if (window.aiBridgeOptions && window.aiBridgeOptions.httpRelay === false) return false;
-    return window.location.hostname === "localhost"
+  function httpRelayEnabled() {
+    const configured = window.aiBridgeOptions && window.aiBridgeOptions.httpRelay;
+    if (configured === false) return false;
+    const loopback = window.location.hostname === "localhost"
       || window.location.hostname === "127.0.0.1"
-      || window.location.hostname === "::1";
+      || window.location.hostname === "::1"
+      || window.location.hostname === "[::1]";
+    if (loopback) return true;
+    return configured === true && window.location.protocol === "https:";
   }
 
   async function httpRelayPost(path, payload) {
@@ -1072,8 +1076,8 @@
     return body;
   }
 
-  function startLocalHttpRelay() {
-    if (!localHttpRelayEnabled() || typeof window.fetch !== "function") return;
+  function startHttpRelay() {
+    if (!httpRelayEnabled() || typeof window.fetch !== "function") return;
     const httpSessionId = createRequestId("http-session");
     const credentialReloadWindowMs = 60000;
     let relayKey = null;
@@ -1263,7 +1267,7 @@
     loop();
   }
 
-  startLocalHttpRelay();
+  startHttpRelay();
 
   const currentUrl = new URL(window.location.href);
   const initialCommand = currentUrl.searchParams.get("aiCommand");

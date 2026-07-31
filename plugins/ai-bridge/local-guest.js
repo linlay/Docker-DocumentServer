@@ -142,14 +142,6 @@
     };
   }
 
-  function isDefaultExampleGuest(locationValue) {
-    var href = locationValue && locationValue.href
-      ? locationValue.href
-      : String(locationValue || root.location.href);
-    var userid = new URL(href).searchParams.get("userid");
-    return !userid || userid === "uid-0";
-  }
-
   function renderFailure(error) {
     if (!root.document) return;
     var container = root.document.getElementById("iframeEditor") || root.document.body;
@@ -173,8 +165,7 @@
     container.appendChild(panel);
   }
 
-  async function prepareExample(config, options) {
-    if (!isDefaultExampleGuest(root.location)) return true;
+  async function prepareEditor(config, options) {
     try {
       await prepare(config, options);
       return true;
@@ -190,8 +181,7 @@
   root.OnlyOfficeLocalGuest = Object.freeze({
     STORAGE_KEY: STORAGE_KEY,
     getOrCreateAnonymousId: getOrCreateAnonymousId,
-    isDefaultExampleGuest: isDefaultExampleGuest,
     prepare: prepare,
-    prepareExample: prepareExample,
+    prepareEditor: prepareEditor,
   });
 })(window);

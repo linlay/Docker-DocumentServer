@@ -2450,7 +2450,7 @@ export type AiBridgeGeneratedWordManageCustomXmlArgs = {
   value?: string;
 };
 export type AiBridgeGeneratedWordInspectMacrosArgs = {
-  kind?: "onlyoffice" | "vba";
+  kind?: "office" | "vba";
 };
 export type AiBridgeGeneratedWordSetMacrosArgs = {
   macros: Array<{
@@ -5863,7 +5863,7 @@ export type AiBridgeGeneratedSlidesDeleteChartArgs = {
   name?: string;
 } & ({ chartId: string; } | { chartIndex: number; } | { name: string; });
 export type AiBridgeGeneratedSlidesInspectMacrosArgs = {
-  kind?: "onlyoffice" | "vba";
+  kind?: "office" | "vba";
 };
 export type AiBridgeGeneratedSlidesSetMacrosArgs = {
   content: Record<string, unknown>;
@@ -6295,7 +6295,7 @@ export type AiBridgeGeneratedSheetsManagePageLayoutArgs = {
   left?: number;
 }; } | { printGridlines: boolean; } | { printHeadings: boolean; } | { displayGridlines: boolean; } | { displayHeadings: boolean; });
 export type AiBridgeGeneratedSheetsInspectMacrosArgs = {
-  kind?: "onlyoffice" | "vba";
+  kind?: "office" | "vba";
 };
 export type AiBridgeGeneratedSheetsSetMacrosArgs = {
   content: Record<string, unknown>;

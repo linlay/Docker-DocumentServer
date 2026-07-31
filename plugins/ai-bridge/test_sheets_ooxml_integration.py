@@ -6,9 +6,9 @@ Run with a fresh XLSX capability page open in a browser:
     AI_BRIDGE_LIVE_FILE=<uuid>.xlsx \
       python3 plugins/ai-bridge/test_sheets_ooxml_integration.py
 
-The test uses only the localhost demo, copies the persisted file from the local
-DocumentServer container, and verifies the resulting OOXML. It intentionally
-checks behavior that JavaScript mocks cannot prove: cell/differential fills,
+The test uses the first-party localhost document app, copies the persisted file
+from the local DocumentServer container, and verifies the resulting OOXML. It
+intentionally checks behavior that JavaScript mocks cannot prove: cell/differential fills,
 conditional-format operators, formula progression, validation XML, strict
 values, basic table formatting, frozen panes, and worksheet view flags.
 """
@@ -66,7 +66,7 @@ def persisted_xlsx(file_name: str, destination: Path) -> None:
             "exec",
             CONTAINER,
             "find",
-            "/var/lib/onlyoffice/documentserver-example/files",
+            "/var/lib/onlyoffice/copilot/documents",
             "-type",
             "f",
             "-name",
