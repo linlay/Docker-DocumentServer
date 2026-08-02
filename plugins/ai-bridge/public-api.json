@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.8.0",
+  "version": "0.1.0",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "transport": {
@@ -6212,6 +6212,108 @@
         "required": [
           "scope"
         ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "image"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "source"
+              ],
+              "not": {
+                "required": [
+                  "fill"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "mode"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "mode"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "const": "custom"
+                    }
+                  }
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "fill"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fillMode"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "clear",
+                    "master"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "fill"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fillMode"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
         "properties": {
           "scope": {
             "enum": [
@@ -6230,18 +6332,29 @@
           "mode": {
             "enum": [
               "custom",
+              "image",
               "clear",
               "master"
             ]
           },
           "fill": {
             "$ref": "#/$defs/fill"
+          },
+          "source": {
+            "$ref": "#/$defs/imageSource"
+          },
+          "fillMode": {
+            "enum": [
+              "stretch",
+              "tile"
+            ],
+            "default": "stretch"
           }
         },
         "additionalProperties": false,
-        "description": "设置 PPT 母版或版式的背景填充",
+        "description": "设置 PPT 母版或版式的背景填充；图片背景支持安全导入的 HTTPS/Data URL 以及 stretch/tile 模式",
         "x-effects": "write",
-        "x-argumentLimitClass": "standard",
+        "x-argumentLimitClass": "image",
         "x-semanticValidators": []
       },
       "slides_set_text_content": {
@@ -8064,6 +8177,109 @@
         "required": [
           "slide"
         ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "image"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "source"
+              ],
+              "not": {
+                "required": [
+                  "fill"
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "not": {
+                    "required": [
+                      "mode"
+                    ]
+                  }
+                },
+                {
+                  "required": [
+                    "mode"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "const": "custom"
+                    }
+                  }
+                }
+              ]
+            },
+            "then": {
+              "required": [
+                "fill"
+              ],
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fillMode"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "clear",
+                    "layout",
+                    "master"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "fill"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "source"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "fillMode"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
         "properties": {
           "slide": {
             "type": "integer",
@@ -8072,6 +8288,7 @@
           "mode": {
             "enum": [
               "custom",
+              "image",
               "clear",
               "layout",
               "master"
@@ -8079,12 +8296,22 @@
           },
           "fill": {
             "$ref": "#/$defs/fill"
+          },
+          "source": {
+            "$ref": "#/$defs/imageSource"
+          },
+          "fillMode": {
+            "enum": [
+              "stretch",
+              "tile"
+            ],
+            "default": "stretch"
           }
         },
         "additionalProperties": false,
-        "description": "设置、清除或恢复 PPT 页背景；自定义背景支持纯色、线性渐变、径向渐变、图案和 raw 填充",
+        "description": "设置、清除或恢复 PPT 页背景；图片背景支持安全导入的 HTTPS/Data URL 以及 stretch/tile 模式",
         "x-effects": "write",
-        "x-argumentLimitClass": "standard",
+        "x-argumentLimitClass": "image",
         "x-semanticValidators": []
       },
       "slides_add_shape": {

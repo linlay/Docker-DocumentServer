@@ -3,7 +3,7 @@
 适用版本：
 
 - ONLYOFFICE DocumentServer `9.4.0-129`
-- ai-bridge `0.4.3`
+- ai-bridge `0.1.0`
 - Presentation API 以 ONLYOFFICE 9.4 文档化 Office JavaScript API 和 Plugin API 为稳定执行边界
 
 状态说明：
@@ -18,31 +18,31 @@
 
 ## 演示文稿结构
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P01 | 演示文稿创建、打开、保存 | ✅ | 🟨 | `save()` 保存当前演示文稿；创建、打开和切换文件属于宿主文档服务，不由当前文档内插件完成 |
 | P02 | 新建、复制、删除幻灯片 | ✅ | ✅ | `addSlide` 可在创建时指定 `masterIndex/layoutIndex` 并返回实际版式；另有 `duplicateSlide`、`deleteSlide` |
 | P03 | 调整幻灯片顺序 | ✅ | ✅ | `moveSlide` |
 | P04 | 隐藏幻灯片 | ✅ | ✅ | `setVisibility` |
 | P05 | 幻灯片尺寸 | ✅ | ✅ | `setSize`，支持宽屏、标准、自定义尺寸及横竖方向 |
-| P06 | 幻灯片背景 | ✅ | ✅ | `setBackground`，支持纯色、渐变、图案、清除及跟随版式/母版 |
+| P06 | 幻灯片背景 | ✅ | ✅ | `setBackground`，支持纯色、渐变、图案、原生 stretch/tile 图片背景、清除及跟随版式/母版 |
 | P07 | 幻灯片分节（高级） | 🟨 | ⚪ | 9.4 文件引擎可保留 PPTX section 数据，但编辑器没有稳定的分节管理 Presentation/Plugin API |
 
 ## 主题与版式
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P08 | 使用现有主题 | ✅ | ✅ | `inspectBuiltinThemes`、`applyBuiltinTheme`；文稿内主题使用 `inspectThemes`、`applyTheme` |
 | P09 | 使用现有幻灯片版式 | ✅ | ✅ | `inspectLayouts`、`applyLayout` |
 | P10 | 标题和内容占位符 | ✅ | ✅ | `createLayout.placeholders`、`addTemplateShape.placeholderType`、`setTextContent` |
 | P11 | 自定义主题颜色和字体（高级） | ✅ | ✅ | `setTheme`，支持 12 色主题方案和主/次字体方案 |
-| P12 | 编辑幻灯片母版（高级） | ✅ | ✅ | `inspectLayouts({includeObjects:true})`、`addTemplateShape`、`manageTemplateObject`、`setTemplateBackground` |
+| P12 | 编辑幻灯片母版（高级） | ✅ | ✅ | `inspectLayouts({includeObjects:true})`、`addTemplateShape`、`manageTemplateObject`、`setTemplateBackground`；母版和版式均支持原生图片背景 |
 | P13 | 创建自定义版式（高级） | ✅ | ✅ | `createLayout`，可创建占位符并立即应用到指定幻灯片 |
 | P14 | 备注母版、讲义母版（高级） | ⛔ | ⛔ | 9.4 可设置“备注和讲义”的页眉页脚打印选项，但没有 PowerPoint 等价的备注母版/讲义母版编辑器和公开对象模型 |
 
 ## 文本内容
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P15 | 标题 | ✅ | ✅ | `addSlide.title`、`addTextBox`、标题占位符 |
 | P16 | 正文文本 | ✅ | ✅ | `setTextContent`、`replaceText` |
@@ -58,7 +58,7 @@
 
 ## 形状与布局
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P26 | 基本形状 | ✅ | ✅ | `addShape`，接受 ONLYOFFICE 预设几何类型 |
 | P27 | 线条和箭头 | ✅ | ✅ | `addConnector` 或 `addShape`，线条样式由 `line` 设置 |
@@ -80,7 +80,7 @@
 
 ## 图片
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P37 | 图片 | ✅ | ✅ | `addImage`；HTTPS/Data URL 均先经过宿主页受控导入 |
 | P38 | 图片缩放、裁剪、旋转 | ✅ | 🟨 | `addImage`、`updateObject` 完整支持缩放和旋转；`addImageShape({shapeType:"rect"})` 可做矩形蒙版，但 9.4 公开 API 无原生 crop-offset 读写 |
@@ -92,7 +92,7 @@
 
 ## 表格与数据
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P44 | 表格 | ✅ | ✅ | `addTable` |
 | P45 | 插入、删除表格行列 | ✅ | ✅ | `editTable` 的 `addRow`、`addColumn`、`removeRow`、`removeColumn` |
@@ -105,7 +105,7 @@
 
 ## 动画与切换
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P52 | 幻灯片切换（高级） | ✅ | ✅ | `setTransition`，支持效果、速度、时长和换片条件 |
 | P53 | 对象进入、强调、退出动画（高级） | ✅ | ✅ | `manageAnimation({action:"add"})`，`effectType` 使用 ONLYOFFICE 9.4 动画效果名 |
@@ -116,7 +116,7 @@
 
 ## 多媒体
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P58 | 音频（高级） | ✅ | ⚪ | UI 可插入音频；9.4 文档化 Presentation/Plugin API 没有 `CreateAudio`/`AddAudio` |
 | P59 | 视频（高级） | ✅ | ⚪ | UI 可插入视频；9.4 文档化 Presentation/Plugin API 没有 `CreateVideo`/`AddVideo` |
@@ -127,7 +127,7 @@
 
 ## 导航与放映
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P64 | 超链接 | ✅ | ✅ | `setHyperlink` 支持 HTTPS/HTTP、邮件、FTP 和放映导航链接 |
 | P65 | 动作按钮（高级） | ✅ | ✅ | `addShape` 创建 actionButton 预设形状，再用 `setHyperlink` 设置动作；可在同一批次原子执行 |
@@ -139,7 +139,7 @@
 
 ## 页脚与协作
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.4.3 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.1.0 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | P71 | 幻灯片编号 | ✅ | ⚪ | UI 可设置；公开 API 可创建 `sldNum` 占位符，但没有稳定的动态页码/页眉页脚属性入口，Bridge 不把静态文本冒充页码 |
 | P72 | 日期和时间 | ✅ | ⚪ | UI 可设置固定/自动日期；9.4 文档化 Presentation/Plugin API 无页眉页脚日期属性入口 |

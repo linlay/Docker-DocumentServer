@@ -32,9 +32,9 @@ PLUGIN_START = "  // <ai-bridge-generated:contract-runtime>"
 PLUGIN_END = "  // </ai-bridge-generated:contract-runtime>"
 EDITOR_CONFIG = {
     "word": {
-        "skill": "zoffice-docx",
-        "toml": "office-docx-bridge.toml",
-        "site": "office-docx-bridge",
+        "skill": "online-docx",
+        "toml": "online-docx-bridge.toml",
+        "site": "online-docx-bridge",
         "fileType": "docx",
         "prefix": "word_",
         "label": "Word",
@@ -43,9 +43,9 @@ EDITOR_CONFIG = {
         "normalizationKey": "word",
     },
     "slide": {
-        "skill": "zoffice-pptx",
-        "toml": "office-pptx-bridge.toml",
-        "site": "office-pptx-bridge",
+        "skill": "online-pptx",
+        "toml": "online-pptx-bridge.toml",
+        "site": "online-pptx-bridge",
         "fileType": "pptx",
         "prefix": "slides_",
         "label": "Slides",
@@ -54,9 +54,9 @@ EDITOR_CONFIG = {
         "normalizationKey": "slide",
     },
     "cell": {
-        "skill": "zoffice-xlsx",
-        "toml": "office-xlsx-bridge.toml",
-        "site": "office-xlsx-bridge",
+        "skill": "online-xlsx",
+        "toml": "online-xlsx-bridge.toml",
+        "site": "online-xlsx-bridge",
         "fileType": "xlsx",
         "prefix": "sheets_",
         "label": "Sheets",
@@ -65,6 +65,45 @@ EDITOR_CONFIG = {
         "normalizationKey": "sheet",
     },
 }
+
+
+def render_skill_version(source: str, version: str) -> str:
+    """Update only metadata.version in a SKILL.md YAML frontmatter."""
+    if not source.startswith("---\n"):
+        raise ValueError("SKILL.md must start with YAML frontmatter")
+    end = source.find("\n---", 4)
+    if end < 0:
+        raise ValueError("SKILL.md YAML frontmatter is not closed")
+
+    frontmatter = source[4:end]
+    lines = frontmatter.split("\n")
+    metadata_index = next(
+        (index for index, line in enumerate(lines) if line == "metadata:"),
+        None,
+    )
+    rendered_version = f'  version: "{version}"'
+    if metadata_index is None:
+        lines.extend(["metadata:", rendered_version])
+    else:
+        block_end = len(lines)
+        for index in range(metadata_index + 1, len(lines)):
+            line = lines[index]
+            if line and not line[0].isspace():
+                block_end = index
+                break
+        version_index = next(
+            (
+                index
+                for index in range(metadata_index + 1, block_end)
+                if re.match(r"^  version\s*:", lines[index])
+            ),
+            None,
+        )
+        if version_index is None:
+            lines.insert(metadata_index + 1, rendered_version)
+        else:
+            lines[version_index] = rendered_version
+    return "---\n" + "\n".join(lines) + source[end:]
 
 
 def canonical_json(value: Any) -> str:
@@ -379,6 +418,21 @@ def replace_types_region(source: str, generated: str) -> str:
     if cursor < len(source) and source[cursor] == ";":
         cursor += 1
     return source[:start] + generated + source[cursor:]
+
+
+def replace_types_contract_version(
+    source: str,
+    contract: dict[str, Any],
+) -> str:
+    return re.sub(
+        (
+            r'((?:readonly )?'
+            r'(?:contractVersion\?|contractVersion|version): )'
+            r'"\d+\.\d+\.\d+";'
+        ),
+        lambda match: match.group(1) + f'"{contract["version"]}";',
+        source,
+    )
 
 
 def render_plugin_region(contract: dict[str, Any], sha256: str) -> str:
@@ -1036,9 +1090,12 @@ def build_artifacts(
 ) -> dict[Path, str]:
     sha256 = contract_sha256(contract)
     artifacts = {
-        TYPES_PATH: replace_types_region(
-            TYPES_PATH.read_text(encoding="utf-8"),
-            render_types_region(contract),
+        TYPES_PATH: replace_types_contract_version(
+            replace_types_region(
+                TYPES_PATH.read_text(encoding="utf-8"),
+                render_types_region(contract),
+            ),
+            contract,
         ),
         PLUGIN_PATH: replace_plugin_region(
             PLUGIN_PATH.read_text(encoding="utf-8"),
@@ -1087,33 +1144,31 @@ def build_artifacts(
     if not zenmind_root.is_dir():
         raise ValueError(f"zenmind root does not exist: {zenmind_root}")
     normalized_httpx_base_url = normalize_httpx_base_url(httpx_base_url)
-    httpx_root = (
-        zenmind_root
-        / "agents"
-        / "builtin-httpx.demo"
-        / ".config"
-        / "httpx"
-    )
     for editor, config in EDITOR_CONFIG.items():
         scoped = scoped_contract(contract, editor, sha256)
-        references = (
+        skill_root = (
             zenmind_root
             / "skills-market"
             / config["skill"]
-            / "references"
+        )
+        references = skill_root / "references"
+        skill_path = skill_root / "SKILL.md"
+        artifacts[skill_path] = render_skill_version(
+            skill_path.read_text(encoding="utf-8"),
+            contract["version"],
         )
         artifacts[references / "contract.generated.json"] = (
             json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
         )
         artifacts[references / "contract.generated.md"] = render_markdown(scoped)
         artifacts[
-            zenmind_root
-            / "skills-market"
-            / config["skill"]
+            skill_root
             / "scripts"
             / f"_{config['fileType']}_contract_runtime.py"
         ] = render_runtime_helper(scoped)
-        artifacts[httpx_root / config["toml"]] = render_toml(
+        artifacts[
+            skill_root / ".config" / "httpx" / config["toml"]
+        ] = render_toml(
             contract,
             editor,
             sha256,
@@ -1123,8 +1178,8 @@ def build_artifacts(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.8.0":
-        raise ValueError("public-api.json version must be 0.8.0")
+    if contract.get("version") != "0.1.0":
+        raise ValueError("public-api.json version must be 0.1.0")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     names = []

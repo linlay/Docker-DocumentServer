@@ -62,7 +62,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.8.0";
+  contractVersion?: "0.1.0";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -80,10 +80,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.8.0";
+  version: "0.1.0";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.8.0";
+  contractVersion: "0.1.0";
   contractSha256: string;
   ready: boolean;
   editorType: AiBridgeEditorType | null;
@@ -126,7 +126,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.8.0";
+  contractVersion: "0.1.0";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -1099,13 +1099,15 @@ export interface SlidesManageTemplateObjectArgs extends SlidesTemplateShapeForma
   /** Replacement name when action is update. */
   newName?: string;
 }
-export interface SlidesSetTemplateBackgroundArgs {
+export type SlidesSetTemplateBackgroundArgs = {
   scope: "master" | "layout";
   masterIndex?: number;
   layoutIndex?: number;
-  mode?: "custom" | "clear" | "master";
-  fill?: AiBridgeFill;
-}
+} & (
+  | { mode?: "custom"; fill: AiBridgeFill; source?: never; fillMode?: never }
+  | { mode: "image"; source: AiBridgeImageSource; fillMode?: "stretch" | "tile"; fill?: never }
+  | { mode: "clear" | "master"; fill?: never; source?: never; fillMode?: never }
+);
 export interface SlidesParagraphFormat extends BasicTextFormat {
   underline?: boolean;
   align?: "left" | "center" | "right" | "both";
@@ -1424,11 +1426,10 @@ export interface SlidesControlSlideshowArgs {
   /** One-based slide number required by goto. */
   slide?: number;
 }
-export interface SlidesSetBackgroundArgs {
-  slide: number;
-  mode?: "custom" | "clear" | "layout" | "master";
-  fill?: AiBridgeFill;
-}
+export type SlidesSetBackgroundArgs =
+  | { slide: number; mode?: "custom"; fill: AiBridgeFill; source?: never; fillMode?: never }
+  | { slide: number; mode: "image"; source: AiBridgeImageSource; fillMode?: "stretch" | "tile"; fill?: never }
+  | { slide: number; mode: "clear" | "layout" | "master"; fill?: never; source?: never; fillMode?: never };
 export type SlidesAddShapeArgs =
   Omit<SlidesShapeFormatting, "text"> & { slide: number; shapeType: string } & (
     | { text?: string; paragraphs?: never }
@@ -3279,7 +3280,7 @@ export type AiBridgeGeneratedSlidesSetTemplateBackgroundArgs = {
   scope: "master" | "layout";
   masterIndex?: number;
   layoutIndex?: number;
-  mode?: "custom" | "clear" | "master";
+  mode?: "custom" | "image" | "clear" | "master";
   fill?: ({
     type: "none";
   } | {
@@ -3307,7 +3308,47 @@ export type AiBridgeGeneratedSlidesSetTemplateBackgroundArgs = {
     type?: "raw";
     raw: unknown;
   });
-};
+  source?: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  fillMode?: "stretch" | "tile";
+} & ({ mode: "image"; source: ({
+  type: "url";
+  url: string;
+} | {
+  type: "dataUrl";
+  dataUrl: string;
+}); } | { mode?: Exclude<"custom" | "image" | "clear" | "master", "image">; }) & ({ fill: ({
+  type: "none";
+} | {
+  type: "solid";
+  color: string;
+} | {
+  type: "linearGradient";
+  stops: Array<{
+    position: number;
+    color: string;
+  }>;
+  angleDeg?: number;
+} | {
+  type: "radialGradient";
+  stops: Array<{
+    position: number;
+    color: string;
+  }>;
+} | {
+  type: "pattern";
+  pattern: string;
+  backgroundColor: string;
+  foregroundColor: string;
+} | {
+  type?: "raw";
+  raw: unknown;
+}); } | {  }) & ({ mode: "custom" | "image" | "clear" | "master"; } | { mode?: never; });
 export type AiBridgeGeneratedSlidesSetTextContentArgs = {
   slide: number;
   objectId?: string;
@@ -4345,7 +4386,7 @@ export type AiBridgeGeneratedSlidesAddOleObjectArgs = {
 };
 export type AiBridgeGeneratedSlidesSetBackgroundArgs = {
   slide: number;
-  mode?: "custom" | "clear" | "layout" | "master";
+  mode?: "custom" | "image" | "clear" | "layout" | "master";
   fill?: ({
     type: "none";
   } | {
@@ -4373,7 +4414,47 @@ export type AiBridgeGeneratedSlidesSetBackgroundArgs = {
     type?: "raw";
     raw: unknown;
   });
-};
+  source?: ({
+    type: "url";
+    url: string;
+  } | {
+    type: "dataUrl";
+    dataUrl: string;
+  });
+  fillMode?: "stretch" | "tile";
+} & ({ mode: "image"; source: ({
+  type: "url";
+  url: string;
+} | {
+  type: "dataUrl";
+  dataUrl: string;
+}); } | { mode?: Exclude<"custom" | "image" | "clear" | "layout" | "master", "image">; }) & ({ fill: ({
+  type: "none";
+} | {
+  type: "solid";
+  color: string;
+} | {
+  type: "linearGradient";
+  stops: Array<{
+    position: number;
+    color: string;
+  }>;
+  angleDeg?: number;
+} | {
+  type: "radialGradient";
+  stops: Array<{
+    position: number;
+    color: string;
+  }>;
+} | {
+  type: "pattern";
+  pattern: string;
+  backgroundColor: string;
+  foregroundColor: string;
+} | {
+  type?: "raw";
+  raw: unknown;
+}); } | {  }) & ({ mode: "custom" | "image" | "clear" | "layout" | "master"; } | { mode?: never; });
 export type AiBridgeGeneratedSlidesAddShapeArgs = {
   slide: number;
   shapeType: string;
@@ -7979,7 +8060,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.8.0";
+  readonly version: "0.1.0";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

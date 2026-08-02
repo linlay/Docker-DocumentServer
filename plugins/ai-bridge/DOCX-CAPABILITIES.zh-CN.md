@@ -129,7 +129,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 
 ## 对外 Word 工具
 
-0.4.0 的 Word 公共工具共 50 个：
+0.1.0 的 Word 公共工具共 50 个：
 
 ```text
 word_inspect                    word_replace_text

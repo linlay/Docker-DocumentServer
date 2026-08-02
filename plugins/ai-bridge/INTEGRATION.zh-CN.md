@@ -1,4 +1,4 @@
-# ai-bridge 0.8.0 外部工程接入说明
+# ai-bridge 0.1.0 外部工程接入说明
 
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.8.0-rev5"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev1"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -46,7 +46,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -63,7 +63,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.1.0-rev1"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -127,13 +127,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.1.0-rev1"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -406,7 +406,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.8.0 的主要方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.1.0 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -454,7 +454,7 @@ sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
 sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.8.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.1.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -544,7 +544,8 @@ Host 在发送编辑命令前，会把批次中所有 URL/Data URL 一次性预�
 - `slides_inspect_objects` 读取图形、图表、图片、表格、OLE、组合等绘图对象，返回零基 `objectIndex`、内部 ID、名称、类型、位置、尺寸、旋转、翻转；图形还返回几何类型、文本、填充和线条。
 - `slides_add_shape` / `slides_update_shape` 支持任意 ONLYOFFICE 预设 `shapeType`，以及 `text`、`xMm`、`yMm`、`widthMm`、`heightMm`、`rotationDeg`、`flipH`、`flipV`、`name`、字体、对齐、`paddingMm`、`fill` 和 `line`。
 - `slides_delete_object` 可用 `objectId`、零基 `objectIndex` 或 `name` 删除任意绘图对象。
-- `slides_set_background` 支持 `custom`、`clear`、`layout`、`master`；`custom` 使用同一套 `fill` 模型。
+- `slides_set_background` 支持 `custom`、`image`、`clear`、`layout`、`master`；`image` 通过安全导入的 `source` 创建原生 `stretch`/`tile` 背景，不增加幻灯片绘图对象。
+- `slides_set_template_background` 对母版和版式提供同样的原生图片背景能力。
 - `slides_inspect_charts` / `slides_add_chart` / `slides_update_chart` / `slides_delete_chart` 覆盖图表类型、二维数值系列、系列名、分类、数值格式、标题、样式、位置、尺寸、旋转、图表区/绘图区/标题填充与线条、图例、横纵轴、标签、网格线、系列和数据点格式、系列增删。
 - `seriesUpdates[].type` 可修改组合图中的单个系列类型；数据点还支持
   `markerFill`、`markerLine` 和 `allMarkers`。`line`、`lineMarker`、`column`
@@ -688,7 +689,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.8.0",
+    "version": "0.1.0",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -804,6 +805,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.8.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.8.0-rev5`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.1.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.1.0-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

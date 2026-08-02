@@ -2041,6 +2041,143 @@ test("host imports an image before sending the internal source to the plugin", a
   assert.equal(args._image.heightPx, 200);
 });
 
+test("host safely imports slide, master, and layout background images before plugin execution", async () => {
+  let imports = 0;
+  const harness = createHarness({
+    editorType: "slide",
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.equal(requestPath, "/copilot-api/images/import");
+      imports += 1;
+      assert.equal(requestOptions.headers.Authorization, "Bearer editor-token");
+      return importedImageResponse({
+        assetId: `${String(imports).padStart(64, "0")}.png`,
+        widthPx: 1600,
+        heightPx: 900,
+      });
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await harness.hostWindow.aiBridge.slides.setBackground({
+    slide: 1,
+    mode: "image",
+    source: { type: "url", url: "https://images.test/slide-background.png" },
+  }, {
+    timeoutMs: 1000,
+    requestId: "slide-background-import",
+  });
+  await harness.hostWindow.aiBridge.slides.setTemplateBackground({
+    scope: "master",
+    masterIndex: 1,
+    mode: "image",
+    fillMode: "tile",
+    source: { type: "dataUrl", dataUrl: "data:image/png;base64,AAAA" },
+  }, {
+    timeoutMs: 1000,
+    requestId: "master-background-import",
+  });
+  await harness.hostWindow.aiBridge.slides.setTemplateBackground({
+    scope: "layout",
+    masterIndex: 1,
+    layoutIndex: 1,
+    mode: "image",
+    source: { type: "url", url: "https://images.test/layout-background.png" },
+  }, {
+    timeoutMs: 1000,
+    requestId: "layout-background-import",
+  });
+
+  assert.equal(imports, 3);
+  assert.equal(harness.executedToolCalls.length, 3);
+  assert.deepEqual(
+    harness.executedToolCalls.map(call => call.name),
+    ["slides_set_background", "slides_set_template_background", "slides_set_template_background"],
+  );
+  assert.ok(harness.executedToolCalls.every(call => call.arguments.source === undefined));
+  assert.ok(harness.executedToolCalls.every(call => call.arguments._image.widthPx === 1600));
+  assert.equal(harness.executedToolCalls[0].arguments.fillMode, undefined);
+  assert.equal(harness.executedToolCalls[1].arguments.fillMode, "tile");
+});
+
+test("failed background image import prevents checkpoint and plugin execution", async () => {
+  const harness = createHarness({
+    editorType: "slide",
+    hostFetch: async requestPath => {
+      assert.equal(requestPath, "/copilot-api/images/import");
+      return relayResponse(400, {
+        ok: false,
+        error: { code: "UNSUPPORTED_IMAGE_FORMAT", message: "不支持该背景图片格式" },
+      });
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.slides.setBackground({
+      slide: 1,
+      mode: "image",
+      source: { type: "url", url: "https://images.test/background.bmp" },
+    }, {
+      timeoutMs: 1000,
+      requestId: "background-import-failure",
+    }),
+    error => error.code === "UNSUPPORTED_IMAGE_FORMAT",
+  );
+
+  assert.equal(harness.executedToolCalls.length, 0);
+  assert.deepEqual(harness.servicePaths, []);
+});
+
+test("non-image background modes skip optional image import and invalid image mode stops before execution", async () => {
+  let imports = 0;
+  const harness = createHarness({
+    editorType: "slide",
+    hostFetch: async requestPath => {
+      if (requestPath === "/copilot-api/images/import") imports += 1;
+      return importedImageResponse();
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await harness.hostWindow.aiBridge.executeBatch([
+    {
+      name: "slides_set_background",
+      arguments: { slide: 1, fill: { type: "solid", color: "#FFFFFF" } },
+    },
+    {
+      name: "slides_set_background",
+      arguments: { slide: 1, mode: "layout" },
+    },
+    {
+      name: "slides_set_template_background",
+      arguments: { scope: "layout", masterIndex: 1, layoutIndex: 1, mode: "master" },
+    },
+  ], {
+    timeoutMs: 1000,
+    requestId: "non-image-backgrounds",
+  });
+
+  assert.equal(imports, 0);
+  assert.equal(harness.executedToolCalls.length, 3);
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.slides.setBackground({ slide: 1, mode: "image" }, {
+      timeoutMs: 1000,
+      requestId: "missing-background-image",
+    }),
+    error => {
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.ok(error.details.validationErrors.some(item => item.path === "arguments.source"));
+      return true;
+    },
+  );
+
+  assert.equal(imports, 0);
+  assert.equal(harness.executedToolCalls.length, 3);
+});
+
 test("localhost host resolves the signed asset to an internal Data URL", async () => {
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z3xkAAAAASUVORK5CYII=",

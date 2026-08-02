@@ -37,7 +37,7 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.8.0-rev5"
+EDITOR_ASSET_REVISION = "0.1.0-rev1"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
@@ -1952,7 +1952,7 @@ def decode_image_source(source: Any) -> tuple[bytes, str | None]:
             validated_url,
             headers={
                 "Accept": "image/png,image/jpeg,image/gif,image/webp,image/svg+xml",
-                "User-Agent": "OnlyOffice-ai-bridge/0.3",
+                "User-Agent": "OnlyOffice-ai-bridge/0.1.0",
             },
             method="GET",
         )
@@ -4095,7 +4095,7 @@ def persist_callback_document(
         with document_save_lock(destination):
             request = urllib.request.Request(
                 safe_url,
-                headers={"User-Agent": "OnlyOfficeCopilotStorage/1.0"},
+                headers={"User-Agent": "OnlyOfficeCopilotStorage/0.1.0"},
                 method="GET",
             )
             with urllib.request.urlopen(request, timeout=45) as response:

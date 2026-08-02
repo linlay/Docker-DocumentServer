@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 155)
-        self.assertEqual(self.contract["version"], "0.8.0")
+        self.assertEqual(self.contract["version"], "0.1.0")
         self.assertEqual(self.contract["protocolVersion"], 1)
         for name, schema in tools.items():
             with self.subTest(tool=name):
@@ -62,6 +62,129 @@ class ContractGenerationTests(unittest.TestCase):
             ["auto", "placeholder", "textbox"],
         )
         self.assertEqual(title_placement["default"], "auto")
+
+    def test_slides_image_background_contract_is_safe_and_mutually_exclusive(self) -> None:
+        slide_schema = self.contract["tools"]["slide"]["slides_set_background"]
+        template_schema = self.contract["tools"]["slide"][
+            "slides_set_template_background"
+        ]
+        for schema in (slide_schema, template_schema):
+            with self.subTest(tool=schema["description"]):
+                self.assertEqual(schema["x-argumentLimitClass"], "image")
+                self.assertEqual(
+                    schema["properties"]["source"]["$ref"],
+                    "#/$defs/imageSource",
+                )
+                self.assertEqual(
+                    schema["properties"]["fillMode"]["enum"],
+                    ["stretch", "tile"],
+                )
+                self.assertEqual(
+                    schema["properties"]["fillMode"]["default"],
+                    "stretch",
+                )
+                self.assertIn("image", schema["properties"]["mode"]["enum"])
+
+        valid_calls = [
+            {
+                "name": "slides_set_background",
+                "arguments": {
+                    "slide": 1,
+                    "mode": "image",
+                    "source": {
+                        "type": "url",
+                        "url": "https://images.example.test/background.png",
+                    },
+                },
+            },
+            {
+                "name": "slides_set_template_background",
+                "arguments": {
+                    "scope": "master",
+                    "masterIndex": 1,
+                    "mode": "image",
+                    "fillMode": "tile",
+                    "source": {
+                        "type": "dataUrl",
+                        "dataUrl": "data:image/png;base64,AAAA",
+                    },
+                },
+            },
+            {
+                "name": "slides_set_background",
+                "arguments": {
+                    "slide": 1,
+                    "fill": {"type": "solid", "color": "#FFFFFF"},
+                },
+            },
+            {
+                "name": "slides_set_template_background",
+                "arguments": {
+                    "scope": "layout",
+                    "masterIndex": 1,
+                    "layoutIndex": 1,
+                    "mode": "master",
+                },
+            },
+        ]
+        normalized, changes = copilot_server.require_valid_editor_tool_calls(
+            "slide",
+            valid_calls,
+        )
+        self.assertEqual(normalized, valid_calls)
+        self.assertEqual(changes, [])
+
+        invalid_arguments = [
+            {"slide": 1, "mode": "image"},
+            {
+                "slide": 1,
+                "mode": "image",
+                "source": {
+                    "type": "url",
+                    "url": "https://images.example.test/background.png",
+                },
+                "fill": {"type": "solid", "color": "#FFFFFF"},
+            },
+            {
+                "slide": 1,
+                "mode": "custom",
+                "fill": {"type": "solid", "color": "#FFFFFF"},
+                "source": {
+                    "type": "url",
+                    "url": "https://images.example.test/background.png",
+                },
+            },
+            {
+                "slide": 1,
+                "mode": "clear",
+                "fill": {"type": "solid", "color": "#FFFFFF"},
+            },
+            {
+                "slide": 1,
+                "fill": {"type": "solid", "color": "#FFFFFF"},
+                "fillMode": "tile",
+            },
+        ]
+        for arguments in invalid_arguments:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(copilot_server.BridgeError) as caught:
+                    copilot_server.require_valid_editor_tool_calls(
+                        "slide",
+                        [
+                            {
+                                "name": "slides_set_background",
+                                "arguments": arguments,
+                            }
+                        ],
+                    )
+                self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+                self.assertEqual(
+                    caught.exception.details["completedToolCalls"],
+                    0,
+                )
+                self.assertFalse(
+                    caught.exception.details["partialMutationPossible"]
+                )
 
     def test_local_generated_projections_are_current_and_idempotent(self) -> None:
         command = [
@@ -115,6 +238,97 @@ class ContractGenerationTests(unittest.TestCase):
                     f'editorType = {{ from = "literal", value = "{editor}" }}',
                     rendered,
                 )
+                site = sync_contract.EDITOR_CONFIG[editor]["site"]
+                self.assertIn(
+                    f'User-Agent = "agent-platform-httpx/{site}"',
+                    rendered,
+                )
+                self.assertIn(f"ATTACH_FAILED: {site}", rendered)
+
+    def test_skill_version_projection_preserves_frontmatter_and_body(self) -> None:
+        source = (
+            "---\n"
+            "name: online-docx\n"
+            "description: Example\n"
+            "metadata:\n"
+            "  tags:\n"
+            "    - office\n"
+            "  version: \"9.9.9\"\n"
+            "---\n\n"
+            "# Body\n"
+        )
+        expected = source.replace('version: "9.9.9"', 'version: "0.1.0"')
+        rendered = sync_contract.render_skill_version(source, "0.1.0")
+        self.assertEqual(rendered, expected)
+        self.assertEqual(
+            sync_contract.render_skill_version(rendered, "0.1.0"),
+            expected,
+        )
+
+        without_metadata = (
+            "---\n"
+            "name: online-xlsx\n"
+            "description: Example\n"
+            "---\n\n"
+            "# Body\n"
+        )
+        self.assertEqual(
+            sync_contract.render_skill_version(without_metadata, "0.1.0"),
+            "---\n"
+            "name: online-xlsx\n"
+            "description: Example\n"
+            "metadata:\n"
+            "  version: \"0.1.0\"\n"
+            "---\n\n"
+            "# Body\n",
+        )
+
+    def test_cross_repo_projections_live_inside_each_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            zenmind_root = Path(directory)
+            for config in sync_contract.EDITOR_CONFIG.values():
+                skill_root = (
+                    zenmind_root / "skills-market" / config["skill"]
+                )
+                skill_root.mkdir(parents=True)
+                (skill_root / "SKILL.md").write_text(
+                    "---\n"
+                    f'name: {config["skill"]}\n'
+                    "description: Example\n"
+                    "---\n\n"
+                    "# Body\n",
+                    encoding="utf-8",
+                )
+
+            artifacts = sync_contract.build_artifacts(
+                self.contract,
+                zenmind_root,
+                "https://office.example.test",
+            )
+            self.assertFalse(
+                any(
+                    path.is_relative_to(zenmind_root / "agents")
+                    for path in artifacts
+                )
+            )
+            for config in sync_contract.EDITOR_CONFIG.values():
+                skill_root = (
+                    zenmind_root / "skills-market" / config["skill"]
+                )
+                skill_path = skill_root / "SKILL.md"
+                toml_path = (
+                    skill_root / ".config" / "httpx" / config["toml"]
+                )
+                self.assertIn(skill_path, artifacts)
+                self.assertIn(toml_path, artifacts)
+                self.assertIn(
+                    '  version: "0.1.0"',
+                    artifacts[skill_path],
+                )
+                self.assertIn(
+                    f'agent-platform-httpx/{config["site"]}',
+                    artifacts[toml_path],
+                )
 
     def test_httpx_base_url_rejects_non_origin_values(self) -> None:
         invalid_values = (
@@ -133,14 +347,14 @@ class ContractGenerationTests(unittest.TestCase):
     def test_check_logic_detects_a_manual_generated_file_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             projection = Path(directory) / "contract.generated.json"
-            expected = '{"version":"0.8.0"}\n'
+            expected = '{"version":"0.1.0"}\n'
             projection.write_text(expected, encoding="utf-8")
             self.assertEqual(
                 sync_contract.drifted_paths({projection: expected}),
                 [],
             )
             projection.write_text(
-                expected.replace("0.8.0", "manual-edit"),
+                expected.replace("0.1.0", "manual-edit"),
                 encoding="utf-8",
             )
             self.assertEqual(

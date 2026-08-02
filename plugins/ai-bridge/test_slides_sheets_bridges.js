@@ -1053,7 +1053,7 @@ function slidesHarness() {
       callback(values[method]);
     },
   };
-  return { bridge: loadBridge(slidesSource, api).slide, presentation, first, second, selection };
+  return { bridge: loadBridge(slidesSource, api).slide, presentation, first, second, selection, api };
 }
 
 class MockRange {
@@ -1432,6 +1432,141 @@ test("Slides bridge crops an image to a preset shape and applies a border", asyn
   assert.equal(result.results[0].object.heightMm, 60);
   assert.equal(result.results[1].object.line.widthPt, 3);
   assert.equal(first.shapes.at(-1).GetName(), "Avatar");
+});
+
+test("Slides bridge sets native stretch and tile image backgrounds without adding drawings", async () => {
+  const { bridge, presentation, first, second } = slidesHarness();
+  const firstDrawingCount = first.GetAllDrawings().length;
+  const secondDrawingCount = second.GetAllDrawings().length;
+  const firstAsset = {
+    url: "https://app.test/copilot-api/images/background-one.png?token=signed",
+    assetId: "background-one.png",
+    widthPx: 1600,
+    heightPx: 900,
+  };
+  const secondAsset = {
+    url: "https://app.test/copilot-api/images/background-two.jpg?token=signed",
+    assetId: "background-two.jpg",
+    widthPx: 1600,
+    heightPx: 900,
+  };
+
+  const result = await bridge.execute([
+    {
+      name: "slides_set_background",
+      arguments: { slide: 1, mode: "image", _image: firstAsset },
+    },
+    {
+      name: "slides_set_background",
+      arguments: { slide: 2, mode: "image", fillMode: "tile", _image: secondAsset },
+    },
+  ]);
+
+  assert.equal(result.changed, 2);
+  assert.equal(presentation.historyPoints, 1);
+  assert.equal(first.background.type, "blip");
+  assert.equal(first.background.url, firstAsset.url);
+  assert.equal(first.background.mode, "stretch");
+  assert.equal(second.background.type, "blip");
+  assert.equal(second.background.url, secondAsset.url);
+  assert.equal(second.background.mode, "tile");
+  assert.equal(first.GetAllDrawings().length, firstDrawingCount);
+  assert.equal(second.GetAllDrawings().length, secondDrawingCount);
+  assert.deepEqual(result.results[0].source, {
+    assetId: "background-one.png",
+    widthPx: 1600,
+    heightPx: 900,
+  });
+  assert.equal(result.results[0].fillMode, "stretch");
+  assert.equal(result.results[1].fillMode, "tile");
+  assert.equal(JSON.stringify(result.results).includes("token=signed"), false);
+});
+
+test("Slides bridge sets native image backgrounds on masters and layouts", async () => {
+  const { bridge, presentation } = slidesHarness();
+  const master = presentation.GetMaster(0);
+  const layout = master.GetLayout(1);
+  const masterDrawingCount = master.GetAllDrawings().length;
+  const layoutDrawingCount = layout.GetAllDrawings().length;
+  const asset = {
+    url: "https://app.test/copilot-api/images/template-background.png?token=signed",
+    assetId: "template-background.png",
+    widthPx: 1600,
+    heightPx: 900,
+  };
+
+  const result = await bridge.execute([
+    {
+      name: "slides_set_template_background",
+      arguments: { scope: "master", masterIndex: 1, mode: "image", _image: asset },
+    },
+    {
+      name: "slides_set_template_background",
+      arguments: {
+        scope: "layout",
+        masterIndex: 1,
+        layoutIndex: 2,
+        mode: "image",
+        fillMode: "tile",
+        _image: asset,
+      },
+    },
+  ]);
+
+  assert.equal(result.changed, 2);
+  assert.equal(master.background.type, "blip");
+  assert.equal(master.background.mode, "stretch");
+  assert.equal(layout.background.type, "blip");
+  assert.equal(layout.background.mode, "tile");
+  assert.equal(master.GetAllDrawings().length, masterDrawingCount);
+  assert.equal(layout.GetAllDrawings().length, layoutDrawingCount);
+  assert.equal(result.results[0].scope, "master");
+  assert.equal(result.results[1].scope, "layout");
+  assert.equal(result.results[1].fillMode, "tile");
+});
+
+test("Slides bridge reports unsupported or rejected native image backgrounds without adding drawings", async () => {
+  const unsupported = slidesHarness();
+  const unsupportedDrawingCount = unsupported.first.GetAllDrawings().length;
+  unsupported.api.CreateBlipFill = undefined;
+  await assert.rejects(
+    unsupported.bridge.execute([{
+      name: "slides_set_background",
+      arguments: {
+        slide: 1,
+        mode: "image",
+        _image: {
+          url: "https://app.test/copilot-api/images/background.png?token=signed",
+          widthPx: 1600,
+          heightPx: 900,
+        },
+      },
+    }]),
+    /不支持图片背景填充/,
+  );
+  assert.equal(unsupported.first.background, null);
+  assert.equal(unsupported.first.GetAllDrawings().length, unsupportedDrawingCount);
+
+  const rejected = slidesHarness();
+  const rejectedDrawingCount = rejected.first.GetAllDrawings().length;
+  rejected.first.SetBackground = () => false;
+  await assert.rejects(
+    rejected.bridge.execute([{
+      name: "slides_set_background",
+      arguments: {
+        slide: 1,
+        mode: "image",
+        _image: {
+          url: "https://app.test/copilot-api/images/background.png?token=signed",
+          widthPx: 1600,
+          heightPx: 900,
+        },
+      },
+    }]),
+    /拒绝设置幻灯片图片背景/,
+  );
+  assert.equal(rejected.first.background, null);
+  assert.equal(rejected.first.GetAllDrawings().length, rejectedDrawingCount);
 });
 
 test("Slides bridge rejects an invalid slide before creating an image", async () => {

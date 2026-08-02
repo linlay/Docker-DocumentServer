@@ -1,9 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.8.0";
+  const VERSION = "0.1.0";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "f12ae5e95342eab2bf1fe8952eeb77b610883ddfba51dfd5d11a3e3e0d3015de";
+  const CONTRACT_SHA256 = "c2e0226a6ae46493f2af42aca79c259054fb6191321f3752e9a9a8d90437e155";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -25,7 +25,7 @@
   const relayClients = new Map();
   const preparedImageCommands = new Map();
   const IMAGE_TOOL_NAMES = new Set(["word_add_image","word_add_ole_object","slides_add_image","slides_add_image_shape","slides_add_ole_object"]);
-  const OPTIONAL_IMAGE_TOOL_NAMES = new Set(["word_set_watermark","sheets_manage_drawing"]);
+  const OPTIONAL_IMAGE_TOOL_NAMES = new Set(["word_set_watermark","slides_set_template_background","slides_set_background","sheets_manage_drawing"]);
   const sessionId = createRequestId("session");
   let pluginWindow = null;
   let ready = false;

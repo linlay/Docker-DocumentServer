@@ -1108,6 +1108,32 @@
               throw new Error("不支持的填充类型：" + type);
             }
 
+            function createImportedImageFill(args) {
+              if (!args._image || !args._image.url) {
+                commandError("INVALID_IMAGE_SOURCE", "图片背景资源尚未安全导入");
+              }
+              if (typeof Api.CreateBlipFill !== "function") {
+                commandError("IMAGE_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持图片背景填充");
+              }
+              var fillMode = String(args.fillMode || "stretch");
+              if (fillMode !== "stretch" && fillMode !== "tile") {
+                throw new Error("图片背景 fillMode 必须是 stretch 或 tile");
+              }
+              var fill = Api.CreateBlipFill(String(args._image.url), fillMode);
+              if (!fill) commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 无法创建图片背景填充");
+              var widthPx = Number(args._image.widthPx);
+              var heightPx = Number(args._image.heightPx);
+              return {
+                fill: fill,
+                fillMode: fillMode,
+                source: {
+                  assetId: args._image.assetId ? String(args._image.assetId) : null,
+                  widthPx: isFinite(widthPx) ? widthPx : null,
+                  heightPx: isFinite(heightPx) ? heightPx : null,
+                },
+              };
+            }
+
             function describeFill(fill) {
               if (!fill) return null;
               return {
@@ -2550,12 +2576,26 @@
                 case "slides_set_template_background": {
                   var backgroundTarget = getTemplateContainer(args);
                   var templateBackgroundMode = String(args.mode || "custom");
+                  var templateBackgroundResult = {
+                    name: call.name,
+                    scope: backgroundTarget.scope,
+                    masterIndex: backgroundTarget.masterIndex,
+                    layoutIndex: backgroundTarget.layoutIndex,
+                    mode: templateBackgroundMode,
+                  };
                   if (templateBackgroundMode === "clear") {
                     if (typeof backgroundTarget.container.ClearBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持清除模板背景");
                     backgroundTarget.container.ClearBackground();
                   } else if (templateBackgroundMode === "master" && backgroundTarget.scope === "layout") {
                     if (typeof backgroundTarget.container.FollowMasterBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持跟随母版背景");
                     backgroundTarget.container.FollowMasterBackground();
+                  } else if (templateBackgroundMode === "image") {
+                    var templateImageBackground = createImportedImageFill(args);
+                    if (backgroundTarget.container.SetBackground(templateImageBackground.fill) === false) {
+                      commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 拒绝设置模板图片背景");
+                    }
+                    templateBackgroundResult.fillMode = templateImageBackground.fillMode;
+                    templateBackgroundResult.source = templateImageBackground.source;
                   } else if (templateBackgroundMode === "custom") {
                     if (!hasOwn(args, "fill")) throw new Error("自定义模板背景需要 fill");
                     backgroundTarget.container.SetBackground(createFill(args.fill));
@@ -2563,13 +2603,7 @@
                     throw new Error("不支持的模板背景模式：" + templateBackgroundMode);
                   }
                   changed += 1;
-                  results.push({
-                    name: call.name,
-                    scope: backgroundTarget.scope,
-                    masterIndex: backgroundTarget.masterIndex,
-                    layoutIndex: backgroundTarget.layoutIndex,
-                    mode: templateBackgroundMode,
-                  });
+                  results.push(templateBackgroundResult);
                   break;
                 }
 
@@ -3516,6 +3550,7 @@
                 case "slides_set_background": {
                   var backgroundSlide = getSlide(args.slide);
                   var mode = String(args.mode || "custom");
+                  var backgroundResult = { name: call.name, slide: Number(args.slide), mode: mode };
                   if (mode === "clear") {
                     if (typeof backgroundSlide.ClearBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持清除背景");
                     backgroundSlide.ClearBackground();
@@ -3525,12 +3560,19 @@
                   } else if (mode === "master") {
                     if (typeof backgroundSlide.FollowMasterBackground !== "function") throw new Error("当前 ONLYOFFICE 版本不支持跟随母版背景");
                     backgroundSlide.FollowMasterBackground();
+                  } else if (mode === "image") {
+                    var imageBackground = createImportedImageFill(args);
+                    if (backgroundSlide.SetBackground(imageBackground.fill) === false) {
+                      commandError("IMAGE_FETCH_FAILED", "ONLYOFFICE 拒绝设置幻灯片图片背景");
+                    }
+                    backgroundResult.fillMode = imageBackground.fillMode;
+                    backgroundResult.source = imageBackground.source;
                   } else {
                     if (!hasOwn(args, "fill")) throw new Error("自定义幻灯片背景需要 fill");
                     backgroundSlide.SetBackground(createFill(args.fill));
                   }
                   changed += 1;
-                  results.push({ name: call.name, slide: Number(args.slide), mode: mode });
+                  results.push(backgroundResult);
                   break;
                 }
 

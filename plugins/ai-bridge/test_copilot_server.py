@@ -116,8 +116,8 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.8.0-rev5"
-        stale_revision = "0.8.0-rev4"
+        revision = "0.1.0-rev1"
+        stale_revision = "0.1.0-rev0"
         paths = [
             "config.json",
             "index.html",

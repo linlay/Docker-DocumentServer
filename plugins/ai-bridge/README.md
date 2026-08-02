@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.8.0`
+- Version: `0.1.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.8.0-rev5",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev1",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -126,7 +126,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -155,7 +155,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.8.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.1.0-rev1"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -228,6 +228,22 @@ await window.aiBridge.slides.addImage({
   widthMm: 140,
   rotationDeg: 2,
   name: "Pasted screenshot",
+});
+
+await window.aiBridge.slides.setBackground({
+  slide: 2,
+  mode: "image",
+  source: { type: "dataUrl", dataUrl: clipboardImageDataUrl },
+  fillMode: "stretch",
+});
+
+await window.aiBridge.slides.setTemplateBackground({
+  scope: "layout",
+  masterIndex: 1,
+  layoutIndex: 2,
+  mode: "image",
+  source: { type: "url", url: "https://images.example.com/layout-background.png" },
+  fillMode: "stretch",
 });
 ```
 
@@ -365,9 +381,9 @@ therefore remains deterministic and does not create an undo entry.
 | Area | Supported operations |
 | --- | --- |
 | PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, chart summary, and optional raw Office JSON |
-| PPT slides | Add, duplicate, delete, and set custom/clear/layout/master background |
+| PPT slides | Add, duplicate, delete, and set native solid/gradient/pattern/image backgrounds or follow layout/master |
 | PPT shapes | Add any preset geometry; update text, geometry, name, position, size, rotation, flips, padding, text style, fill, and line; delete any drawing |
-| PPT structure/theme | Slide CRUD/order/visibility/size; themes, theme colors/fonts, masters, layouts, placeholders, backgrounds, and template-object CRUD |
+| PPT structure/theme | Slide CRUD/order/visibility/size; themes, theme colors/fonts, masters, layouts, placeholders, native image backgrounds, and template-object CRUD |
 | PPT text/tables | Rich paragraphs and multilevel lists, WordArt, math, notes, comments, tables with row/column edits and cell merge/split |
 | PPT images | Add imported PNG/JPEG/GIF/WebP/SVG; contain/stretch sizing, position, rotation, flips, borders, safe SVG normalization, and preset-shape crops |
 | PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
