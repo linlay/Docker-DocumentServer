@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -36,7 +37,7 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.6.0-rev5"
+EDITOR_ASSET_REVISION = "0.8.0-rev5"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
@@ -669,14 +670,41 @@ def append_argument_validation_error(
     path: str,
     keyword: str,
     message: str,
+    **details: Any,
 ) -> None:
-    errors.append(
-        {
-            "path": path,
-            "keyword": keyword,
-            "message": message,
-        }
-    )
+    error = {
+        "path": path,
+        "keyword": keyword,
+        "message": message,
+    }
+    error.update(details)
+    errors.append(error)
+
+
+def enum_value_suggestions(value: Any, allowed_values: list[Any]) -> list[Any]:
+    if not isinstance(value, str):
+        return []
+    token = re.sub(r"[^a-z0-9]", "", value.lower())
+    if not token:
+        return []
+    ranked: list[tuple[int, int, int, str]] = []
+    for index, candidate in enumerate(allowed_values):
+        if not isinstance(candidate, str):
+            continue
+        candidate_token = re.sub(r"[^a-z0-9]", "", candidate.lower())
+        if not candidate_token:
+            continue
+        if token.startswith(candidate_token) or candidate_token.startswith(token):
+            ranked.append(
+                (
+                    0 if token.startswith(candidate_token) else 1,
+                    abs(len(token) - len(candidate_token)),
+                    index,
+                    candidate,
+                )
+            )
+    ranked.sort()
+    return [candidate for _, _, _, candidate in ranked[:3]]
 
 
 def validate_json_schema(
@@ -784,11 +812,22 @@ def validate_json_schema(
         type(value) is type(candidate) and value == candidate
         for candidate in enum_values
     ):
+        suggestions = enum_value_suggestions(value, enum_values)
         append_argument_validation_error(
             errors,
             path,
             "enum",
-            f"{path} must be one of the allowed values",
+            (
+                f"{path} must be one of the allowed values"
+                + (
+                    f"; suggested: {', '.join(str(item) for item in suggestions)}"
+                    if suggestions
+                    else ""
+                )
+            ),
+            received=value,
+            allowedValues=enum_values,
+            suggestedValues=suggestions,
         )
 
     if "const" in schema and (
@@ -1244,10 +1283,14 @@ def validate_sheet_semantics(
                 )
         if action != "create" and "tableMode" in arguments:
             semantic_error("tableMode", "tableMode is only allowed when action is create")
-        if action == "create" and table_mode == "basic" and provided_structured_fields:
+        if (
+            action == "create"
+            and table_mode in {"basic", "rangeStyle"}
+            and provided_structured_fields
+        ):
             semantic_error(
                 provided_structured_fields[0],
-                "basic tables do not support structured-table properties",
+                "range-style tables do not support structured-table properties",
             )
         if action == "format":
             invalid_format_fields = sorted(
@@ -1431,6 +1474,8 @@ EDITOR_ERROR_HTTP_STATUS = {
     "EXECUTION_FAILED": 500,
     "WORD_API_UNSUPPORTED": 501,
     "SHEETS_API_UNSUPPORTED": 501,
+    "SHEETS_RUNTIME_INCOMPATIBLE": 500,
+    "SHEETS_CHART_PARTIAL_MUTATION": 500,
     "IMAGE_API_UNSUPPORTED": 501,
     "PERSISTENCE_FAILED": 502,
     "IMAGE_FETCH_FAILED": 502,
@@ -2664,6 +2709,145 @@ def bridge_parse_json_parameter(
     return value
 
 
+def sheet_runtime_feature(
+    capabilities: dict[str, Any],
+    *path: str,
+) -> bool | None:
+    value: Any = capabilities.get("features")
+    for name in path:
+        if not isinstance(value, dict) or name not in value:
+            return None
+        value = value[name]
+    return value if isinstance(value, bool) else None
+
+
+def require_sheets_runtime_capabilities(
+    tool_calls: list[dict[str, Any]],
+    capabilities: dict[str, Any],
+) -> None:
+    structured_fields = {
+        "sourceType",
+        "name",
+        "style",
+        "showTotals",
+        "showHeaders",
+        "rowStripes",
+        "columnStripes",
+        "firstColumn",
+        "lastColumn",
+        "showAutoFilter",
+        "showAutoFilterDropDown",
+        "summary",
+        "alternativeText",
+    }
+
+    def reject(index: int, feature: str, message: str) -> None:
+        raise BridgeError(
+            501,
+            "SHEETS_API_UNSUPPORTED",
+            message,
+            {
+                "feature": feature,
+                "retryable": False,
+                "mutationState": "none",
+                "toolCallIndex": index,
+                "completedToolCalls": 0,
+                "partialMutationPossible": False,
+            },
+        )
+
+    for index, call in enumerate(tool_calls):
+        name = str(call.get("name", ""))
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        if name == "sheets_manage_table":
+            action = str(arguments.get("action", ""))
+            mode = str(arguments.get("tableMode", "auto"))
+            if mode == "basic":
+                mode = "rangeStyle"
+            requires_native = mode == "structured" or bool(
+                structured_fields.intersection(arguments)
+            )
+            if (
+                action == "create"
+                and requires_native
+                and sheet_runtime_feature(
+                    capabilities, "sheets", "nativeTables", "create"
+                ) is False
+            ):
+                reject(
+                    index,
+                    "sheets.nativeTables.create",
+                    "当前 ONLYOFFICE 运行时不支持创建原生结构化表格",
+                )
+            if (
+                action == "create"
+                and mode == "rangeStyle"
+                and sheet_runtime_feature(
+                    capabilities, "sheets", "rangeStyleTables", "create"
+                ) is False
+            ):
+                reject(
+                    index,
+                    "sheets.rangeStyleTables.create",
+                    "当前 ONLYOFFICE 运行时不支持普通区域表格样式",
+                )
+            if (
+                action in {"update", "resize", "delete", "unlist"}
+                and sheet_runtime_feature(
+                    capabilities, "sheets", "nativeTables", "inspect"
+                ) is False
+            ):
+                reject(
+                    index,
+                    "sheets.nativeTables.inspect",
+                    "当前 ONLYOFFICE 运行时不支持访问原生结构化表格",
+                )
+        elif name == "sheets_manage_conditional_format":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "conditionalFormatting", "create"
+            ) is False:
+                reject(
+                    index,
+                    "sheets.conditionalFormatting.create",
+                    "当前 ONLYOFFICE 运行时不支持条件格式",
+                )
+        elif name == "sheets_add_chart":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "charts", "create"
+            ) is False:
+                reject(
+                    index,
+                    "sheets.charts.create",
+                    "当前 ONLYOFFICE 运行时不支持创建图表",
+                )
+            has_advanced_series = any(
+                key in arguments and arguments.get(key) not in (None, [], "")
+                for key in ("categoryRange", "addSeries", "seriesUpdates", "removeSeries")
+            )
+            if (
+                has_advanced_series
+                and sheet_runtime_feature(
+                    capabilities, "sheets", "charts", "addSeriesOnCreate"
+                ) is False
+            ):
+                reject(
+                    index,
+                    "sheets.charts.addSeriesOnCreate",
+                    "当前 ONLYOFFICE 运行时不支持在创建图表时追加或重定向系列",
+                )
+        elif name == "sheets_delete_chart":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "charts", "delete"
+            ) is False:
+                reject(
+                    index,
+                    "sheets.charts.delete",
+                    "当前 ONLYOFFICE 运行时不支持删除图表",
+                )
+
+
 def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
     method = str(payload.get("method", "")).strip()
     if method not in BRIDGE_ALLOWED_METHODS:
@@ -2697,6 +2881,11 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
                 [{"name": name, "arguments": arguments}],
             )
             arguments = normalized_calls[0]["arguments"]
+        if editor_type == "cell":
+            require_sheets_runtime_capabilities(
+                [{"name": name, "arguments": arguments}],
+                (session.get("state") or {}).get("capabilities") or {},
+            )
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
@@ -2715,6 +2904,11 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
             tool_calls, argument_normalizations = require_valid_editor_tool_calls(
                 editor_type,
                 tool_calls,
+            )
+        if editor_type == "cell":
+            require_sheets_runtime_capabilities(
+                tool_calls,
+                (session.get("state") or {}).get("capabilities") or {},
             )
         params = {"toolCalls": tool_calls}
 
@@ -2771,6 +2965,11 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
             editor_type,
             tool_calls
         )
+        if editor_type == "cell":
+            require_sheets_runtime_capabilities(
+                normalized_calls,
+                (session.get("state") or {}).get("capabilities") or {},
+            )
         return {
             "ok": True,
             "valid": True,
@@ -2872,12 +3071,28 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
             or BRIDGE_SUPERSEDED.get(result_session_id)
             or session
         )
+        completed_monotonic = command.get("completedMonotonic")
+        bridge_timings = {
+            "queueWait": bridge_elapsed_ms(
+                command.get("createdMonotonic"),
+                command.get("firstDeliveredMonotonic"),
+            ),
+            "editorRoundTrip": bridge_elapsed_ms(
+                command.get("firstDeliveredMonotonic"),
+                completed_monotonic,
+            ),
+            "total": bridge_elapsed_ms(
+                command.get("createdMonotonic"),
+                completed_monotonic,
+            ),
+        }
         return {
             "ok": True,
             "cached": cached,
             "requestId": command_data["requestId"],
             "session": bridge_public_session(result_session_id, result_session),
             "result": response.get("result"),
+            "timingsMs": bridge_timings,
             "argumentNormalizations": command.get("argumentNormalizations", []),
             **contract_identity(),
         }
@@ -3008,8 +3223,40 @@ def document_storage_directory() -> str:
 def document_template_path(file_type: str) -> str:
     if file_type not in DOCUMENT_TYPES:
         raise BridgeError(404, "DOCUMENT_TYPE_NOT_FOUND", "不支持的文档类型")
+    if file_type == "pptx":
+        configured = os.environ.get("DOCUMENT_PPTX_TEMPLATE_PATH", "").strip()
+        if configured:
+            validate_pptx_template(configured)
+            return configured
     template_root = os.environ.get("DOCUMENT_TEMPLATE_ROOT", DOCUMENT_TEMPLATE_ROOT)
     return os.path.join(template_root, f"new.{file_type}")
+
+
+def validate_pptx_template(path: str) -> None:
+    if not os.path.isfile(path):
+        raise RuntimeError("找不到 DOCUMENT_PPTX_TEMPLATE_PATH 指定的 PPTX 模板")
+    required_parts = {
+        "[Content_Types].xml",
+        "ppt/presentation.xml",
+    }
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            missing = sorted(required_parts - names)
+            slide_parts = sorted(
+                name
+                for name in names
+                if re.fullmatch(r"ppt/slides/slide[1-9][0-9]*\.xml", name)
+            )
+            if missing or not slide_parts:
+                details = missing or ["ppt/slides/slide*.xml"]
+                raise RuntimeError(
+                    "PPTX 模板缺少必要 OOXML 部件：" + ", ".join(details)
+                )
+            for part in ("[Content_Types].xml", "ppt/presentation.xml", slide_parts[0]):
+                ET.fromstring(archive.read(part))
+    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as error:
+        raise RuntimeError("DOCUMENT_PPTX_TEMPLATE_PATH 不是有效的 PPTX 模板") from error
 
 
 def normalize_document_id(value: Any) -> str:
@@ -4106,18 +4353,29 @@ def force_save(key: str, file_name: str | None, allow_no_changes: bool = False) 
         if result.get("error") != 4 or allow_no_changes or time.time() >= retry_deadline:
             break
         time.sleep(0.6)
-    if result.get("error") == 4:
+    if result.get("error") == 4 and allow_no_changes:
         return {
             "accepted": False,
             "noChanges": True,
             "persisted": os.path.isfile(main_file),
+            "status": "no_changes",
+            "commandError": 4,
             "command": result,
             "beforeMtime": before,
             "afterMtime": os.path.getmtime(main_file),
             "note": "No editor changes needed saving; the current canonical file remains downloadable.",
         }
     if result.get("error") != 0:
-        raise RuntimeError(f"CommandService 拒绝 forcesave：{result}")
+        return {
+            "accepted": False,
+            "noChanges": False,
+            "persisted": False,
+            "status": "failed",
+            "commandError": result.get("error"),
+            "command": result,
+            "beforeMtime": before,
+            "afterMtime": os.path.getmtime(main_file),
+        }
 
     persisted = False
     after = before
@@ -4131,6 +4389,8 @@ def force_save(key: str, file_name: str | None, allow_no_changes: bool = False) 
     return {
         "accepted": True,
         "persisted": persisted,
+        "status": "saved" if persisted else "failed",
+        "commandError": 0,
         "command": result,
         "beforeMtime": before,
         "afterMtime": after,

@@ -357,6 +357,9 @@ function createHarness(options = {}) {
         numberFormat: "General",
         wrap: false,
         orientation: 0,
+        rowHeight: 15,
+        columnWidth: 10,
+        borders: [],
       },
       GetAddress: () => value.address,
       GetValue: () => value.values,
@@ -365,8 +368,9 @@ function createHarness(options = {}) {
       GetFormula: () => value.formula,
       GetFormulaArray: () => value.arrayFormula,
       GetNumberFormat: () => value.format.numberFormat,
-      GetRowHeight: () => 15,
-      GetColumnWidth: () => 10,
+      GetRowHeight: () => value.format.rowHeight,
+      GetColumnWidth: () => value.format.columnWidth,
+      GetBorders: () => value.format.borders,
       GetHidden: () => false,
       GetWrapText: () => value.format.wrap,
       GetOrientation: () => value.format.orientation,
@@ -399,9 +403,18 @@ function createHarness(options = {}) {
       SetNumberFormat: next => { value.format.numberFormat = next; event("range.numberFormat", next); },
       SetWrap: next => { value.format.wrap = next; event("range.wrap", next); },
       SetOrientation: next => { value.format.orientation = next; event("range.orientation", next); },
-      SetColumnWidth: next => event("range.columnWidth", next),
-      SetRowHeight: next => event("range.rowHeight", next),
-      SetBorders: (...args) => event("range.border", ...args),
+      SetColumnWidth: next => {
+        value.format.columnWidth = next;
+        event("range.columnWidth", next);
+      },
+      SetRowHeight: next => {
+        value.format.rowHeight = next;
+        event("range.rowHeight", next);
+      },
+      SetBorders: (side, style, color) => {
+        value.format.borders.push({ side, style, color });
+        event("range.border", side, style, color);
+      },
       Merge: next => event("range.merge", next),
       UnMerge: () => event("range.unmerge"),
       Insert: next => event("range.insert", next),
@@ -892,6 +905,8 @@ test("advanced Sheets bridge covers ranges, formulas, names, data rules, and tab
   assert.ok(state.events.some(item => item[0] === "range.columnWidth" && item[1] === 18));
   assert.ok(state.events.some(item => item[0] === "range.rowHeight" && item[1] === 24));
   assert.ok(state.events.some(item => item[0] === "range.border"));
+  assert.equal(result.results[3].verification.status, "verified");
+  assert.equal(result.results[3].verification.fields.borders.status, "verified");
   assert.ok(state.events.some(item => item[0] === "range.sort"));
   assert.ok(state.events.some(item => item[0] === "range.filter"));
   assert.ok(state.events.some(item => item[0] === "table.style" && item[1] === "TableStyleMedium4"));
@@ -1026,8 +1041,12 @@ test("Sheets bridge normalizes public enum aliases, preserves formula matrices, 
   assert.deepEqual(result.results[1].targetShape, { rows: 1, columns: 1 });
   assert.equal(result.results[2].readback.bold, true);
   assert.deepEqual(result.results[2].readback.fillColor, { r: 23, g: 54, b: 93 });
+  assert.equal(result.results[2].verification.status, "verified");
+  assert.equal(result.results[2].verification.fields.fillColor.status, "verified");
   assert.equal(result.results[3].rule.operator, "xlLess");
   assert.deepEqual(result.results[3].rule.fillColor, { r: 255, g: 242, b: 204 });
+  assert.equal(result.results[3].ruleVerification.status, "verified");
+  assert.equal(result.results[3].effectiveStyleVerification.status, "unavailable");
   assert.equal(result.results[4].rule.type, "xlValidateList");
   assert.equal(result.results[4].rule.alertStyle, "xlValidAlertWarning");
   assert.equal(result.results[4].rule.operator, "xlEqual");
@@ -1060,6 +1079,68 @@ test("Sheets bridge normalizes public enum aliases, preserves formula matrices, 
     }]),
     /条件格式运算符 不支持/,
   );
+});
+
+test("Sheets format verification distinguishes failed and unavailable readback", async () => {
+  const mismatchHarness = createHarness();
+  const mismatchRange = mismatchHarness.sheet1.GetRange("A1");
+  mismatchRange.SetBold = () => {};
+  mismatchRange.GetBold = () => false;
+  const mismatch = await mismatchHarness.bridge.execute([{
+    name: "sheets_format_range",
+    arguments: { sheet: "Sheet1", range: "A1", bold: true },
+  }]);
+  assert.equal(mismatch.results[0].verification.status, "failed");
+  assert.equal(mismatch.results[0].verification.fields.bold.reason, "readback-mismatch");
+
+  const unavailableHarness = createHarness();
+  const unavailableRange = unavailableHarness.sheet1.GetRange("A1");
+  unavailableRange.GetBold = () => null;
+  const unavailable = await unavailableHarness.bridge.execute([{
+    name: "sheets_format_range",
+    arguments: { sheet: "Sheet1", range: "A1", bold: true },
+  }]);
+  assert.equal(unavailable.results[0].verification.status, "unavailable");
+  assert.equal(unavailable.results[0].verification.fields.bold.reason, "readback-null");
+
+  const bordersHarness = createHarness();
+  const bordersRange = bordersHarness.sheet1.GetRange("A1");
+  bordersRange.GetBorders = () => null;
+  const borders = await bordersHarness.bridge.execute([{
+    name: "sheets_format_range",
+    arguments: {
+      sheet: "Sheet1",
+      range: "A1",
+      borders: [{ side: "Bottom", style: "Thin", color: "#112233" }],
+    },
+  }]);
+  assert.equal(borders.results[0].verification.status, "unavailable");
+  assert.equal(
+    borders.results[0].verification.fields.borders.reason,
+    "readback-null",
+  );
+});
+
+test("Sheets range inspection with format and conditional rules stays bounded", async () => {
+  const { bridge } = createHarness();
+  const inspection = bridge.execute([{
+    name: "sheets_inspect_range",
+    arguments: {
+      sheet: "Sheet1",
+      range: "A1:F9",
+      includeFormat: true,
+      includeConditionalFormats: true,
+    },
+  }]);
+  const result = await Promise.race([
+    inspection,
+    new Promise((resolve, reject) => {
+      setTimeout(() => reject(new Error("combined range inspection timed out")), 500);
+    }),
+  ]);
+  assert.equal(result.results[0].range.address, "A1:F9");
+  assert.ok(result.results[0].range.format);
+  assert.ok(result.results[0].range.conditionalFormats);
 });
 
 test("Sheets bridge does not report rejected or empty mutations as changed", async () => {
@@ -1253,6 +1334,8 @@ test("Sheets bridge uses one-based conditional format GetItem indices", async ()
 
   assert.equal(result.results[0].rule.index, 0);
   assert.equal(result.results[0].conditionalFormats.rules[0].index, 0);
+  assert.equal(result.results[0].ruleVerification.status, "unavailable");
+  assert.equal(result.results[0].effectiveStyleVerification.status, "unavailable");
   assert.ok(state.events.some(item => item[0] === "conditions.getItem" && item[1] === 1));
 });
 
@@ -1311,6 +1394,34 @@ test("Sheets bridge verifies conditional-format deleteAll empties the collection
   );
 });
 
+test("Sheets bridge classifies conditional-format runtime incompatibilities", async () => {
+  const { bridge, sheet1 } = createHarness();
+  sheet1.GetRange("A1:A2").GetFormatConditions = () => {
+    throw new Error("Cannot read properties of undefined (reading 'setDirtyConditionalFormatting')");
+  };
+
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_manage_conditional_format",
+      arguments: {
+        action: "add",
+        sheet: "Sheet1",
+        range: "A1:A2",
+        type: "cellValue",
+        formula1: "1",
+      },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught && caught.code, "SHEETS_RUNTIME_INCOMPATIBLE");
+  assert.equal(caught.details.feature, "sheets.conditionalFormatting");
+  assert.equal(caught.details.retryable, false);
+  assert.equal(caught.details.recovery, "inspect_then_undo_or_reopen");
+});
+
 test("Sheets bridge rejects null from validation Add and Modify", async () => {
   for (const action of ["add", "modify"]) {
     const { bridge, sheet1 } = createHarness();
@@ -1349,9 +1460,13 @@ test("Sheets bridge safely degrades table creation in community editions", async
       range: "A1:B3",
     },
   }]);
-  assert.equal(basic.results[0].tableKind, "basic");
+  assert.equal(basic.results[0].tableKind, "rangeStyle");
+  assert.equal(basic.results[0].requestedKind, "auto");
+  assert.equal(basic.results[0].actualKind, "rangeStyle");
   assert.equal(basic.results[0].degraded, true);
   assert.equal(basic.results[0].formatted, true);
+  assert.equal(basic.results[0].filterApplied, true);
+  assert.deepEqual(Array.from(basic.results[0].warnings), ["native_table_unavailable"]);
   assert.equal(basic.results[0].table, null);
   assert.equal(basic.results[0].range.address, "A1:B3");
 
@@ -1398,9 +1513,28 @@ test("Sheets bridge safely degrades table creation in community editions", async
         name: "NotSupported",
       },
     }]),
-    /基础格式表格不支持结构化属性/,
+    /普通区域样式不支持结构化属性/,
   );
-  assert.equal(state.events.filter(item => item[0] === "table.format").length, 1);
+  assert.equal(state.events.filter(item => item[0] === "table.format").length, 0);
+  assert.ok(state.events.some(item => item[0] === "range.border"));
+  assert.ok(state.events.some(item => item[0] === "range.fillColor"));
+});
+
+test("structured table inspection reports unsupported without throwing", async () => {
+  const { bridge, sheet1 } = createHarness();
+  sheet1.GetListObjects = undefined;
+
+  const inspected = await bridge.execute([{
+    name: "sheets_inspect_tables",
+    arguments: { sheet: "Sheet1" },
+  }]);
+
+  assert.equal(inspected.changed, 0);
+  assert.equal(inspected.results[0].supported, false);
+  assert.equal(inspected.results[0].feature, "sheets.nativeTables.inspect");
+  assert.equal(inspected.results[0].reason, "runtime_api_unavailable");
+  assert.deepEqual(Array.from(inspected.results[0].tables), []);
+  assert.equal(inspected.results[0].sheets[0].supported, false);
 });
 
 test("structured table inspection and lifecycle use ApiListObject", async () => {

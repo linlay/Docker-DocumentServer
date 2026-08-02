@@ -9,6 +9,8 @@ import tempfile
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
+import zipfile
 from unittest import mock
 
 import copilot_server
@@ -114,8 +116,8 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.6.0-rev5"
-        stale_revision = "0.6.0-rev4"
+        revision = "0.8.0-rev5"
+        stale_revision = "0.8.0-rev4"
         paths = [
             "config.json",
             "index.html",
@@ -263,6 +265,67 @@ class ContractAlignmentTests(unittest.TestCase):
         )
 
 
+class BundledPptxTemplateTests(unittest.TestCase):
+    def test_template_has_one_blank_slide_without_local_drawings(self):
+        template = os.path.join(
+            os.path.dirname(__file__),
+            "templates",
+            "new.pptx",
+        )
+        presentation_namespace = (
+            "http://schemas.openxmlformats.org/presentationml/2006/main"
+        )
+        package_relationships_namespace = (
+            "http://schemas.openxmlformats.org/package/2006/relationships"
+        )
+        with zipfile.ZipFile(template) as archive:
+            presentation = ET.fromstring(archive.read("ppt/presentation.xml"))
+            slide_ids = presentation.findall(
+                f".//{{{presentation_namespace}}}sldId"
+            )
+            self.assertEqual(len(slide_ids), 1)
+
+            slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
+            shape_tree = slide.find(
+                f".//{{{presentation_namespace}}}spTree"
+            )
+            self.assertIsNotNone(shape_tree)
+            drawing_names = {
+                "sp",
+                "pic",
+                "graphicFrame",
+                "cxnSp",
+                "grpSp",
+            }
+            local_drawings = [
+                child
+                for child in shape_tree
+                if child.tag.rsplit("}", 1)[-1] in drawing_names
+            ]
+            self.assertEqual(local_drawings, [])
+
+            relationships = ET.fromstring(
+                archive.read("ppt/slides/_rels/slide1.xml.rels")
+            )
+            layout_relationships = [
+                item
+                for item in relationships.findall(
+                    f"{{{package_relationships_namespace}}}Relationship"
+                )
+                if item.attrib.get("Type", "").endswith("/slideLayout")
+            ]
+            self.assertEqual(len(layout_relationships), 1)
+            layout_name = os.path.basename(layout_relationships[0].attrib["Target"])
+            layout = ET.fromstring(
+                archive.read(f"ppt/slideLayouts/{layout_name}")
+            )
+            self.assertEqual(layout.attrib.get("type"), "blank")
+            common_slide_data = layout.find(
+                f"{{{presentation_namespace}}}cSld"
+            )
+            self.assertEqual(common_slide_data.attrib.get("name"), "Blank")
+
+
 class DocumentGatewayTests(unittest.TestCase):
     def setUp(self):
         self.storage = tempfile.TemporaryDirectory()
@@ -278,6 +341,7 @@ class DocumentGatewayTests(unittest.TestCase):
             {
                 "DOCUMENT_STORAGE_DIR": self.storage.name,
                 "DOCUMENT_TEMPLATE_ROOT": self.templates.name,
+                "DOCUMENT_PPTX_TEMPLATE_PATH": "",
                 "DOCUMENT_PUBLIC_ORIGIN": "https://office.test",
                 "DOCUMENT_ADMIN_USERNAME": "document-admin",
                 "DOCUMENT_ADMIN_PASSWORD": "correct horse battery staple",
@@ -316,6 +380,48 @@ class DocumentGatewayTests(unittest.TestCase):
                     "rb",
                 ) as stream:
                     self.assertEqual(stream.read(), f"blank-{extension}".encode())
+
+    def test_pptx_template_override_is_type_specific_and_validated(self):
+        override = os.path.join(self.templates.name, "override.pptx")
+        with zipfile.ZipFile(override, "w") as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            )
+            archive.writestr(
+                "ppt/presentation.xml",
+                '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+            )
+            archive.writestr(
+                "ppt/slides/slide1.xml",
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
+            )
+
+        with mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_PPTX_TEMPLATE_PATH": override},
+        ):
+            self.assertEqual(copilot_server.document_template_path("pptx"), override)
+            self.assertEqual(
+                copilot_server.document_template_path("docx"),
+                os.path.join(self.templates.name, "new.docx"),
+            )
+            created = copilot_server.create_document("pptx")
+            with open(
+                os.path.join(self.storage.name, created["fileName"]),
+                "rb",
+            ) as stream, open(override, "rb") as expected:
+                self.assertEqual(stream.read(), expected.read())
+
+        invalid = os.path.join(self.templates.name, "invalid.pptx")
+        with open(invalid, "wb") as stream:
+            stream.write(b"not-a-pptx")
+        with mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_PPTX_TEMPLATE_PATH": invalid},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "有效的 PPTX 模板"):
+                copilot_server.document_template_path("pptx")
 
     def test_uuid_collision_retries_without_overwriting_existing_file(self):
         first_id = "123e4567-e89b-42d3-a456-426614174000"
@@ -1219,6 +1325,8 @@ class HttpRelayTests(unittest.TestCase):
             "EXECUTION_FAILED": 500,
             "WORD_API_UNSUPPORTED": 501,
             "SHEETS_API_UNSUPPORTED": 501,
+            "SHEETS_RUNTIME_INCOMPATIBLE": 500,
+            "SHEETS_CHART_PARTIAL_MUTATION": 500,
             "PERSISTENCE_FAILED": 502,
             "NOT_READY": 503,
             "BRIDGE_TIMEOUT": 504,
@@ -1920,6 +2028,96 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
         self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
+
+    def test_sheets_validate_batch_rejects_known_runtime_capability_gaps(self):
+        self.register(
+            file_name="demo.xlsx",
+            file_type="xlsx",
+            editor_type="cell",
+        )
+        capabilities = {
+            "tools": [
+                "sheets_manage_table",
+                "sheets_add_chart",
+                "sheets_delete_chart",
+            ],
+            "features": {
+                "sheets": {
+                    "nativeTables": {"create": False, "inspect": False},
+                    "rangeStyleTables": {"create": True},
+                    "conditionalFormatting": {"create": True},
+                    "charts": {
+                        "create": True,
+                        "addSeriesOnCreate": False,
+                        "delete": False,
+                    },
+                },
+            },
+        }
+        with copilot_server.BRIDGE_CONDITION:
+            copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"] = capabilities
+        claims = {
+            "fileName": "demo.xlsx",
+            "fileType": "xlsx",
+            "editorType": "cell",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+
+        valid = copilot_server.bridge_validate(
+            {
+                "toolCalls": [{
+                    "name": "sheets_manage_table",
+                    "arguments": {
+                        "action": "create",
+                        "tableMode": "rangeStyle",
+                        "range": "A1:B3",
+                    },
+                }],
+            },
+            claims,
+        )
+        self.assertTrue(valid["valid"])
+
+        invalid_calls = [
+            (
+                {
+                    "name": "sheets_manage_table",
+                    "arguments": {
+                        "action": "create",
+                        "tableMode": "structured",
+                        "range": "A1:B3",
+                    },
+                },
+                "sheets.nativeTables.create",
+            ),
+            (
+                {
+                    "name": "sheets_add_chart",
+                    "arguments": {
+                        "range": "A1:B3",
+                        "addSeries": [{"name": "S2", "valuesRange": "C1:C3"}],
+                    },
+                },
+                "sheets.charts.addSeriesOnCreate",
+            ),
+            (
+                {
+                    "name": "sheets_delete_chart",
+                    "arguments": {"chartIndex": 0},
+                },
+                "sheets.charts.delete",
+            ),
+        ]
+        for call, feature in invalid_calls:
+            with self.subTest(feature=feature):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.bridge_validate({"toolCalls": [call]}, claims)
+                self.assertEqual(raised.exception.status, 501)
+                self.assertEqual(raised.exception.code, "SHEETS_API_UNSUPPORTED")
+                self.assertEqual(raised.exception.details["feature"], feature)
+                self.assertEqual(raised.exception.details["completedToolCalls"], 0)
+                self.assertFalse(raised.exception.details["partialMutationPossible"])
 
     def test_word_batch_collects_all_argument_errors_before_enqueue(self):
         self.register()
@@ -2628,9 +2826,15 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(holder["result"]["result"]["text"], "current document")
+        self.assertEqual(
+            set(holder["result"]["timingsMs"]),
+            {"queueWait", "editorRoundTrip", "total"},
+        )
+        self.assertGreaterEqual(holder["result"]["timingsMs"]["total"], 0)
         cached = copilot_server.bridge_execute(request, claims)
         self.assertTrue(cached["cached"])
         self.assertEqual(cached["result"]["text"], "current document")
+        self.assertEqual(cached["timingsMs"], holder["result"]["timingsMs"])
 
         conflicting = dict(request)
         conflicting["arguments"] = {"maxChars": 2000}
@@ -2862,6 +3066,30 @@ class VersionHistoryTests(unittest.TestCase):
         self.assertTrue(result["noChanges"])
         self.assertTrue(result["persisted"])
         self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "no_changes")
+        self.assertEqual(result["commandError"], 4)
+
+    def test_forcesave_error_four_after_mutation_is_failed(self):
+        with (
+            mock.patch.object(copilot_server, "command_service", return_value={"error": 4, "key": "key"}),
+            mock.patch.object(copilot_server.time, "time", side_effect=[0, 13]),
+            mock.patch.object(copilot_server.time, "sleep"),
+        ):
+            result = copilot_server.force_save("key", self.file_name)
+
+        self.assertFalse(result["noChanges"])
+        self.assertFalse(result["persisted"])
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["commandError"], 4)
+
+    def test_forcesave_command_error_returns_failed_status(self):
+        with mock.patch.object(copilot_server, "command_service", return_value={"error": 3, "key": "key"}):
+            result = copilot_server.force_save("key", self.file_name)
+
+        self.assertFalse(result["persisted"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["commandError"], 3)
 
     def test_missing_editor_session_does_not_delay_restore(self):
         with (

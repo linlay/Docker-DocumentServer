@@ -184,6 +184,7 @@ class SlideShape {
   SetVerticalTextAlign(value) { this.verticalAlign = value; }
   SetPaddings(left, top, right, bottom) { this.paddings = [left, top, right, bottom]; }
   SetPlaceholder(value) { this.placeholder = value; return true; }
+  GetPlaceholder() { return this.placeholder || null; }
   SetHyperlink(value) { this.hyperlink = value; return true; }
   GetHyperlink() { return this.hyperlink; }
   Delete() {
@@ -750,7 +751,29 @@ class MockSlide {
   GetVisible() { return this.visible; }
   SetVisible(value) { this.visible = Boolean(value); return true; }
   GetLayout() { return this.layout; }
-  ApplyLayout(layout) { this.layout = layout; return true; }
+  ApplyLayout(layout) {
+    for (const shape of this.shapes.slice()) {
+      if (shape.GetPlaceholder()) this.RemoveObject(shape);
+    }
+    this.layout = layout;
+    for (const source of layout.GetAllDrawings()) {
+      if (!source.GetPlaceholder()) continue;
+      const clone = new SlideShape(source.GetContent().GetText());
+      clone.position = source.position.slice();
+      clone.size = source.size.slice();
+      clone.geometry.preset = source.geometry.preset;
+      clone.placeholder = source.placeholder;
+      clone.name = source.name;
+      this.AddObject(clone);
+    }
+    return true;
+  }
+  GetDrawingsByPlaceholderType(type) {
+    return this.GetAllDrawings().filter(drawing => (
+      drawing.GetPlaceholder()
+      && drawing.GetPlaceholder().GetType() === type
+    ));
+  }
   GetTheme() { return this.theme || this.layout.GetMaster().GetTheme(); }
   ApplyTheme(theme) { this.theme = theme; return true; }
   GetNotesPage() {
@@ -843,6 +866,22 @@ function slidesHarness() {
     new MockLayout("Title Slide", "title"),
     new MockLayout("Title and Content", "obj"),
   ];
+  const centeredTitle = new SlideShape();
+  centeredTitle.SetName("Centered Title");
+  centeredTitle.SetPlaceholder({ type: "ctrTitle", GetType() { return this.type; } });
+  layouts[0].AddObject(centeredTitle);
+  const subtitle = new SlideShape();
+  subtitle.SetName("Subtitle");
+  subtitle.SetPlaceholder({ type: "subtitle", GetType() { return this.type; } });
+  layouts[0].AddObject(subtitle);
+  const title = new SlideShape();
+  title.SetName("Title");
+  title.SetPlaceholder({ type: "title", GetType() { return this.type; } });
+  layouts[1].AddObject(title);
+  const body = new SlideShape();
+  body.SetName("Content");
+  body.SetPlaceholder({ type: "body", GetType() { return this.type; } });
+  layouts[1].AddObject(body);
   const presentation = {
     slides: [],
     masters: [new MockMaster(layouts)],
@@ -908,7 +947,7 @@ function slidesHarness() {
       shape.line = line;
       return shape;
     },
-    CreatePlaceholder: type => ({ type }),
+    CreatePlaceholder: type => ({ type, GetType() { return this.type; } }),
     CreateLayout: master => {
       const layout = new MockLayout("", "custom", master);
       master.layouts.push(layout);
@@ -1473,8 +1512,24 @@ test("Slides bridge atomically applies a layout and creates native rich text", a
 
   assert.equal(result.results[0].slide, 3);
   assert.equal(result.results[0].layout.layoutIndex, 2);
+  assert.equal(result.results[0].titleSource, "placeholder");
   assert.equal(result.results[0].titleObject.text, "经营概览");
+  assert.equal(result.results[0].titleObject.placeholderType, "title");
   assert.equal(presentation.GetSlideByIndex(2).GetLayout().GetName(), "Title and Content");
+  assert.equal(
+    presentation.GetSlideByIndex(2).GetDrawingsByPlaceholderType("title").length,
+    1,
+  );
+  assert.equal(
+    presentation.GetSlideByIndex(2)
+      .GetDrawingsByPlaceholderType("title")[0]
+      .GetContent().GetAllParagraphs()[0].GetElement(0).GetFontSize(),
+    64,
+  );
+  assert.equal(
+    presentation.GetSlideByIndex(2).GetDrawingsByPlaceholderType("body").length,
+    1,
+  );
   const added = result.results[1].object;
   assert.equal(added.name, "s3-actions");
   const inspected = result.results[2].slides[0].objects.find(item => item.name === "s3-actions");
@@ -1484,10 +1539,195 @@ test("Slides bridge atomically applies a layout and creates native rich text", a
   assert.equal(inspected.textStyles.paragraphs[1].list.type, "number");
 });
 
+test("Slides bridge supports automatic, strict, and legacy title placement", async () => {
+  const automaticHarness = slidesHarness();
+  const centered = await automaticHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 1,
+      title: "Centered",
+    },
+  }]);
+  assert.equal(centered.results[0].titleSource, "placeholder");
+  assert.equal(centered.results[0].titleObject.placeholderType, "ctrTitle");
+  assert.equal(
+    automaticHarness.presentation.GetSlideByIndex(2)
+      .GetDrawingsByPlaceholderType("ctrTitle")[0]
+      .GetContent().GetAllParagraphs()[0].GetElement(0).GetFontSize(),
+    20,
+  );
+  assert.equal(
+    automaticHarness.presentation.GetSlideByIndex(2)
+      .GetDrawingsByPlaceholderType("subtitle").length,
+    1,
+  );
+
+  const titleOnlyLayout = new MockLayout("Title Only", "titleOnly");
+  const titleOnlyPlaceholder = new SlideShape();
+  titleOnlyPlaceholder.SetName("Title Only Placeholder");
+  titleOnlyPlaceholder.SetPlaceholder({
+    type: "title",
+    GetType() { return this.type; },
+  });
+  titleOnlyLayout.AddObject(titleOnlyPlaceholder);
+  const customLayout = new MockLayout("Custom", "custom");
+  const customTitle = new SlideShape();
+  customTitle.SetName("Custom Title");
+  customTitle.SetPlaceholder({ type: "title", GetType() { return this.type; } });
+  customLayout.AddObject(customTitle);
+  const customBody = new SlideShape();
+  customBody.SetName("Custom Body");
+  customBody.SetPlaceholder({ type: "body", GetType() { return this.type; } });
+  customLayout.AddObject(customBody);
+  const automaticMaster = automaticHarness.presentation.GetMaster(0);
+  titleOnlyLayout.master = automaticMaster;
+  customLayout.master = automaticMaster;
+  automaticMaster.layouts.push(
+    titleOnlyLayout,
+    customLayout,
+  );
+
+  const titleOnlyResult = await automaticHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 3,
+      title: "Title only",
+    },
+  }]);
+  assert.equal(titleOnlyResult.results[0].titleSource, "placeholder");
+  assert.equal(titleOnlyResult.results[0].titleObject.placeholderType, "title");
+
+  const customResult = await automaticHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 4,
+      title: "Custom",
+    },
+  }]);
+  assert.equal(customResult.results[0].titleSource, "placeholder");
+  const customSlide = automaticHarness.presentation.GetSlideByIndex(4);
+  assert.equal(customSlide.GetDrawingsByPlaceholderType("title").length, 1);
+  assert.equal(customSlide.GetDrawingsByPlaceholderType("body").length, 1);
+
+  const untitledResult = await automaticHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 2,
+    },
+  }]);
+  assert.equal(untitledResult.results[0].titleSource, null);
+  assert.equal(untitledResult.results[0].titleObject, null);
+  const untitledSlide = automaticHarness.presentation.GetSlideByIndex(5);
+  assert.equal(untitledSlide.GetAllShapes().length, 2);
+
+  const fallback = await automaticHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: { title: "Freeform" },
+  }]);
+  assert.equal(fallback.results[0].titleSource, "textbox");
+  assert.equal(fallback.results[0].titleObject.placeholderType, null);
+
+  const inspected = await automaticHarness.bridge.execute([
+    {
+      name: "slides_inspect_objects",
+      arguments: { slide: 6 },
+    },
+    {
+      name: "slides_inspect_objects",
+      arguments: { slide: 7 },
+    },
+  ]);
+  assert.deepEqual(
+    inspected.results[0].slides[0].objects.map(item => item.placeholderType),
+    ["title", "body"],
+  );
+  assert.equal(inspected.results[1].slides[0].objects[0].placeholderType, null);
+
+  const legacyHarness = slidesHarness();
+  const legacy = await legacyHarness.bridge.execute([{
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 2,
+      title: "Legacy",
+      titlePlacement: "textbox",
+    },
+  }]);
+  const legacySlide = legacyHarness.presentation.GetSlideByIndex(2);
+  assert.equal(legacy.results[0].titleSource, "textbox");
+  assert.equal(legacySlide.GetDrawingsByPlaceholderType("title").length, 1);
+  assert.equal(legacySlide.GetDrawingsByPlaceholderType("body").length, 1);
+  assert.equal(legacySlide.GetAllShapes().length, 3);
+
+  const strictHarness = slidesHarness();
+  await assert.rejects(
+    strictHarness.bridge.execute([{
+      name: "slides_add_slide",
+      arguments: {
+        title: "Strict",
+        titlePlacement: "placeholder",
+      },
+    }]),
+    error => (
+      error.code === "TITLE_PLACEHOLDER_NOT_FOUND"
+      && /没有可用的标题占位符/.test(error.message)
+    ),
+  );
+  assert.equal(strictHarness.presentation.GetSlidesCount(), 2);
+});
+
+test("Slides placeholder title batches stay within the legacy textbox performance budget", async () => {
+  const batch = Array.from({ length: 20 }, (_item, index) => ({
+    name: "slides_add_slide",
+    arguments: {
+      masterIndex: 1,
+      layoutIndex: 2,
+      title: `Title ${index + 1}`,
+    },
+  }));
+
+  async function sample(titlePlacement) {
+    const { bridge } = slidesHarness();
+    const calls = batch.map(call => ({
+      name: call.name,
+      arguments: { ...call.arguments, titlePlacement },
+    }));
+    const started = process.hrtime.bigint();
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      await bridge.execute(calls);
+    }
+    return Number(process.hrtime.bigint() - started) / 1_000_000;
+  }
+
+  const automaticSamples = [];
+  const legacySamples = [];
+  for (let trial = 0; trial < 7; trial += 1) {
+    if (trial % 2 === 0) {
+      legacySamples.push(await sample("textbox"));
+      automaticSamples.push(await sample("auto"));
+    } else {
+      automaticSamples.push(await sample("auto"));
+      legacySamples.push(await sample("textbox"));
+    }
+  }
+  automaticSamples.sort((left, right) => left - right);
+  legacySamples.sort((left, right) => left - right);
+  const automaticMedian = automaticSamples[Math.floor(automaticSamples.length / 2)];
+  const legacyMedian = legacySamples[Math.floor(legacySamples.length / 2)];
+  assert.ok(
+    automaticMedian <= legacyMedian * 1.2,
+    `auto median ${automaticMedian.toFixed(3)}ms exceeded legacy median ${legacyMedian.toFixed(3)}ms by more than 20%`,
+  );
+});
+
 test("Slides structural validation distinguishes containment, allowed overlap, and violations", async () => {
   const { bridge, presentation } = slidesHarness();
   await bridge.execute([
-    { name: "slides_add_slide", arguments: { masterIndex: 1, layoutIndex: 2 } },
+    { name: "slides_add_slide", arguments: {} },
     {
       name: "slides_add_shape",
       arguments: {
@@ -2393,7 +2633,7 @@ test("Sheets bridge executes every public Sheets tool in one history point", asy
 
 test("Sheets bridge supports chart inspect, gradient formatting, update, and delete", async () => {
   const { bridge, workbook, sheet1 } = sheetsHarness();
-  const result = await bridge.execute([
+  const created = await bridge.execute([
     {
       name: "sheets_add_chart",
       arguments: {
@@ -2416,7 +2656,11 @@ test("Sheets bridge supports chart inspect, gradient formatting, update, and del
         },
       },
     },
+  ]);
+  const inspected = await bridge.execute([
     { name: "sheets_inspect_charts", arguments: { sheet: "Sheet1", includeRaw: true } },
+  ]);
+  const updated = await bridge.execute([
     {
       name: "sheets_update_chart",
       arguments: {
@@ -2438,19 +2682,123 @@ test("Sheets bridge supports chart inspect, gradient formatting, update, and del
         includeRaw: true,
       },
     },
+  ]);
+  const deleted = await bridge.execute([
     { name: "sheets_delete_chart", arguments: { sheet: "Sheet1", chartIndex: 0 } },
   ]);
 
-  assert.equal(result.changed, 3);
-  assert.equal(result.needsSave, true);
-  assert.equal(workbook.historyPoints, 1);
-  assert.equal(result.results[0].chart.name, "TrendChart");
-  assert.equal(result.results[1].sheets[0].charts[0].chartIndex, 0);
-  assert.equal(result.results[1].sheets[0].charts[0].raw.name, "TrendChart");
-  assert.equal(result.results[2].chart.title, "Updated Trend");
-  assert.equal(result.results[2].chart.raw.series[0].name, "Actual");
-  assert.equal(result.results[2].chart.raw.series[1].name, "Forecast");
+  assert.equal(created.changed, 1);
+  assert.equal(updated.changed, 1);
+  assert.equal(deleted.changed, 1);
+  assert.equal(created.needsSave, true);
+  assert.equal(workbook.historyPoints, 3);
+  assert.equal(created.results[0].chart.name, "TrendChart");
+  assert.equal(inspected.results[0].sheets[0].charts[0].chartIndex, 0);
+  assert.equal(inspected.results[0].sheets[0].charts[0].raw.name, "TrendChart");
+  assert.equal(updated.results[0].chart.title, "Updated Trend");
+  assert.equal(updated.results[0].chart.raw.series[0].name, "Actual");
+  assert.equal(updated.results[0].chart.raw.series[1].name, "Forecast");
   assert.equal(sheet1.charts.length, 0);
+});
+
+test("Sheets bridge rejects unsupported chart types before AddChart", async () => {
+  const { bridge, sheet1 } = sheetsHarness();
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_add_chart",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        type: "columnClustered",
+      },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught && caught.code, "INVALID_TOOL_ARGUMENTS");
+  assert.equal(caught.details.phase, "sheets-chart-validation");
+  assert.equal(caught.details.receivedType, "columnClustered");
+  assert.deepEqual(Array.from(caught.details.suggestedTypes), ["column", "bar"]);
+  assert.equal(caught.details.completedToolCalls, 0);
+  assert.equal(caught.details.partialMutationPossible, false);
+  assert.equal(sheet1.charts.length, 0);
+});
+
+test("Sheets bridge rejects advanced series before creating a chart", async () => {
+  const { bridge, sheet1 } = sheetsHarness();
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_add_chart",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        type: "line",
+        addSeries: [{ name: "Forecast", valuesRange: "'Sheet1'!$C$2:$C$3" }],
+      },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught && caught.code, "SHEETS_API_UNSUPPORTED");
+  assert.equal(caught.details.feature, "sheets.charts.addSeriesOnCreate");
+  assert.equal(caught.details.completedToolCalls, 0);
+  assert.equal(caught.details.partialMutationPossible, false);
+  assert.equal(sheet1.charts.length, 0);
+});
+
+test("Sheets bridge reports an unremovable chart created before option failure", async () => {
+  const { bridge, sheet1 } = sheetsHarness();
+  const originalAddChart = sheet1.AddChart.bind(sheet1);
+  sheet1.AddChart = (...args) => {
+    const chart = originalAddChart(...args);
+    chart.Delete = undefined;
+    chart.SetTitle = () => { throw new Error("chart option failed"); };
+    return chart;
+  };
+
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_add_chart",
+      arguments: { sheet: "Sheet1", range: "A1:B3", type: "line", title: "Trend" },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught && caught.code, "SHEETS_CHART_PARTIAL_MUTATION");
+  assert.equal(caught.details.created, true);
+  assert.equal(caught.details.chartIndex, 0);
+  assert.equal(caught.details.mutationState, "partial");
+  assert.equal(caught.details.completedToolCalls, 0);
+  assert.equal(caught.details.partialMutationPossible, true);
+  assert.equal(sheet1.charts.length, 1);
+});
+
+test("Sheets bridge reports structured details when AddChart returns null", async () => {
+  const { bridge, sheet1 } = sheetsHarness();
+  sheet1.AddChart = () => null;
+  let caught;
+  try {
+    await bridge.execute([{
+      name: "sheets_add_chart",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:B3",
+        type: "column",
+      },
+    }]);
+  } catch (error) {
+    caught = error;
+  }
+  assert.equal(caught && caught.code, "SHEETS_CHART_CREATE_FAILED");
+  assert.equal(caught.details.apiMethod, "ApiWorksheet.AddChart");
+  assert.equal(caught.details.receivedType, "column");
+  assert.equal(caught.details.normalizedType, "bar");
+  assert.equal(caught.details.completedToolCalls, 0);
+  assert.equal(caught.details.partialMutationPossible, true);
 });
 
 test("Sheets chart inspection is read-only", async () => {

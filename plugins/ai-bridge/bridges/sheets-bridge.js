@@ -32,6 +32,111 @@
   const VIEW_VERIFY_INTERVAL_MS = 100;
   const VIEW_VERIFY_TIMEOUT_MS = 5000;
 
+  function probeCapabilities() {
+    return new Promise(function (resolve) {
+      Asc.plugin.callCommand(
+        function () {
+          try {
+            var sheet = Api.GetActiveSheet();
+            var probeRange = sheet && typeof sheet.GetRange === "function"
+              ? sheet.GetRange("A1")
+              : null;
+            var charts = sheet && typeof sheet.GetAllCharts === "function"
+              ? sheet.GetAllCharts()
+              : [];
+            var chartDelete = false;
+            if (Array.isArray(charts)) {
+              for (var chartIndex = 0; chartIndex < charts.length; chartIndex += 1) {
+                if (charts[chartIndex] && typeof charts[chartIndex].Delete === "function") {
+                  chartDelete = true;
+                  break;
+                }
+              }
+            }
+            var version = null;
+            try {
+              if (
+                typeof Asc !== "undefined"
+                && Asc.editor
+                && typeof Asc.editor.asc_getVersion === "function"
+              ) {
+                version = String(Asc.editor.asc_getVersion() || "") || null;
+              }
+            } catch (versionError) {
+              version = null;
+            }
+            return JSON.stringify({
+              ok: true,
+              runtime: {
+                product: "ONLYOFFICE",
+                version: version,
+                edition: "unknown",
+              },
+              features: {
+                sheets: {
+                  nativeTables: {
+                    create: Boolean(sheet && typeof sheet.AddListObject === "function"),
+                    inspect: Boolean(sheet && typeof sheet.GetListObjects === "function"),
+                  },
+                  rangeStyleTables: {
+                    create: Boolean(
+                      probeRange
+                      && typeof probeRange.SetBold === "function"
+                      && typeof probeRange.SetFillColor === "function"
+                      && typeof probeRange.SetBorders === "function"
+                    ),
+                  },
+                  conditionalFormatting: {
+                    create: Boolean(
+                      probeRange
+                      && typeof probeRange.GetFormatConditions === "function"
+                    ),
+                  },
+                  charts: {
+                    create: Boolean(sheet && typeof sheet.AddChart === "function"),
+                    // Adding series while a chart is being created is kept
+                    // conservative because affected Community builds expose
+                    // AddSeria but fail inside createDuplicate.
+                    addSeriesOnCreate: false,
+                    delete: chartDelete,
+                  },
+                },
+              },
+            });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              error: error && error.message ? error.message : String(error),
+            });
+          }
+        },
+        false,
+        true,
+        function (rawResult) {
+          try {
+            var result = typeof rawResult === "string"
+              ? JSON.parse(rawResult || "{}")
+              : rawResult;
+            if (!result || result.ok !== true) throw new Error(result && result.error || "能力探测失败");
+            resolve({ runtime: result.runtime, features: result.features });
+          } catch (error) {
+            resolve({
+              runtime: { product: "ONLYOFFICE", version: null, edition: "unknown" },
+              features: {
+                sheets: {
+                  nativeTables: { create: false, inspect: false },
+                  rangeStyleTables: { create: false },
+                  conditionalFormatting: { create: false },
+                  charts: { create: false, addSeriesOnCreate: false, delete: false },
+                },
+              },
+            });
+          }
+        },
+      );
+    });
+  }
+
   function a1ColumnNumber(column) {
     let number = 0;
     const normalized = String(column || "").toUpperCase();
@@ -612,18 +717,118 @@
               return Math.min(maximum, Math.max(minimum, value));
             }
 
-            function normalizeChartType(value, fallback) {
-              var type = String(value || fallback || "bar");
-              var aliases = {
-                line: "lineNormal",
-                lineMarker: "lineNormalMarker",
-                stackedBar: "barStacked",
-                stackedBarPercent: "barStackedPercent",
-                stackedLine: "lineStacked",
-                stackedLinePercent: "lineStackedPercent",
-                column: "bar",
+            var CHART_TYPE_ALIASES = {
+              line: "lineNormal",
+              lineMarker: "lineNormalMarker",
+              stackedBar: "barStacked",
+              stackedBarPercent: "barStackedPercent",
+              stackedLine: "lineStacked",
+              stackedLinePercent: "lineStackedPercent",
+              column: "bar",
+            };
+
+            var CHART_TYPE_CANONICALS = [
+              "bar", "barStacked", "barStackedPercent", "bar3D",
+              "barStacked3D", "barStackedPercent3D", "barStackedPercent3DPerspective",
+              "horizontalBar", "horizontalBarStacked", "horizontalBarStackedPercent",
+              "horizontalBar3D", "horizontalBarStacked3D", "horizontalBarStackedPercent3D",
+              "lineNormal", "lineStacked", "lineStackedPercent", "lineNormalMarker",
+              "lineStackedMarker", "lineStackedPerMarker", "line3D",
+              "pie", "pie3D", "doughnut",
+              "scatter", "scatterLine", "scatterLineMarker", "scatterSmooth", "scatterSmoothMarker",
+              "stock", "area", "areaStacked", "areaStackedPercent",
+              "comboCustom", "comboBarLine", "comboBarLineSecondary",
+              "radar", "radarMarker", "radarFilled",
+            ];
+
+            var CHART_TYPE_INPUTS = CHART_TYPE_CANONICALS.concat(
+              Object.keys(CHART_TYPE_ALIASES)
+            );
+
+            function chartTypeSuggestions(value) {
+              var token = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+              if (!token) return [];
+              var candidates = CHART_TYPE_INPUTS.map(function (candidate, index) {
+                var candidateToken = candidate.toLowerCase().replace(/[^a-z0-9]/g, "");
+                if (
+                  !candidateToken
+                  || (
+                    token.indexOf(candidateToken) !== 0
+                    && candidateToken.indexOf(token) !== 0
+                  )
+                ) {
+                  return null;
+                }
+                return {
+                  candidate: candidate,
+                  direction: token.indexOf(candidateToken) === 0 ? 0 : 1,
+                  distance: Math.abs(token.length - candidateToken.length),
+                  index: index,
+                };
+              }).filter(Boolean);
+              candidates.sort(function (left, right) {
+                return left.direction - right.direction
+                  || left.distance - right.distance
+                  || left.index - right.index;
+              });
+              var suggestions = candidates.slice(0, 3).map(function (item) {
+                return item.candidate;
+              });
+              for (var suggestionIndex = 0; suggestionIndex < suggestions.length; suggestionIndex += 1) {
+                var canonical = CHART_TYPE_ALIASES[suggestions[suggestionIndex]];
+                if (canonical && suggestions.indexOf(canonical) < 0) suggestions.push(canonical);
+              }
+              return suggestions.slice(0, 4);
+            }
+
+            function resolveChartType(value, fallback, field) {
+              var received = value === undefined || value === null || value === ""
+                ? String(fallback || "bar")
+                : String(value);
+              var normalized = CHART_TYPE_ALIASES[received] || received;
+              if (CHART_TYPE_CANONICALS.indexOf(normalized) < 0) {
+                throw sheetError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  "不支持的图表类型：" + received,
+                  {
+                    phase: "sheets-chart-validation",
+                    field: field || "type",
+                    receivedType: received,
+                    supportedTypes: CHART_TYPE_INPUTS.slice(),
+                    aliases: Object.assign({}, CHART_TYPE_ALIASES),
+                    suggestedTypes: chartTypeSuggestions(received),
+                    partialMutationPossible: false,
+                  }
+                );
+              }
+              return {
+                received: received,
+                normalized: normalized,
               };
-              return aliases[type] || type;
+            }
+
+            function normalizeChartType(value, fallback, field) {
+              return resolveChartType(value, fallback, field).normalized;
+            }
+
+            function chartCreationError(error, context) {
+              var causeMessage = error && error.message
+                ? String(error.message)
+                : String(error || "ONLYOFFICE 未返回图表对象");
+              return sheetError(
+                "SHEETS_CHART_CREATE_FAILED",
+                "ONLYOFFICE 创建图表失败：" + causeMessage,
+                {
+                  phase: "sheets-chart-create",
+                  apiMethod: "ApiWorksheet.AddChart",
+                  sheet: context.sheet,
+                  range: context.range,
+                  receivedType: context.receivedType,
+                  normalizedType: context.normalizedType,
+                  causeMessage: causeMessage,
+                  partialMutationPossible: true,
+                }
+              );
             }
 
             function enumKey(value) {
@@ -1097,6 +1302,172 @@
               return String(value);
             }
 
+            function describeBorders(range) {
+              var borders = safeCall(range, "GetBorders");
+              if (borders === null || borders === undefined) return null;
+              var json = serialized(borders);
+              return json !== null ? json : borders;
+            }
+
+            function colorChannel(value, names) {
+              for (var nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
+                var channel = value && value[names[nameIndex]];
+                if (typeof channel === "number" && isFinite(channel)) {
+                  return Math.max(0, Math.min(255, Math.round(channel)));
+                }
+              }
+              return null;
+            }
+
+            function hexChannel(value) {
+              var text = Math.max(0, Math.min(255, Number(value) || 0)).toString(16).toUpperCase();
+              return text.length < 2 ? "0" + text : text;
+            }
+
+            function normalizeVerificationColor(value) {
+              if (typeof value === "string") {
+                var text = value.trim();
+                var shortHex = /^#([0-9a-f]{3})$/i.exec(text);
+                if (shortHex) {
+                  return "#" + shortHex[1].split("").map(function (digit) {
+                    return digit + digit;
+                  }).join("").toUpperCase();
+                }
+                var fullHex = /^#([0-9a-f]{6})$/i.exec(text);
+                if (fullHex) return "#" + fullHex[1].toUpperCase();
+                var rgbText = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(text);
+                if (rgbText) {
+                  return "#" + hexChannel(rgbText[1]) + hexChannel(rgbText[2]) + hexChannel(rgbText[3]);
+                }
+                return null;
+              }
+              if (!value || typeof value !== "object") return null;
+              var red = colorChannel(value, ["r", "R", "red", "Red"]);
+              var green = colorChannel(value, ["g", "G", "green", "Green"]);
+              var blue = colorChannel(value, ["b", "B", "blue", "Blue"]);
+              if (red !== null && green !== null && blue !== null) {
+                return "#" + hexChannel(red) + hexChannel(green) + hexChannel(blue);
+              }
+              if (value.color !== undefined) return normalizeVerificationColor(value.color);
+              return null;
+            }
+
+            function normalizeVerificationBorders(value) {
+              if (!Array.isArray(value)) return null;
+              var normalized = [];
+              for (var borderIndex = 0; borderIndex < value.length; borderIndex += 1) {
+                var border = value[borderIndex];
+                if (!border || typeof border !== "object") return null;
+                var borderColor = normalizeVerificationColor(border.color);
+                if (!border.side || !border.style || !borderColor) return null;
+                normalized.push({
+                  side: String(border.side).toLowerCase(),
+                  style: String(border.style).toLowerCase(),
+                  color: borderColor,
+                });
+              }
+              return normalized;
+            }
+
+            function verificationComparable(field, value) {
+              if (value === null || value === undefined) {
+                return { available: false, reason: "readback-null" };
+              }
+              if (field === "fontColor" || field === "fillColor") {
+                var normalizedColor = normalizeVerificationColor(value);
+                return normalizedColor
+                  ? { available: true, value: normalizedColor }
+                  : { available: false, reason: "unsupported-color-readback" };
+              }
+              if (field === "borders") {
+                var normalizedBorders = normalizeVerificationBorders(value);
+                return normalizedBorders
+                  ? { available: true, value: normalizedBorders }
+                  : { available: false, reason: "unsupported-borders-readback" };
+              }
+              if (
+                field === "horizontalAlign"
+                || field === "verticalAlign"
+                || field === "type"
+                || field === "operator"
+              ) {
+                return {
+                  available: true,
+                  value: String(value).toLowerCase().replace(/[^a-z0-9]/g, ""),
+                };
+              }
+              if (typeof value === "number" && isFinite(value)) {
+                return { available: true, value: Math.round(value * 1000000) / 1000000 };
+              }
+              if (
+                typeof value === "string"
+                || typeof value === "boolean"
+              ) {
+                return { available: true, value: value };
+              }
+              var json = serialized(value);
+              return json === null
+                ? { available: false, reason: "unsupported-readback-shape" }
+                : { available: true, value: json };
+            }
+
+            function verificationValuesEqual(left, right) {
+              if (left === right) return true;
+              return JSON.stringify(left) === JSON.stringify(right);
+            }
+
+            function verifyReadback(requested, observed) {
+              var fields = {};
+              var counts = { verified: 0, failed: 0, unavailable: 0 };
+              Object.keys(requested || {}).forEach(function (field) {
+                var expected = verificationComparable(field, requested[field]);
+                var actual = verificationComparable(
+                  field,
+                  observed && hasOwn(observed, field) ? observed[field] : null
+                );
+                var status = "verified";
+                var reason = null;
+                if (!actual.available) {
+                  status = "unavailable";
+                  reason = actual.reason;
+                } else if (!expected.available || !verificationValuesEqual(expected.value, actual.value)) {
+                  status = "failed";
+                  reason = expected.available ? "readback-mismatch" : expected.reason;
+                }
+                counts[status] += 1;
+                fields[field] = {
+                  requested: requested[field],
+                  observed: observed && hasOwn(observed, field) ? observed[field] : null,
+                  status: status,
+                  reason: reason || undefined,
+                };
+              });
+              return {
+                status: counts.failed > 0
+                  ? "failed"
+                  : (counts.unavailable > 0 ? "unavailable" : "verified"),
+                counts: counts,
+                fields: fields,
+              };
+            }
+
+            function requestedFormat(args, columnWidthChars, rowHeightPt) {
+              var requested = {};
+              [
+                "fontSize", "fontName", "bold", "italic", "underline", "strikeout",
+                "fontColor", "fillColor", "horizontalAlign", "verticalAlign",
+                "numberFormat", "wrap", "orientation",
+              ].forEach(function (field) {
+                if (hasOwn(args, field)) requested[field] = args[field];
+              });
+              if (columnWidthChars !== undefined) requested.columnWidthChars = columnWidthChars;
+              if (rowHeightPt !== undefined) requested.rowHeightPt = rowHeightPt;
+              if (Array.isArray(args.borders) && args.borders.length > 0) {
+                requested.borders = args.borders;
+              }
+              return requested;
+            }
+
             function describeFormat(range) {
               var font = safeCall(range, "GetFont");
               return {
@@ -1115,6 +1486,7 @@
                 orientation: safeCall(range, "GetOrientation"),
                 rowHeightPt: safeCall(range, "GetRowHeight"),
                 columnWidthChars: safeCall(range, "GetColumnWidth"),
+                borders: describeBorders(range),
               };
             }
 
@@ -1124,6 +1496,7 @@
               return {
                 index: index,
                 type: safeCall(condition, "GetType"),
+                dupeUnique: safeCall(condition, "GetDupeUnique"),
                 operator: safeCall(condition, "GetOperator"),
                 formula1: safeCall(condition, "GetFormula1"),
                 formula2: safeCall(condition, "GetFormula2"),
@@ -1131,6 +1504,71 @@
                 fontColor: describeColor(safeCall(conditionFont, "GetColor")),
                 bold: safeCall(conditionFont, "GetBold"),
               };
+            }
+
+            function conditionTypeForVerification(value) {
+              var token = String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+              var types = {
+                xlcellvalue: "cellValue",
+                cellvalue: "cellValue",
+                xlexpression: "expression",
+                expression: "expression",
+                unique: "uniqueOrDuplicateValues",
+                uniquevalues: "uniqueOrDuplicateValues",
+                xluniquevalues: "uniqueOrDuplicateValues",
+                duplicatevalues: "uniqueOrDuplicateValues",
+                colorscale: "colorScale",
+                xlcolorscale: "colorScale",
+                databar: "dataBar",
+                xldatabar: "dataBar",
+                iconset: "iconSet",
+                xliconset: "iconSet",
+                top10: "top10",
+                xltop10: "top10",
+                aboveaverage: "aboveAverage",
+                xlaboveaverage: "aboveAverage",
+              };
+              return types[token] || (value === null || value === undefined ? null : String(value));
+            }
+
+            function conditionRuleExpectation(args, conditionType, expectedCount) {
+              var expected = {};
+              if (typeof expectedCount === "number") expected.count = expectedCount;
+              expected.type = conditionTypeForVerification(
+                conditionType === "uniqueValues" || conditionType === "duplicateValues"
+                  ? "unique"
+                  : conditionType
+              );
+              if (conditionType === "cellValue" || conditionType === "expression") {
+                expected.operator = normalizeComparisonOperator(
+                  args.operator,
+                  "xlGreater",
+                  "条件格式运算符"
+                );
+                if (hasOwn(args, "formula1")) expected.formula1 = args.formula1;
+                if (hasOwn(args, "formula2")) expected.formula2 = args.formula2;
+              }
+              if (conditionType === "uniqueValues") expected.dupeUnique = "xlUnique";
+              if (conditionType === "duplicateValues") expected.dupeUnique = "xlDuplicate";
+              if (hasOwn(args, "fillColor")) expected.fillColor = args.fillColor;
+              if (hasOwn(args, "fontColor")) expected.fontColor = args.fontColor;
+              if (hasOwn(args, "bold")) expected.bold = Boolean(args.bold);
+              return expected;
+            }
+
+            function conditionRuleObservation(rule, count) {
+              var observed = {
+                count: count,
+              };
+              if (!rule) return observed;
+              observed.type = conditionTypeForVerification(rule.type);
+              [
+                "dupeUnique", "operator", "formula1", "formula2",
+                "fillColor", "fontColor", "bold",
+              ].forEach(function (field) {
+                observed[field] = rule[field];
+              });
+              return observed;
             }
 
             function describeConditions(range) {
@@ -1398,19 +1836,63 @@
               );
             }
 
-            function formatBasicTable(sheet, reference) {
-              var formatted = requireMethod(
-                sheet,
-                "FormatAsTable",
-                "基础格式表格"
-              ).call(sheet, String(reference));
-              if (formatted !== true) {
-                throw sheetError(
-                  "EXECUTION_FAILED",
-                  "ONLYOFFICE 拒绝创建基础格式表格"
-                );
+            function rangeStyleHeaderReference(reference) {
+              var localReference = String(reference || "")
+                .split("!")
+                .pop()
+                .replace(/\$/g, "");
+              var matched = /^([A-Za-z]{1,3})([1-9][0-9]*):([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(localReference);
+              if (!matched) {
+                var single = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(localReference);
+                return single ? single[1] + single[2] : null;
               }
-              return true;
+              return matched[1] + matched[2] + ":" + matched[3] + matched[2];
+            }
+
+            function formatRangeStyleTable(sheet, reference) {
+              var tableRange = getRange(sheet, String(reference));
+              if (!tableRange) throw new Error("无效表格区域：" + reference);
+              var warnings = [];
+              var borderColor = color("#D9E2F3");
+              [
+                "xlEdgeTop",
+                "xlEdgeBottom",
+                "xlEdgeLeft",
+                "xlEdgeRight",
+                "xlInsideHorizontal",
+                "xlInsideVertical",
+              ].forEach(function (side) {
+                mutationCall(tableRange, "SetBorders", "设置普通区域表格边框", side, "xlContinuous", borderColor);
+              });
+              mutationCall(tableRange, "SetAlignVertical", "设置普通区域表格垂直对齐", "center");
+
+              var headerReference = rangeStyleHeaderReference(reference);
+              if (headerReference) {
+                var headerRange = getRange(sheet, headerReference);
+                mutationCall(headerRange, "SetBold", "设置普通区域表头粗体", true);
+                mutationCall(headerRange, "SetFontColor", "设置普通区域表头字体颜色", color("#FFFFFF"));
+                mutationCall(headerRange, "SetFillColor", "设置普通区域表头填充", color("#4472C4"));
+                mutationCall(headerRange, "SetAlignHorizontal", "设置普通区域表头对齐", "center");
+              } else {
+                warnings.push("header_range_unavailable");
+              }
+
+              var filterApplied = false;
+              if (typeof tableRange.SetAutoFilter === "function") {
+                try {
+                  tableRange.SetAutoFilter();
+                  filterApplied = true;
+                } catch (filterError) {
+                  warnings.push("auto_filter_unavailable");
+                }
+              } else {
+                warnings.push("auto_filter_unavailable");
+              }
+              return {
+                formatted: true,
+                filterApplied: filterApplied,
+                warnings: warnings,
+              };
             }
 
             function applyTableSettings(table, args, createMode) {
@@ -1637,7 +2119,11 @@
                   if (!typedSeries || typeof typedSeries.ChangeChartType !== "function") {
                     throw new Error("当前 ONLYOFFICE 版本不支持修改系列图表类型");
                   }
-                  typedSeries.ChangeChartType(normalizeChartType(update.type, "bar"));
+                  typedSeries.ChangeChartType(normalizeChartType(
+                    update.type,
+                    "bar",
+                    "seriesUpdates[" + updateIndex + "].type"
+                  ));
                 }
                 if (hasOwn(update, "name") && typeof chart.SetSeriaName === "function") {
                   chart.SetSeriaName(String(update.name), seriesIndex);
@@ -1768,6 +2254,113 @@
               }
             }
 
+            function unsupportedFeature(feature, message, details) {
+              throw sheetError(
+                "SHEETS_API_UNSUPPORTED",
+                message,
+                Object.assign({
+                  feature: feature,
+                  retryable: false,
+                  mutationState: "none",
+                  partialMutationPossible: false,
+                }, details || {})
+              );
+            }
+
+            function preflightRuntimeCalls(toolCalls) {
+              for (var preflightIndex = 0; preflightIndex < toolCalls.length; preflightIndex += 1) {
+                var preflightCall = toolCalls[preflightIndex] || {};
+                var preflightArgs = getArgs(preflightCall);
+                if (preflightCall.name === "sheets_manage_table") {
+                  var preflightTableSheet = getSheet(preflightArgs.sheet);
+                  var preflightTableAction = String(preflightArgs.action || "");
+                  if (preflightTableAction === "create") {
+                    var preflightTableMode = String(preflightArgs.tableMode || "auto");
+                    if (preflightTableMode === "basic") preflightTableMode = "rangeStyle";
+                    var requiresNativeTable = preflightTableMode === "structured"
+                      || structuredTableCreateFields(preflightArgs).length > 0;
+                    if (requiresNativeTable && typeof preflightTableSheet.AddListObject !== "function") {
+                      unsupportedFeature(
+                        "sheets.nativeTables.create",
+                        "当前 ONLYOFFICE 运行时不支持创建原生结构化表格",
+                        { requestedTableMode: preflightTableMode }
+                      );
+                    }
+                    if (
+                      preflightTableMode === "rangeStyle"
+                      || (
+                        preflightTableMode === "auto"
+                        && typeof preflightTableSheet.AddListObject !== "function"
+                      )
+                    ) {
+                      var preflightRange = getRange(preflightTableSheet, preflightArgs.range);
+                      if (
+                        !preflightRange
+                        || typeof preflightRange.SetBold !== "function"
+                        || typeof preflightRange.SetFillColor !== "function"
+                        || typeof preflightRange.SetBorders !== "function"
+                      ) {
+                        unsupportedFeature(
+                          "sheets.rangeStyleTables.create",
+                          "当前 ONLYOFFICE 运行时不支持普通区域表格样式"
+                        );
+                      }
+                    }
+                  } else if (
+                    preflightTableAction === "update"
+                    || preflightTableAction === "resize"
+                    || preflightTableAction === "delete"
+                    || preflightTableAction === "unlist"
+                  ) {
+                    if (typeof preflightTableSheet.GetListObjects !== "function") {
+                      unsupportedFeature(
+                        "sheets.nativeTables.inspect",
+                        "当前 ONLYOFFICE 运行时不支持访问原生结构化表格"
+                      );
+                    }
+                  }
+                } else if (preflightCall.name === "sheets_manage_conditional_format") {
+                  var preflightConditionalSheet = getSheet(preflightArgs.sheet);
+                  var preflightConditionalRange = getRange(preflightConditionalSheet, preflightArgs.range);
+                  if (!preflightConditionalRange || typeof preflightConditionalRange.GetFormatConditions !== "function") {
+                    unsupportedFeature(
+                      "sheets.conditionalFormatting.create",
+                      "当前 ONLYOFFICE 运行时不支持条件格式"
+                    );
+                  }
+                } else if (preflightCall.name === "sheets_add_chart") {
+                  var preflightChartSheet = getSheet(preflightArgs.sheet);
+                  if (typeof preflightChartSheet.AddChart !== "function") {
+                    unsupportedFeature(
+                      "sheets.charts.create",
+                      "当前 ONLYOFFICE 运行时不支持创建图表"
+                    );
+                  }
+                  if (
+                    hasOwn(preflightArgs, "categoryRange")
+                    || (Array.isArray(preflightArgs.addSeries) && preflightArgs.addSeries.length > 0)
+                    || (Array.isArray(preflightArgs.seriesUpdates) && preflightArgs.seriesUpdates.length > 0)
+                    || (Array.isArray(preflightArgs.removeSeries) && preflightArgs.removeSeries.length > 0)
+                  ) {
+                    unsupportedFeature(
+                      "sheets.charts.addSeriesOnCreate",
+                      "当前 ONLYOFFICE 运行时不支持在创建图表时追加或重定向系列；请先创建基础图表，再检查并更新",
+                      { recovery: "create_inspect_then_update" }
+                    );
+                  }
+                } else if (preflightCall.name === "sheets_delete_chart") {
+                  var preflightChart = resolveChart(preflightArgs);
+                  if (typeof preflightChart.chart.Delete !== "function") {
+                    unsupportedFeature(
+                      "sheets.charts.delete",
+                      "当前 ONLYOFFICE 运行时不支持删除图表"
+                    );
+                  }
+                }
+              }
+            }
+
+            preflightRuntimeCalls(calls);
             for (var callIndex = 0; callIndex < calls.length; callIndex += 1) {
               if (mutatingNames[calls[callIndex].name]) {
                 mutating = true;
@@ -1979,28 +2572,15 @@
                     }
                   }
                   changed += 1;
+                  var formatRequested = requestedFormat(args, columnWidthChars, rowHeightPt);
+                  var formatReadback = describeFormat(formatRange);
                   results.push({
                     name: call.name,
                     sheet: formatSheet.GetName(),
                     range: String(args.range),
-                    requestedFormat: {
-                      fontSize: args.fontSize,
-                      fontName: args.fontName,
-                      bold: args.bold,
-                      italic: args.italic,
-                      underline: args.underline,
-                      strikeout: args.strikeout,
-                      fontColor: args.fontColor,
-                      fillColor: args.fillColor,
-                      horizontalAlign: args.horizontalAlign,
-                      verticalAlign: args.verticalAlign,
-                      numberFormat: args.numberFormat,
-                      wrap: args.wrap,
-                      orientation: args.orientation,
-                      columnWidthChars: columnWidthChars,
-                      rowHeightPt: rowHeightPt,
-                    },
-                    readback: describeFormat(formatRange),
+                    requestedFormat: formatRequested,
+                    readback: formatReadback,
+                    verification: verifyReadback(formatRequested, formatReadback),
                   });
                   break;
                 }
@@ -2281,8 +2861,19 @@
                   var tableInspectionSheets = args.sheet ? [getSheet(args.sheet)] : Api.GetSheets();
                   var remainingTables = Math.max(1, Math.min(1000, Number(args.maxTables || 200)));
                   var inspectedTableSheets = [];
+                  var tableInspectionSupported = true;
                   for (var inspectedSheetIndex = 0; inspectedSheetIndex < tableInspectionSheets.length; inspectedSheetIndex += 1) {
                     var inspectedTableSheet = tableInspectionSheets[inspectedSheetIndex];
+                    if (typeof inspectedTableSheet.GetListObjects !== "function") {
+                      tableInspectionSupported = false;
+                      inspectedTableSheets.push({
+                        sheet: inspectedTableSheet.GetName(),
+                        supported: false,
+                        tableCount: 0,
+                        tables: [],
+                      });
+                      continue;
+                    }
                     var sheetTables = getListObjects(inspectedTableSheet);
                     var describedTables = [];
                     for (
@@ -2302,11 +2893,19 @@
                     }
                     inspectedTableSheets.push({
                       sheet: inspectedTableSheet.GetName(),
+                      supported: true,
                       tableCount: sheetTables.length,
                       tables: describedTables,
                     });
                   }
-                  results.push({ name: call.name, sheets: inspectedTableSheets });
+                  results.push({
+                    name: call.name,
+                    supported: tableInspectionSupported,
+                    feature: "sheets.nativeTables.inspect",
+                    reason: tableInspectionSupported ? null : "runtime_api_unavailable",
+                    tables: [],
+                    sheets: inspectedTableSheets,
+                  });
                   break;
                 }
 
@@ -2319,6 +2918,10 @@
                   var tableKind = "structured";
                   var tableDegraded = false;
                   var tableFormatted = false;
+                  var requestedTableKind = "structured";
+                  var actualTableKind = "structured";
+                  var tableWarnings = [];
+                  var rangeStyleResult = null;
                   if (tableAction === "create") {
                     if (!args.range) throw new Error("create 需要 range");
                     var invalidCreateFields = unexpectedArgumentFields(args, [
@@ -2347,22 +2950,24 @@
                         { partialMutationPossible: false }
                       );
                     }
-                    var tableMode = String(args.tableMode || "auto");
-                    if (["auto", "structured", "basic"].indexOf(tableMode) === -1) {
+                    var receivedTableMode = String(args.tableMode || "auto");
+                    var tableMode = receivedTableMode === "basic" ? "rangeStyle" : receivedTableMode;
+                    if (["auto", "structured", "rangeStyle"].indexOf(tableMode) === -1) {
                       throw sheetError(
                         "INVALID_TOOL_ARGUMENTS",
-                        "tableMode 必须是 auto、structured 或 basic"
+                        "tableMode 必须是 auto、structured、rangeStyle 或兼容别名 basic"
                       );
                     }
+                    requestedTableKind = tableMode;
                     var structuredFields = structuredTableCreateFields(args);
-                    if (tableMode === "basic" && structuredFields.length) {
+                    if (tableMode === "rangeStyle" && structuredFields.length) {
                       throw sheetError(
                         "INVALID_TOOL_ARGUMENTS",
-                        "基础格式表格不支持结构化属性：" + structuredFields.join("、")
+                        "普通区域样式不支持结构化属性：" + structuredFields.join("、")
                       );
                     }
                     var structuredFailure = null;
-                    if (tableMode !== "basic") {
+                    if (tableMode !== "rangeStyle") {
                       if (typeof tableSheet.AddListObject === "function") {
                         try {
                           var createdTable = tableSheet.AddListObject(
@@ -2390,15 +2995,22 @@
                           "当前 ONLYOFFICE 版本无法创建结构化表格"
                             + (structuredFailure ? "：" + structuredFailure : ""),
                           {
+                            feature: "sheets.nativeTables.create",
+                            retryable: false,
+                            mutationState: "none",
                             requestedTableMode: tableMode,
                             unsupportedFields: structuredFields,
+                            partialMutationPossible: false,
                           }
                         );
                       }
-                      formatBasicTable(tableSheet, args.range);
-                      tableKind = "basic";
+                      rangeStyleResult = formatRangeStyleTable(tableSheet, args.range);
+                      tableKind = "rangeStyle";
+                      actualTableKind = "rangeStyle";
                       tableDegraded = tableMode === "auto";
                       tableFormatted = true;
+                      if (tableDegraded) tableWarnings.push("native_table_unavailable");
+                      tableWarnings = tableWarnings.concat(rangeStyleResult.warnings || []);
                     }
                     if (table && typeof table === "object") applyTableSettings(table, args, true);
                   } else if (tableAction === "format") {
@@ -2415,10 +3027,13 @@
                           + formatFields.join("、")
                       );
                     }
-                    formatBasicTable(tableSheet, args.range);
+                    rangeStyleResult = formatRangeStyleTable(tableSheet, args.range);
                     table = null;
-                    tableKind = "basic";
+                    tableKind = "rangeStyle";
+                    requestedTableKind = "rangeStyle";
+                    actualTableKind = "rangeStyle";
                     tableFormatted = true;
+                    tableWarnings = tableWarnings.concat(rangeStyleResult.warnings || []);
                   } else if (
                     tableAction === "update"
                     || tableAction === "resize"
@@ -2448,14 +3063,18 @@
                     action: tableAction,
                     sheet: tableSheet.GetName(),
                     tableKind: tableKind,
+                    requestedKind: requestedTableKind,
+                    actualKind: actualTableKind,
                     degraded: tableDegraded,
+                    warnings: tableWarnings,
                     formatted: tableFormatted || undefined,
-                    range: tableKind === "basic"
+                    filterApplied: rangeStyleResult ? rangeStyleResult.filterApplied : undefined,
+                    range: tableKind === "rangeStyle"
                       ? describeRange(getRange(tableSheet, args.range), false)
                       : undefined,
                     table: tableAction === "delete"
                       || tableAction === "unlist"
-                      || tableKind === "basic"
+                      || tableKind === "rangeStyle"
                       ? null
                       : describeTable(table, managedTableIndex),
                   });
@@ -2548,16 +3167,39 @@
                     throw new Error("条件格式 action 必须是 add 或 deleteAll");
                   }
                   changed += 1;
+                  var conditionalCount = safeCall(conditions, "GetCount");
+                  var conditionalRule = condition
+                    ? describeCondition(condition, conditionExternalIndex)
+                    : null;
+                  var expectedConditionalRule = conditionalAction === "deleteAll"
+                    ? { count: 0 }
+                    : conditionRuleExpectation(
+                      args,
+                      String(args.type || "cellValue"),
+                      typeof conditionCountBefore === "number"
+                        ? conditionCountBefore + 1
+                        : undefined
+                    );
+                  var observedConditionalRule = conditionRuleObservation(
+                    conditionalRule,
+                    conditionalCount
+                  );
                   results.push({
                     name: call.name,
                     action: conditionalAction,
                     sheet: conditionalSheet.GetName(),
                     range: String(args.range),
-                    count: safeCall(conditions, "GetCount"),
-                    rule: condition
-                      ? describeCondition(condition, conditionExternalIndex)
-                      : null,
+                    count: conditionalCount,
+                    rule: conditionalRule,
                     conditionalFormats: describeConditions(conditionalRange),
+                    ruleVerification: verifyReadback(
+                      expectedConditionalRule,
+                      observedConditionalRule
+                    ),
+                    effectiveStyleVerification: {
+                      status: "unavailable",
+                      reason: "effective-cell-style-requires-visual-verification",
+                    },
                   });
                   break;
                 }
@@ -2763,26 +3405,81 @@
                   if (!args.range) throw new Error("sheets_add_chart.range 不能为空");
                   var chartSheet = getSheet(args.sheet);
                   var source = qualifyRange(chartSheet, args.range);
-                  var chart = chartSheet.AddChart(
-                    source,
-                    Boolean(args.inRows),
-                    normalizeChartType(args.type, "bar"),
-                    clamp(Math.round(asFinite(args.style, 2)), 1, 48),
-                    Math.max(30, asFinite(args.widthMm, 120)) * EMU_PER_MM,
-                    Math.max(20, asFinite(args.heightMm, 70)) * EMU_PER_MM,
-                    Math.max(0, Math.round(asFinite(args.fromColumn, 0))),
-                    mmToEmu(args.columnOffsetMm || 0),
-                    Math.max(0, Math.round(asFinite(args.fromRow, 0))),
-                    mmToEmu(args.rowOffsetMm || 0)
-                  );
-                  if (!chart) throw new Error("创建图表失败");
-                  applyChartOptions(chart, args, true);
+                  var resolvedChartType = resolveChartType(args.type, "bar", "type");
+                  var chart = null;
+                  try {
+                    chart = chartSheet.AddChart(
+                      source,
+                      Boolean(args.inRows),
+                      resolvedChartType.normalized,
+                      clamp(Math.round(asFinite(args.style, 2)), 1, 48),
+                      Math.max(30, asFinite(args.widthMm, 120)) * EMU_PER_MM,
+                      Math.max(20, asFinite(args.heightMm, 70)) * EMU_PER_MM,
+                      Math.max(0, Math.round(asFinite(args.fromColumn, 0))),
+                      mmToEmu(args.columnOffsetMm || 0),
+                      Math.max(0, Math.round(asFinite(args.fromRow, 0))),
+                      mmToEmu(args.rowOffsetMm || 0)
+                    );
+                    if (!chart) throw new Error("ONLYOFFICE 未返回图表对象");
+                  } catch (chartError) {
+                    throw chartCreationError(chartError, {
+                      sheet: chartSheet.GetName(),
+                      range: source,
+                      receivedType: resolvedChartType.received,
+                      normalizedType: resolvedChartType.normalized,
+                    });
+                  }
+                  try {
+                    applyChartOptions(chart, args, true);
+                  } catch (chartOptionsError) {
+                    var partialChartIndex = chartIndexOnSheet(chartSheet, chart);
+                    var partialChartName = safeCall(chart, "GetName");
+                    var chartRolledBack = false;
+                    if (typeof chart.Delete === "function") {
+                      try {
+                        chartRolledBack = chart.Delete() !== false;
+                      } catch (chartRollbackError) {
+                        chartRolledBack = false;
+                      }
+                    }
+                    if (chartRolledBack) {
+                      throw sheetError(
+                        "SHEETS_CHART_CREATE_FAILED",
+                        "创建图表后应用选项失败，已回滚新图表："
+                          + (chartOptionsError && chartOptionsError.message ? chartOptionsError.message : String(chartOptionsError)),
+                        {
+                          phase: "sheets-chart-options",
+                          feature: "sheets.charts.create",
+                          rolledBack: true,
+                          partialMutationPossible: false,
+                        }
+                      );
+                    }
+                    throw sheetError(
+                      "SHEETS_CHART_PARTIAL_MUTATION",
+                      "图表已创建，但后续选项应用失败；当前运行时无法安全删除该对象",
+                      {
+                        phase: "sheets-chart-options",
+                        feature: "sheets.charts.create",
+                        created: true,
+                        chartIndex: partialChartIndex,
+                        chartName: partialChartName,
+                        retryable: false,
+                        mutationState: "partial",
+                        recovery: "inspect_existing_chart_before_retry",
+                        causeMessage: chartOptionsError && chartOptionsError.message
+                          ? chartOptionsError.message
+                          : String(chartOptionsError),
+                        partialMutationPossible: true,
+                      }
+                    );
+                  }
                   changed += 1;
                   results.push({
                     name: call.name,
                     sheet: chartSheet.GetName(),
                     range: source,
-                    type: normalizeChartType(args.type, "bar"),
+                    type: resolvedChartType.normalized,
                     chart: describeChart(chart, chartIndexOnSheet(chartSheet, chart), Boolean(args.includeRaw)),
                   });
                   break;
@@ -2802,7 +3499,18 @@
 
                 case "sheets_delete_chart": {
                   var chartToDelete = resolveChart(args);
-                  if (typeof chartToDelete.chart.Delete !== "function") throw new Error("当前 ONLYOFFICE 版本不支持删除图表");
+                  if (typeof chartToDelete.chart.Delete !== "function") {
+                    throw sheetError(
+                      "SHEETS_API_UNSUPPORTED",
+                      "当前 ONLYOFFICE 运行时不支持删除图表",
+                      {
+                        feature: "sheets.charts.delete",
+                        retryable: false,
+                        mutationState: "none",
+                        partialMutationPossible: false,
+                      }
+                    );
+                  }
                   var chartDeleted = chartToDelete.chart.Delete();
                   if (chartDeleted === false) throw new Error("删除图表失败");
                   changed += 1;
@@ -3396,9 +4104,17 @@
             if (failedCall && failedCall.name) details.tool = String(failedCall.name);
             if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
             var errorMessage = error && error.message ? error.message : String(error);
+            var normalizedErrorCode = error && error.code ? error.code : "EXECUTION_FAILED";
+            if (errorMessage.indexOf("setDirtyConditionalFormatting") >= 0) {
+              normalizedErrorCode = "SHEETS_RUNTIME_INCOMPATIBLE";
+              details.feature = "sheets.conditionalFormatting";
+              details.retryable = false;
+              details.mutationState = details.partialMutationPossible ? "partial" : "unknown";
+              details.recovery = "inspect_then_undo_or_reopen";
+            }
             return JSON.stringify({
               ok: false,
-              code: error && error.code ? error.code : "EXECUTION_FAILED",
+              code: normalizedErrorCode,
               message: errorMessage,
               error: errorMessage,
               details: details,
@@ -3421,6 +4137,7 @@
 
   window.AICopilotBridges.cell = {
     execute: execute,
+    probeCapabilities: probeCapabilities,
     inspect: function () {
       return execute([{ name: "sheets_inspect", arguments: { maxCells: 1200 } }]);
     },

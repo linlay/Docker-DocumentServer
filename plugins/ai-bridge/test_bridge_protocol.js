@@ -376,6 +376,19 @@ function createHarness(options = {}) {
       },
     },
   };
+  if (editorType === "cell") {
+    pluginWindow.AICopilotBridges.cell.probeCapabilities = async () => ({
+      runtime: { product: "ONLYOFFICE", version: "test", edition: "enterprise" },
+      features: {
+        sheets: {
+          nativeTables: { create: true, inspect: true },
+          rangeStyleTables: { create: true },
+          conditionalFormatting: { create: true },
+          charts: { create: true, addSeriesOnCreate: false, delete: true },
+        },
+      },
+    });
+  }
   if (typeof options.bridgePreflight === "function") {
     pluginWindow.AICopilotBridges[editorType].preflight = options.bridgePreflight;
   }
@@ -2190,12 +2203,48 @@ test("force-save failures report persistence phase and possible document mutatio
   );
 });
 
+test("force-save failed status is normalized as PERSISTENCE_FAILED", async () => {
+  const harness = createHarness({
+    serviceResponse(path) {
+      if (path === "/copilot-api/forcesave") {
+        return {
+          accepted: false,
+          noChanges: false,
+          persisted: false,
+          status: "failed",
+          commandError: 4,
+          beforeMtime: 100,
+          afterMtime: 100,
+        };
+      }
+      return { persisted: true, path };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.word.replaceText(
+      { search: "old", replace: "new" },
+      { timeoutMs: 1000, requestId: "persistence-failed-status" },
+    ),
+    error => {
+      assert.equal(error.code, "PERSISTENCE_FAILED");
+      assert.equal(error.details.persistence.status, "failed");
+      assert.equal(error.details.persistence.forceSave.commandError, 4);
+      return true;
+    },
+  );
+});
+
 test("force-save persists without reloading the live editor", async () => {
   const harness = createHarness({
     serviceResponse(path) {
       if (path === "/copilot-api/forcesave") {
         return {
+          accepted: true,
           persisted: true,
+          status: "saved",
+          commandError: 0,
           promoted: true,
           beforeMtime: 100,
           afterMtime: 101,
@@ -2213,6 +2262,9 @@ test("force-save persists without reloading the live editor", async () => {
 
   assert.equal(result.persisted, true);
   assert.equal(result.forceSave.promoted, true);
+  assert.equal(result.persistence.status, "saved");
+  assert.equal(result.persistence.editorSaved, true);
+  assert.equal(result.persistence.forceSave.commandError, 0);
   assert.equal(harness.reloadCount, 0);
   await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal(harness.reloadCount, 0);
@@ -2223,7 +2275,10 @@ test("explicit save persists without reloading the live editor", async () => {
     serviceResponse(path) {
       if (path === "/copilot-api/forcesave") {
         return {
+          accepted: true,
           persisted: true,
+          status: "saved",
+          commandError: 0,
           promoted: true,
           beforeMtime: 100,
           afterMtime: 101,
@@ -2240,9 +2295,41 @@ test("explicit save persists without reloading the live editor", async () => {
   });
 
   assert.equal(result.persisted, true);
+  assert.equal(result.persistence.status, "saved");
+  assert.equal(result.persistence.editorSaved, true);
   assert.equal(harness.reloadCount, 0);
   await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal(harness.reloadCount, 0);
+});
+
+test("explicit save treats CommandService no-changes as persisted", async () => {
+  const harness = createHarness({
+    serviceResponse(path) {
+      if (path === "/copilot-api/forcesave") {
+        return {
+          accepted: false,
+          noChanges: true,
+          persisted: true,
+          status: "no_changes",
+          commandError: 4,
+          beforeMtime: 100,
+          afterMtime: 100,
+        };
+      }
+      return { persisted: true, path };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  const result = await harness.hostWindow.aiBridge.save({
+    timeoutMs: 1000,
+    requestId: "save-no-changes-1",
+  });
+
+  assert.equal(result.persisted, true);
+  assert.equal(result.persistence.status, "no_changes");
+  assert.equal(result.persistence.forceSave.noChanges, true);
+  assert.equal(result.persistence.forceSave.commandError, 4);
 });
 
 test("cross-origin client SDK connects through an explicit relay allow-list", async () => {

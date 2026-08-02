@@ -1,4 +1,4 @@
-# ai-bridge 0.6.0 外部工程接入说明
+# ai-bridge 0.8.0 外部工程接入说明
 
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
@@ -28,7 +28,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.6.0-rev5"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.8.0-rev5"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -46,7 +46,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -63,7 +63,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.8.0-rev5"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -107,6 +107,8 @@ console.log(state.context.documentKey); // 当前文档唯一键
 console.log(state.context.fileName);    // 当前文件名
 console.log(state.editorType);          // word / slide / cell
 console.log(state.capabilities.tools); // 当前编辑器允许的工具
+console.log(state.capabilities.runtime); // ONLYOFFICE 运行时版本与版本类型
+console.log(state.capabilities.features); // 当前运行时实际能力
 
 await window.aiBridge.word.replaceText(
   { search: "甲方旧名称", replace: "甲方新名称" },
@@ -125,13 +127,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.8.0-rev5"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -242,6 +244,12 @@ tenantId:documentId:storageVersion
 4. 只接收模型返回的工具名和 JSON 参数，调用 `executeBatch()`。
 5. 使用本次 Copilot turn 和工具序号生成稳定 `requestId`，网络重试时复用同一个值。
 6. 展示结果；失败时读取 `error.code` 决定重试、提示用户或重新 inspect。
+
+表格编辑器还必须读取 `capabilities.features.sheets`。能力值为 `false` 时不得调用
+对应高级功能；字段缺失或运行时版本未知时，也按不可用处理。`nativeTables.create`
+和 `nativeTables.inspect` 控制真正的 ListObject 创建与枚举；`rangeStyleTables.create`
+只表示可以为普通区域设置表头、边框、对齐、填充和可用时的筛选，不具备结构化
+引用、表格名称、汇总行或列对象语义。
 
 ```js
 const context = await window.aiBridge.word.inspect({ maxChars: 20_000 });
@@ -398,7 +406,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.6.0 的主要方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.8.0 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -446,7 +454,7 @@ sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
 sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.6.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.8.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -629,7 +637,7 @@ await window.aiBridge.slides.updateChart({
 
 ### XLSX 图表完整边界
 
-`sheets_add_chart`、`sheets_inspect_charts`、`sheets_update_chart` 和
+`sheets_add_chart`、`sheets_inspect_charts`、`sheets_update_chart` 和运行时允许时的
 `sheets_delete_chart` 使用零基 `chartIndex` 或名称定位。除 PPT 图表共有的
 标题、样式、填充、线条、图例、坐标轴、标签、网格线、系列和数据点格式外，
 还支持：
@@ -646,8 +654,14 @@ ONLYOFFICE 的 `0..100000` 单位，角度会转换为 `1/60000` 度单位。
 
 `sheets_delete_chart` 调用官方 `ApiDrawing.Delete()`。该方法在部分
 ONLYOFFICE Docs 版本/许可中属于付费能力；方法不可用时 Bridge 会明确返回
-“当前 ONLYOFFICE 版本不支持删除图表”，不会伪装删除成功。本仓库默认 Community
-DocumentServer 9.4 已实测支持图表创建、读取和更新，但不暴露该删除方法。
+“当前 ONLYOFFICE 版本不支持删除图表”，从可用工具列表移除并在写入前拒绝，
+不会伪装删除成功。本仓库默认 Community DocumentServer 9.4 已实测支持基础图表
+创建、读取和更新，但不暴露该删除方法。若
+`features.sheets.charts.addSeriesOnCreate` 为 `false`，创建时只能使用连续
+`sourceRange`；需要独立分类或系列时，先创建基础图表，再 inspect 获取对象索引，
+最后用 update 分阶段设置。创建对象后设置选项失败且无法删除时，会返回
+`SHEETS_CHART_PARTIAL_MUTATION` 和已创建对象的名称/索引，调用方必须先 inspect，
+不能重新 create。
 
 ## 不使用 Client SDK 时的底层 postMessage 协议
 
@@ -674,7 +688,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.6.0",
+    "version": "0.8.0",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -733,7 +747,10 @@ try {
 - `IMAGE_ASSET_EXPIRED`：签名下载地址已过期。
 - `IMAGE_API_UNSUPPORTED`：当前 ONLYOFFICE 运行时缺少必需图片 API。
 - `WORD_API_UNSUPPORTED`：当前 ONLYOFFICE 运行时缺少对应的 Word API。
-- `PERSISTENCE_FAILED`：Office API 已执行，但示例持久化服务保存失败，应提示用户并核对 callback/force-save。
+- `SHEETS_API_UNSUPPORTED`：当前运行时明确缺少所需表格、图表或规则 API；调用在首个写入前拒绝。
+- `SHEETS_RUNTIME_INCOMPATIBLE`：运行时在条件格式等功能上触发已知不兼容；停止该功能路径，按详情 inspect 当前状态，不原参数重试。
+- `SHEETS_CHART_PARTIAL_MUTATION`：图表已经创建，但后续选项失败且无法回滚；先 inspect 返回的名称或索引，只规划未完成部分。
+- `PERSISTENCE_FAILED`：Office API 已执行，但无法确认文件落盘；只有 `persistence.status === "failed"` 才按保存失败处理，`no_changes` 是正常结果。
 - `TIMEOUT` / `CONNECTION_TIMEOUT`：调用或 Relay 握手超时。
 
 HTTP Relay 不再把所有编辑器失败统一映射为 `409`。请求或协议错误使用
@@ -755,6 +772,10 @@ const history = await office.history();
 await office.undo(); // 回到上一 checkpoint，页面会 reload
 await office.redo(); // 回到下一 checkpoint，页面会 reload
 ```
+
+`save()` 和写入结果统一返回 `persistence.status`：`saved` 表示已形成新的落盘版本，
+`no_changes` 表示已确认没有待保存改动，`failed` 才表示无法确认持久化。兼容字段
+`persisted` 暂时保留；新调用方应以三态结果为准。
 
 仓库内 `/copilot-api/*` 只实现 DocumentServer 示例应用的保存/版本服务。生产环境仍应由你的文档存储服务正确处理 ONLYOFFICE callback，尤其是 force-save 状态 6 和最终保存状态 2，并做用户鉴权、文档权限校验和审计。
 
@@ -783,6 +804,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.6.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.6.0-rev5`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.8.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.8.0-rev5`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

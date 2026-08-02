@@ -10,7 +10,7 @@ The test uses the first-party localhost document app, copies the persisted file
 from the local DocumentServer container, and verifies the resulting OOXML. It
 intentionally checks behavior that JavaScript mocks cannot prove: cell/differential fills,
 conditional-format operators, formula progression, validation XML, strict
-values, basic table formatting, frozen panes, and worksheet view flags.
+values, range-style formatting, frozen panes, and worksheet view flags.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ class SheetsOoxmlIntegrationTest(unittest.TestCase):
                 "name": "sheets_manage_table",
                 "arguments": {
                     "action": "create",
-                    "tableMode": "basic",
+                    "tableMode": "rangeStyle",
                     "range": "A1:D4",
                 },
             },
@@ -248,7 +248,10 @@ class SheetsOoxmlIntegrationTest(unittest.TestCase):
             for result in execution.get("results", [])
             if result.get("name") == "sheets_manage_table"
         )
-        self.assertEqual(table_result.get("tableKind"), "basic")
+        self.assertEqual(table_result.get("requestedKind"), "rangeStyle")
+        self.assertEqual(table_result.get("actualKind"), "rangeStyle")
+        self.assertEqual(table_result.get("tableKind"), "rangeStyle")
+        self.assertFalse(table_result.get("degraded"))
         self.assertTrue(table_result.get("formatted"))
         self.assertIsNone(table_result.get("table"))
         validation_result = next(

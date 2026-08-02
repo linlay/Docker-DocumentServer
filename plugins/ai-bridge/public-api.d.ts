@@ -34,6 +34,8 @@ export type AiBridgeErrorCode =
   | "WORD_API_UNSUPPORTED"
   | "SHEETS_API_UNSUPPORTED"
   | "SHEETS_VIEW_STATE_NOT_APPLIED"
+  | "SHEETS_RUNTIME_INCOMPATIBLE"
+  | "SHEETS_CHART_PARTIAL_MUTATION"
   | "EXECUTION_FAILED"
   | "INVALID_LISTENER"
   | "CLIENT_DESTROYED"
@@ -60,15 +62,28 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.6.0";
+  contractVersion?: "0.8.0";
   contractSha256?: string;
+  runtime?: {
+    product: "ONLYOFFICE";
+    version: string | null;
+    edition: "community" | "enterprise" | "unknown";
+  };
+  features?: {
+    sheets?: {
+      nativeTables: { create: boolean; inspect: boolean };
+      rangeStyleTables: { create: boolean };
+      conditionalFormatting: { create: boolean };
+      charts: { create: boolean; addSeriesOnCreate: boolean; delete: boolean };
+    };
+  };
 }
 
 export interface AiBridgeState {
-  version: "0.6.0";
+  version: "0.8.0";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.6.0";
+  contractVersion: "0.8.0";
   contractSha256: string;
   ready: boolean;
   editorType: AiBridgeEditorType | null;
@@ -92,6 +107,17 @@ export interface AiBridgeExecutionResult {
   results: Array<Record<string, unknown>>;
   persisted: boolean;
   forceSave?: Record<string, unknown>;
+  persistence?: {
+    status: "saved" | "no_changes" | "failed";
+    editorSaved: boolean;
+    forceSave: {
+      accepted: boolean;
+      noChanges: boolean;
+      beforeMtime: number | null;
+      afterMtime: number | null;
+      commandError: number | null;
+    };
+  };
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
 
@@ -100,7 +126,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.6.0";
+  contractVersion: "0.8.0";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -1620,10 +1646,10 @@ export interface SheetsManageTableArgs extends SheetTarget {
   range?: string;
   /**
    * Applies only to create and defaults to auto. structured requires
-   * ApiListObject; basic only formats the range; auto only degrades requests
-   * that contain no structured-only properties.
+   * ApiListObject; rangeStyle only formats the range; basic is a compatibility
+   * alias for rangeStyle; auto reports degradation explicitly.
    */
-  tableMode?: "auto" | "structured" | "basic";
+  tableMode?: "auto" | "structured" | "rangeStyle" | "basic";
   sourceType?: string;
   tableIndex?: number;
   tableName?: string;
@@ -2323,7 +2349,7 @@ export type AiBridgeGeneratedWordAddShapeArgs = {
   color?: string;
 };
 export type AiBridgeGeneratedWordAddChartArgs = {
-  chartType?: string;
+  chartType?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
   data: Array<Array<number>>;
   seriesNames?: Array<string>;
   categories?: Array<string | number>;
@@ -2864,6 +2890,7 @@ export type AiBridgeGeneratedSlidesAddSlideArgs = {
   index?: number;
   title?: string;
   titleFontSize?: number;
+  titlePlacement?: "auto" | "placeholder" | "textbox";
   backgroundColor?: string;
   masterIndex?: number;
   layoutIndex?: number;
@@ -4566,7 +4593,7 @@ export type AiBridgeGeneratedSlidesInspectChartsArgs = {
 };
 export type AiBridgeGeneratedSlidesAddChartArgs = {
   slide: number;
-  type?: string;
+  type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
   series: Array<Array<number>>;
   seriesNames: Array<string | number>;
   categories: Array<string | number>;
@@ -5004,7 +5031,7 @@ export type AiBridgeGeneratedSlidesAddChartArgs = {
   };
   seriesUpdates?: Array<{
     index: number;
-    type?: string;
+    type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
     name?: string;
     values?: Array<number>;
     valuesRange?: string;
@@ -5649,7 +5676,7 @@ export type AiBridgeGeneratedSlidesUpdateChartArgs = {
   };
   seriesUpdates?: Array<{
     index: number;
-    type?: string;
+    type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
     name?: string;
     values?: Array<number>;
     valuesRange?: string;
@@ -6020,7 +6047,7 @@ export type AiBridgeGeneratedSheetsManageTableArgs = {
   action: "create" | "format" | "update" | "resize" | "delete" | "unlist";
   sheet?: string;
   range?: string;
-  tableMode?: "auto" | "structured" | "basic";
+  tableMode?: "auto" | "structured" | "rangeStyle" | "basic";
   sourceType?: string;
   tableIndex?: number;
   tableName?: string;
@@ -6303,7 +6330,7 @@ export type AiBridgeGeneratedSheetsSetMacrosArgs = {
 export type AiBridgeGeneratedSheetsAddChartArgs = {
   sheet?: string;
   range: string;
-  type?: string;
+  type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
   title?: string;
   titleFontSize?: number;
   inRows?: boolean;
@@ -6746,7 +6773,7 @@ export type AiBridgeGeneratedSheetsAddChartArgs = {
   };
   seriesUpdates?: Array<{
     index: number;
-    type?: string;
+    type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
     name?: string;
     values?: Array<number>;
     valuesRange?: string;
@@ -7402,7 +7429,7 @@ export type AiBridgeGeneratedSheetsUpdateChartArgs = {
   };
   seriesUpdates?: Array<{
     index: number;
-    type?: string;
+    type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
     name?: string;
     values?: Array<number>;
     valuesRange?: string;
@@ -7952,7 +7979,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.6.0";
+  readonly version: "0.8.0";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

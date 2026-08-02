@@ -1123,8 +1123,8 @@ def build_artifacts(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.6.0":
-        raise ValueError("public-api.json version must be 0.6.0")
+    if contract.get("version") != "0.8.0":
+        raise ValueError("public-api.json version must be 0.8.0")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     names = []

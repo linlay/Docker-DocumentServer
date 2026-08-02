@@ -599,11 +599,40 @@
             function drawingText(drawing) {
               var content;
               try {
-                content = drawing && typeof drawing.GetContent === "function" ? drawing.GetContent() : null;
+                content = drawing && typeof drawing.GetContent === "function"
+                  ? drawing.GetContent()
+                  : (
+                    drawing && typeof drawing.GetDocContent === "function"
+                      ? drawing.GetDocContent()
+                      : null
+                  );
               } catch (error) {
                 content = null;
               }
               return content && typeof content.GetText === "function" ? String(content.GetText() || "") : "";
+            }
+
+            function drawingPlaceholderType(drawing) {
+              var placeholder = safeCall(drawing, "GetPlaceholder");
+              if (!placeholder) return null;
+              var type = safeCall(placeholder, "GetType");
+              if (type === null || type === undefined || type === "") return null;
+              return String(type);
+            }
+
+            function drawingsByPlaceholderType(slide, type) {
+              var direct = safeCall(slide, "GetDrawingsByPlaceholderType", String(type));
+              if (Array.isArray(direct)) return direct;
+              return slideDrawings(slide).filter(function (drawing) {
+                return drawingPlaceholderType(drawing) === String(type);
+              });
+            }
+
+            function titlePlaceholder(slide) {
+              var titleDrawings = drawingsByPlaceholderType(slide, "title");
+              if (titleDrawings.length) return titleDrawings[0];
+              var centeredTitleDrawings = drawingsByPlaceholderType(slide, "ctrTitle");
+              return centeredTitleDrawings.length ? centeredTitleDrawings[0] : null;
             }
 
             function describeLayout(layout, masterIndex, layoutIndex, includeRaw, includeObjects) {
@@ -983,11 +1012,11 @@
             }
 
             function replaceShapeText(shape, args) {
-              var content = shape.GetContent();
+              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
               if (!content) throw new Error("目标图形不支持文本内容");
               if (typeof content.RemoveAllElements === "function") content.RemoveAllElements();
               var paragraph = Api.CreateParagraph();
-              paragraph.SetJc(String(args.align || "left"));
+              if (hasOwn(args, "align")) paragraph.SetJc(String(args.align));
               var run = paragraph.AddText(String(args.text || ""));
               applyRunFormat(run, args);
               content.Push(paragraph);
@@ -1207,6 +1236,7 @@
                 rotationDeg: safeCall(drawing, "GetRotation"),
                 flipH: safeCall(drawing, "GetFlipH"),
                 flipV: safeCall(drawing, "GetFlipV"),
+                placeholderType: drawingPlaceholderType(drawing),
               };
               if (kind === "shape") {
                 info.shapeType = geometry ? safeCall(geometry, "GetPreset") : null;
@@ -2149,6 +2179,46 @@
                     }
                   }
                   if (args.backgroundColor) newSlide.SetBackground(Api.CreateSolidFill(apiColor(args.backgroundColor)));
+                  var titleObject = null;
+                  var titleSource = null;
+                  if (args.title) {
+                    var titlePlacement = String(args.titlePlacement || "auto");
+                    var placedTitle = titlePlacement === "textbox"
+                      ? null
+                      : titlePlaceholder(newSlide);
+                    if (!placedTitle && titlePlacement === "placeholder") {
+                      var titlePlaceholderError = new Error("当前版式没有可用的标题占位符");
+                      titlePlaceholderError.code = "TITLE_PLACEHOLDER_NOT_FOUND";
+                      throw titlePlaceholderError;
+                    }
+                    if (placedTitle) {
+                      var placeholderTitleArgs = { text: args.title };
+                      if (hasOwn(args, "titleFontSize")) {
+                        placeholderTitleArgs.fontSize = args.titleFontSize;
+                      }
+                      replaceShapeText(placedTitle, placeholderTitleArgs);
+                      titleSource = "placeholder";
+                    } else {
+                      placedTitle = createTextBox(newSlide, {
+                        text: args.title,
+                        xMm: 15,
+                        yMm: 15,
+                        widthMm: 220,
+                        heightMm: 30,
+                        fontSize: hasOwn(args, "titleFontSize") ? args.titleFontSize : 28,
+                        bold: true,
+                      });
+                      titleSource = "textbox";
+                    }
+                    var titleDrawings = slideDrawings(newSlide);
+                    var placedTitleIndex = titleDrawings.indexOf(placedTitle);
+                    titleObject = describeDrawing(
+                      placedTitle,
+                      placedTitleIndex,
+                      false,
+                      false
+                    );
+                  }
                   presentation.AddSlide(newSlide, args.index ? Math.max(0, Number(args.index) - 1) : undefined);
                   var newSlideNumber = null;
                   for (var newSlideIndex = 0; newSlideIndex < slideCount(); newSlideIndex += 1) {
@@ -2157,25 +2227,6 @@
                       break;
                     }
                   }
-                  var titleObject = null;
-                  if (args.title) createTextBox(newSlide, {
-                    text: args.title,
-                    xMm: 15,
-                    yMm: 15,
-                    widthMm: 220,
-                    heightMm: 30,
-                    fontSize: args.titleFontSize || 28,
-                    bold: true,
-                  });
-                  if (args.title) {
-                    var titleDrawings = slideDrawings(newSlide);
-                    titleObject = describeDrawing(
-                      titleDrawings[titleDrawings.length - 1],
-                      titleDrawings.length - 1,
-                      false,
-                      false
-                    );
-                  }
                   changed += 1;
                   results.push({
                     name: call.name,
@@ -2183,6 +2234,7 @@
                     slideCount: slideCount(),
                     layout: locateLayout(safeCall(newSlide, "GetLayout"), false),
                     titleObject: titleObject,
+                    titleSource: titleSource,
                   });
                   break;
                 }

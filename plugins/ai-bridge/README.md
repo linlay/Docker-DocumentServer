@@ -8,7 +8,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.6.0`
+- Version: `0.8.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -58,7 +58,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.6.0-rev5",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.8.0-rev5",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -126,7 +126,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.8.0-rev5"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -155,7 +155,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.6.0-rev5"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.8.0-rev5"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -373,9 +373,9 @@ therefore remains deterministic and does not create an undo entry.
 | PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | PPT animation/show | Slide transitions including Morph, object entrance/emphasis/exit/path effects, ordering/timing/interactive triggers, loop and live slideshow control |
 | XLSX workbook/cells | Strict JSON scalar values and exact-shape matrices, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
-| XLSX data | Sort, filter, structured/basic table modes, conditional formats, complete validation readback/drop-downs, and pivot tables |
+| XLSX data | Sort, filter, capability-gated structured tables, ordinary `rangeStyle` regions, conditional formats, complete validation readback/drop-downs, and pivot tables |
 | XLSX objects/view | Images, shapes, text boxes, OLE, links, comments, freeze panes, protected ranges, and documented page-layout properties |
-| XLSX charts | Inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
+| XLSX charts | Capability-gated inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | Fill model | None, solid, linear gradient, radial gradient, pattern, and lossless `raw` Office JSON replay |
 
 `sheets_set_formula` accepts either one formula string or a two-dimensional
@@ -393,9 +393,15 @@ Gradient stops use `position: 0..100`; `angleDeg` is in degrees. Object and
 chart indexes are zero-based. All physical dimensions use millimetres and line
 widths use points. `inspectObjects` and `inspectCharts` can return the exact
 `raw` JSON accepted by later `fill: { raw }` or `line: { raw }` updates.
-Spreadsheet chart deletion delegates to `ApiDrawing.Delete()`, which is a paid
-capability in some ONLYOFFICE Docs editions; unsupported editions return an
-explicit error without reporting a false deletion.
+The ready state publishes read-only runtime facts under
+`capabilities.runtime` and `capabilities.features.sheets`. Callers must use
+those facts instead of assuming that an API exists because its tool is present
+in the static contract. Unknown advanced capabilities are treated as
+unsupported. For example, `nativeTables.create: false` forbids structured-table
+creation, while `rangeStyleTables.create: true` permits ordinary header, border,
+alignment, fill, and optional-filter formatting without creating a ListObject.
+Likewise, unsupported chart deletion is removed from `capabilities.tools` and
+is rejected before mutation if a caller bypasses discovery.
 
 For a real exported-file regression, open a fresh localhost XLSX capability page
 and run:
@@ -408,7 +414,7 @@ AI_BRIDGE_LIVE_FILE=<uuid>.xlsx \
 The dedicated live test requires `AI_BRIDGE_LIVE_FILE` and fails rather than
 silently skipping when it is absent. It checks persisted OOXML fills,
 differential styles, conditional formatting, formulas, validation XML, screen
-gridlines, frozen panes, page orientation, strict values, and the basic-table
+gridlines, frozen panes, page orientation, strict values, and the `rangeStyle`
 result.
 
 ## Persistence service
@@ -431,6 +437,13 @@ your own storage service. A successful force-save does not reload the live
 editor: the WebSocket session already contains the saved version, so the
 current page, selection, and scroll position remain intact. Undo and redo still
 reload because they replace the canonical file with another stored version.
+
+Every save result includes `persistence.status`: `saved` confirms a new file
+version, `no_changes` confirms that the editor had nothing pending, and
+`failed` is the only persistence failure. The legacy `persisted` boolean is
+retained for one compatibility cycle. CommandService error `4` is reported as
+`no_changes` only when the editor and storage state confirm that there was
+nothing to save.
 
 Imported assets are content-addressed under the example file directory's
 private `.ai-bridge-images` folder. Download signatures bind the asset,

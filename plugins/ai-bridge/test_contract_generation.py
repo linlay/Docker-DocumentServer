@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -41,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 155)
-        self.assertEqual(self.contract["version"], "0.6.0")
+        self.assertEqual(self.contract["version"], "0.8.0")
         self.assertEqual(self.contract["protocolVersion"], 1)
         for name, schema in tools.items():
             with self.subTest(tool=name):
@@ -52,6 +53,15 @@ class ContractGenerationTests(unittest.TestCase):
                     {"standard", "image"},
                 )
                 self.assertIsInstance(schema["x-semanticValidators"], list)
+
+    def test_slides_add_slide_exposes_generic_title_placement(self) -> None:
+        schema = self.contract["tools"]["slide"]["slides_add_slide"]
+        title_placement = schema["properties"]["titlePlacement"]
+        self.assertEqual(
+            title_placement["enum"],
+            ["auto", "placeholder", "textbox"],
+        )
+        self.assertEqual(title_placement["default"], "auto")
 
     def test_local_generated_projections_are_current_and_idempotent(self) -> None:
         command = [
@@ -123,14 +133,14 @@ class ContractGenerationTests(unittest.TestCase):
     def test_check_logic_detects_a_manual_generated_file_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             projection = Path(directory) / "contract.generated.json"
-            expected = '{"version":"0.6.0"}\n'
+            expected = '{"version":"0.8.0"}\n'
             projection.write_text(expected, encoding="utf-8")
             self.assertEqual(
                 sync_contract.drifted_paths({projection: expected}),
                 [],
             )
             projection.write_text(
-                expected.replace("0.6.0", "manual-edit"),
+                expected.replace("0.8.0", "manual-edit"),
                 encoding="utf-8",
             )
             self.assertEqual(
@@ -236,6 +246,84 @@ class ContractGenerationTests(unittest.TestCase):
             "xlValidateList",
         )
         self.assertEqual(changes[0]["kind"], "enumCanonicalization")
+
+    def test_chart_type_contract_accepts_supported_values_and_rejects_unknowns(self) -> None:
+        supported = self.contract["$defs"]["chartType"]["enum"]
+        self.assertIn("bar", supported)
+        self.assertIn("column", supported)
+        self.assertNotIn("columnClustered", supported)
+        for chart_type in supported:
+            with self.subTest(chart_type=chart_type):
+                normalized, _ = copilot_server.require_valid_editor_tool_calls(
+                    "cell",
+                    [
+                        {
+                            "name": "sheets_add_chart",
+                            "arguments": {
+                                "range": "A1:B3",
+                                "type": chart_type,
+                            },
+                        }
+                    ],
+                )
+                self.assertEqual(
+                    normalized[0]["arguments"]["type"],
+                    chart_type,
+                )
+
+        with self.assertRaises(copilot_server.BridgeError) as caught:
+            copilot_server.require_valid_editor_tool_calls(
+                "cell",
+                [
+                    {
+                        "name": "sheets_add_chart",
+                        "arguments": {
+                            "range": "A1:B3",
+                            "type": "columnClustered",
+                        },
+                    }
+                ],
+            )
+        self.assertEqual(caught.exception.status, 422)
+        self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+        validation_error = caught.exception.details["validationErrors"][0]
+        self.assertEqual(validation_error["path"], "arguments.type")
+        self.assertEqual(validation_error["received"], "columnClustered")
+        self.assertEqual(validation_error["allowedValues"], supported)
+        self.assertEqual(validation_error["suggestedValues"], ["column"])
+        self.assertEqual(caught.exception.details["completedToolCalls"], 0)
+        self.assertFalse(caught.exception.details["partialMutationPossible"])
+
+    def test_sheet_chart_runtime_guard_matches_contract(self) -> None:
+        chart_type = self.contract["$defs"]["chartType"]
+        aliases = chart_type["x-aliases"]
+        expected_canonicals = [
+            value for value in chart_type["enum"] if value not in aliases
+        ]
+        bridge_source = (BRIDGE_ROOT / "bridges" / "sheets-bridge.js").read_text(
+            encoding="utf-8"
+        )
+        canonical_block = re.search(
+            r"var CHART_TYPE_CANONICALS = \[(.*?)\n\s*\];",
+            bridge_source,
+            re.DOTALL,
+        )
+        alias_block = re.search(
+            r"var CHART_TYPE_ALIASES = \{(.*?)\n\s*\};",
+            bridge_source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(canonical_block)
+        self.assertIsNotNone(alias_block)
+        runtime_canonicals = re.findall(r'"([^"]+)"', canonical_block.group(1))
+        runtime_aliases = dict(
+            re.findall(
+                r"([A-Za-z][A-Za-z0-9]*):\s*\"([^\"]+)\"",
+                alias_block.group(1),
+            )
+        )
+        self.assertEqual(runtime_canonicals, expected_canonicals)
+        self.assertEqual(runtime_aliases, aliases)
 
     def test_standard_and_image_argument_limits_share_one_rule(self) -> None:
         standard_calls = [

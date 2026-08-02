@@ -51,6 +51,9 @@ Copy `.env.copilot.example` to `.env` and set:
   `http://127.0.0.1:*` are the only supported wildcard-port forms; wildcard
   domains are rejected. When a cross-origin parent is configured, CSP replaces
   the conflicting `X-Frame-Options: SAMEORIGIN` restriction.
+- `DOCUMENT_PPTX_TEMPLATE_PATH` optionally selects a different valid PPTX
+  template. The Compose default is the generic blank template mounted with
+  ai-bridge; this setting does not affect DOCX or XLSX templates.
 - `DOCUMENT_ADMIN_USERNAME` and `DOCUMENT_ADMIN_PASSWORD`.
 - `DOCUMENT_MAX_SAVE_BYTES` to the maximum accepted callback output size.
 
