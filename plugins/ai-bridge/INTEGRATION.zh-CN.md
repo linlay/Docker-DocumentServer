@@ -1,5 +1,10 @@
 # ai-bridge 0.1.0 外部工程接入说明
 
+> **document-hub v1 提示：**下文的 UUID `/copilot-api/*` 示例属于旧本机演示，
+> 在加固部署中已经关闭。v1 只复用浏览器插件和私网 Python Relay；页面注册、保存和
+> 外部 HTTPX 执行均由同级仓库 `document-hub` 鉴权代理，attach 必须使用 60 秒一次性
+> 配对码。生产接入请阅读 `../../../document-hub/docs/httpx-ai-bridge.zh-CN.md`。
+
 `ai-bridge` 是无界面 ONLYOFFICE 插件。外部 Copilot 负责理解自然语言并生成受控 JSON 工具调用；插件只负责在当前文档中执行白名单操作、保存和版本回退，不执行模型生成的 JavaScript。
 
 ## 先选择接入方式
@@ -153,47 +158,33 @@ Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给�
 
 popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是两个互不引用的独立标签页、两台设备或两个后端进程，浏览器 `postMessage` 无法直接连接；此时由你的业务后端通过已认证 HTTP/WebSocket 把命令投递到仍打开编辑器的宿主页，再调用 `window.aiBridge`。本插件有意不使用 `BroadcastChannel`，以免同源打开多个文档时把一条编辑命令广播到错误文档。
 
-### 本机示例：HTTPX 调用当前编辑器
+### document-hub v1：HTTPX 调用当前编辑器
 
-仓库自带的 `localhost` demo 实现了上述 HTTP 后端投递通道，供 Agent
-Platform builtin HTTPX 联调。它不是面向公网的生产鉴权方案：
+生产 v1 由同级 `document-hub` 负责用户认证、文档 ACL、审计、幂等和 Relay
+选择。HTTPX 只携带外部系统签发的用户 JWT，不处理 editor JWT、配对码、attach、
+binding token、`X-AI-Binding`、sessionId 或 documentKey。
 
-`host-bridge.js` 默认只在回环地址启动 HTTP Relay。非回环编辑器页面必须在加载
-`host-bridge.js` 前显式设置 `window.aiBridgeOptions.httpRelay = true`，并且页面
-必须使用 HTTPS；仓库自带的第一方 `editor-shell.js` 已完成这个显式开启，同时保留
-已有的 `aiBridgeOptions`。显式设置为 `false` 时仍会禁用 Relay。
+1. owner/editor 在 `document-hub` 门户打开文档；`host-bridge.js` 通过门户代理注册
+   Relay 并持续发送认证心跳。
+2. HTTPX 每次请求发送 `Authorization: Bearer <user-jwt>` 和 URL 中的文档 ID。
+3. `document-hub` 验证 JWT、本地 `ACTIVE` 用户、文档状态和实时 owner/editor ACL。
+4. 服务自动选择同一用户、同一文档最近 90 秒有心跳的编辑页面，再以私有服务 secret
+   调用 Relay 的 `/bridge/internal/*`。
+5. 页面通过 poll 取得命令，调用 `window.aiBridge`，再把执行结果返回。
 
-1. 浏览器中的 `host-bridge.js` 使用当前 ONLYOFFICE editor JWT 注册长轮询会话。
-2. 真实 `/docx|xlsx|pptx/<uuid>` 页面在浏览器中打开并保持 Relay ready 后，
-   HTTPX 只把准确 UUID 文件名和配置中固定的 editor type 传给
-   `POST /copilot-api/bridge/attach`。
-3. attach 最多等待 10 秒，选择相同文件名、文件类型和 editor type 的最新 ready
-   权威 Relay，并签发 12 小时 `ai-bridge-binding` token。HTTPX 把它保存到当前
-   Chat state；Agent 不接触 editor JWT、binding token、sessionId 或 documentKey。
-4. Bridge token 绑定准确的文件名、文件类型、编辑器类型与用户，但不绑定保存后会
-   变化的 `document.key`。服务端只把命令投递给该稳定身份最后注册的权威页面。
-5. 新页面注册后会接管旧 Relay；旧页面停止 Relay，但不循环刷新，也不影响手工编辑。
-6. 浏览器页面通过 `/bridge/poll` 取得命令，调用 `window.aiBridge`，再通过
-   `/bridge/result` 返回真实执行结果。
+公开接口只有：
 
-同一稳定文档身份始终只有最后注册的一个活跃 Relay。HTTPX 请求携带的
-`sessionId` 只是兼容性提示，服务端以 binding token 为边界，把命令路由到当前
-权威 session；旧 ID 不会导致 `SESSION_NOT_AUTHORITATIVE`。最新页面关闭后不会
-自动恢复旧页面，AI 返回 `NO_ACTIVE_EDITOR`；刷新旧页面会生成新的 session 并
-重新接管。
+- `GET /api/v1/documents/{documentId}/ai/session`
+- `POST /api/v1/documents/{documentId}/ai/validate`
+- `POST /api/v1/documents/{documentId}/ai/execute`
 
-旧的 `/documents/editor` 与 `/bridge/sessions` 继续兼容已有客户端，但不再暴露
-在 Agent HTTPX 配置和技能中。刷新页面或 force-save 后继续复用现有 binding
-token；只有 token 明确过期、无效或目标文档改变时才重新 attach。
+`execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、`undo`、`redo`、
+`getState`。写操作使用稳定 `requestId`；超时重试必须复用相同 ID 和完全相同的
+请求体。DocumentServer 在宿主机默认只绑定 `127.0.0.1:8091`，Relay 3001 只在
+Docker 私网开放。浏览器页面必须保持打开；无在线页面时门户返回
+`409 editor_not_online`。
 
-`bridge/execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、
-`undo`、`redo`、`getState`。`inspect` 只检查调用包装；写操作应先调用真实
-`POST /copilot-api/bridge/validate` 预检，并使用稳定 `requestId`；
-超时重试必须复用同一 ID。compose 将 `8088/8443` 绑定到 `127.0.0.1`，浏览器
-页面必须保持打开。生产系统应换成自身的用户鉴权、权限校验、审计与 WebSocket/HTTP
-投递服务。
-
-Word、Slides 和 Sheets 批次可先调用只读 `POST /copilot-api/bridge/validate`。
+Word、Slides 和 Sheets 批次可先调用只读的文档级 `/ai/validate`。
 它与执行共用参数归一化、schema 和语义校验，但不向编辑器投递命令，也不创建
 history point 或保存文件。
 机器可读策略位于 `public-api.json` 的 `inputNormalization.word`：标准字段优先于

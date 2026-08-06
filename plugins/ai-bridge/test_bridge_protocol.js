@@ -263,6 +263,8 @@ function createHarness(options = {}) {
       getEditorConfig: () => editorConfig,
       clientOrigins: options.clientOrigins || [],
       httpRelay: options.httpRelay,
+      persistenceBaseUrl: options.persistenceBaseUrl,
+      editorSessionId: options.editorSessionId,
     },
   });
   if (typeof options.hostFetch === "function") {
@@ -1994,6 +1996,37 @@ test("save/history/undo/redo controls are public and use the persistence service
     "/copilot-api/undo",
     "/copilot-api/redo",
   ]);
+});
+
+test("document-hub mode routes persistence through the authenticated host page", async () => {
+  const requests = [];
+  const harness = createHarness({
+    persistenceBaseUrl: "/api/v1/editor-relay/persistence",
+    editorSessionId: "editor-session-1234567890",
+    hostFetch: async (requestPath, requestOptions) => {
+      requests.push({ path: requestPath, options: requestOptions });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, accepted: true, persisted: true, status: "saved" }),
+      };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+  await harness.hostWindow.aiBridge.word.appendParagraph(
+    { text: "saved through hub" },
+    { timeoutMs: 1000, requestId: "hub-persistence" },
+  );
+
+  assert.deepEqual(requests.map(request => request.path), [
+    "/api/v1/editor-relay/persistence/checkpoint",
+    "/api/v1/editor-relay/persistence/forcesave",
+  ]);
+  assert.equal(harness.servicePaths.length, 0);
+  for (const request of requests) {
+    assert.equal(request.options.credentials, "same-origin");
+    assert.match(request.options.headers["X-Editor-Session-ID"] || "", /./);
+  }
 });
 
 test("reusing a completed requestId returns the cached response without applying an edit twice", async () => {

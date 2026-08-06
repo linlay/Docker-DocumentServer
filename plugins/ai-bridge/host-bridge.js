@@ -320,6 +320,7 @@
       userId: editorConfig.editorConfig && editorConfig.editorConfig.user && editorConfig.editorConfig.user.id || "",
       interfaceLanguage: editorConfig.editorConfig && editorConfig.editorConfig.lang || "",
       region: editorConfig.editorConfig && editorConfig.editorConfig.region || "",
+      persistenceViaHost: Boolean(persistenceBaseURL()),
     };
   }
 
@@ -471,6 +472,10 @@
       window.location.reload();
       return;
     }
+    if (message.type === "service-request") {
+      handlePluginService(message);
+      return;
+    }
     if (message.type !== "result" || !message.requestId) return;
 
     const request = pending.get(message.requestId);
@@ -542,12 +547,12 @@
     }
     let response;
     try {
-      response = await window.fetch("/copilot-api/images/import", {
+      response = await window.fetch(`${imageRelayBaseURL()}/import`, {
         method: "POST",
         credentials: "same-origin",
         headers: {
+          ...httpRelayHeaders(),
           "Authorization": `Bearer ${token}`,
-          "Content-Type": "application/json",
         },
         body: JSON.stringify({ source }),
       });
@@ -569,10 +574,12 @@
       );
     }
     const asset = body.asset;
+    const configuredAssetPrefix = `${imageRelayBaseURL()}/`;
     if (
       !asset
       || typeof asset.path !== "string"
-      || !/^\/copilot-api\/images\/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)\?token=/.test(asset.path)
+      || !asset.path.startsWith(configuredAssetPrefix)
+      || !/\/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)(?:\?token=|$)/.test(asset.path)
       || !Number.isFinite(Number(asset.widthPx))
       || !Number.isFinite(Number(asset.heightPx))
       || Number(asset.widthPx) <= 0
@@ -588,12 +595,16 @@
       || window.location.hostname === "::1"
       || window.location.hostname === "[::1]"
     );
-    if (loopbackHost) {
+    if (loopbackHost || asset.assetToken) {
       let assetResponse;
       try {
         assetResponse = await window.fetch(asset.path, {
           method: "GET",
           credentials: "same-origin",
+          headers: {
+            ...httpRelayHeaders(),
+            ...(asset.assetToken ? {"X-AI-Asset-Token": String(asset.assetToken)} : {}),
+          },
         });
       } catch (error) {
         throw bridgeError("IMAGE_FETCH_FAILED", "无法读取已导入的图片资源");
@@ -1052,11 +1063,98 @@
     return configured === true && window.location.protocol === "https:";
   }
 
-  async function httpRelayPost(path, payload) {
-    const response = await window.fetch(`/copilot-api/bridge/${path}`, {
+  function httpRelayBaseURL() {
+    const configured = window.aiBridgeOptions && window.aiBridgeOptions.relayBaseUrl;
+    return String(configured || "/copilot-api/bridge").replace(/\/$/, "");
+  }
+
+  function imageRelayBaseURL() {
+    const configured = window.aiBridgeOptions && window.aiBridgeOptions.imageBaseUrl;
+    return String(configured || "/copilot-api/images").replace(/\/$/, "");
+  }
+
+  function persistenceBaseURL() {
+    const configured = window.aiBridgeOptions && window.aiBridgeOptions.persistenceBaseUrl;
+    if (typeof configured !== "string" || !configured) return "";
+    try {
+      const resolved = new URL(configured, window.location.href);
+      if (resolved.origin !== window.location.origin || resolved.search || resolved.hash) return "";
+      return resolved.pathname.replace(/\/$/, "");
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function httpRelayHeaders() {
+    const headers = { "Content-Type": "application/json" };
+    const options = window.aiBridgeOptions || {};
+    if (options.editorSessionId) {
+      headers["X-Editor-Session-ID"] = String(options.editorSessionId);
+    }
+    const csrf = String(document.cookie || "").split("; ").find(function (item) {
+      return item.indexOf("document_hub_csrf=") === 0;
+    });
+    if (csrf) {
+      headers["X-CSRF-Token"] = decodeURIComponent(csrf.split("=").slice(1).join("="));
+    }
+    return headers;
+  }
+
+  async function persistenceRequest(action, requestId, payload) {
+    const baseURL = persistenceBaseURL();
+    const allowed = new Set(["checkpoint", "forcesave", "history", "undo", "redo"]);
+    if (!baseURL || !allowed.has(action)) {
+      throw bridgeError("PERSISTENCE_NOT_AVAILABLE", "当前页面没有可用的文档持久化服务");
+    }
+    const response = await window.fetch(`${baseURL}/${encodeURIComponent(action)}`, {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      headers: httpRelayHeaders(),
+      body: JSON.stringify({ requestId, payload: payload || {} }),
+    });
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw bridgeError("PERSISTENCE_INVALID_RESPONSE", `文档持久化服务返回了无效响应：${response.status}`);
+    }
+    if (!response.ok || !body || body.ok === false || body.error) {
+      const error = body && body.error || {};
+      throw bridgeError(
+        error.code || "PERSISTENCE_FAILED",
+        error.message || `文档持久化请求失败：${response.status}`,
+        { details: error.details },
+      );
+    }
+    return body;
+  }
+
+  async function handlePluginService(message) {
+    const requestId = message.serviceRequestId;
+    if (
+      message.service !== "persistence"
+      || typeof requestId !== "string"
+      || !REQUEST_ID_PATTERN.test(requestId)
+    ) {
+      return;
+    }
+    try {
+      const result = await persistenceRequest(message.action, requestId, message.payload);
+      send({ type: "service-response", serviceRequestId: requestId, result });
+    } catch (error) {
+      send({
+        type: "service-response",
+        serviceRequestId: requestId,
+        error: serializedError(error, requestId),
+      });
+    }
+  }
+
+  async function httpRelayPost(path, payload) {
+    const response = await window.fetch(`${httpRelayBaseURL()}/${path}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: httpRelayHeaders(),
       body: JSON.stringify(payload),
     });
     let body;
@@ -1184,7 +1282,7 @@
         payload.resumeToken = resumeToken;
       } else {
         const token = editorToken();
-        if (!token) throw bridgeError("EDITOR_TOKEN_REQUIRED", "当前编辑器没有可用于 HTTP Relay 的绑定凭证");
+        if (!token) throw bridgeError("EDITOR_TOKEN_REQUIRED", "当前编辑器没有可用于 HTTP Relay 注册的 editor JWT");
         payload.editorToken = token;
       }
       const response = await httpRelayPost("register", payload);
@@ -1260,9 +1358,15 @@
 
     window.addEventListener("beforeunload", function () {
       stopped = true;
-      if (!relayKey || !window.navigator || typeof window.navigator.sendBeacon !== "function") return;
+      if (!relayKey || typeof window.fetch !== "function") return;
       const body = JSON.stringify({ sessionId: httpSessionId, relayKey });
-      window.navigator.sendBeacon("/copilot-api/bridge/unregister", body);
+      window.fetch(`${httpRelayBaseURL()}/unregister`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: httpRelayHeaders(),
+        body,
+        keepalive: true,
+      }).catch(function () {});
     });
     loop();
   }

@@ -16,20 +16,19 @@ services:
           echo "DOCUMENTSERVER_HTTP_PORT must be between 1 and 65535" >&2;
           exit 64;
         fi &&
+        JWT_SECRET="$$(tr -d '\r\n' < /run/secrets/onlyoffice_jwt_secret)" &&
+        if [ "$${#JWT_SECRET}" -lt 32 ]; then
+          echo "ONLYOFFICE JWT secret must contain at least 32 bytes" >&2;
+          exit 78;
+        fi &&
+        export JWT_SECRET &&
         install -d -o ds -g ds -m 0755
         /var/lib/onlyoffice/copilot/documents &&
         /usr/bin/printf '%s\0'
-        "COPILOT_API_BASE=$${COPILOT_API_BASE}"
-        "COPILOT_API_KEY=$${COPILOT_API_KEY}"
-        "COPILOT_MODEL=$${COPILOT_MODEL}"
         "JWT_SECRET=$${JWT_SECRET}"
-        "DOCUMENT_PUBLIC_ORIGIN=$${DOCUMENT_PUBLIC_ORIGIN}"
-        "DOCUMENT_FRAME_ANCESTORS=$${DOCUMENT_FRAME_ANCESTORS}"
-        "DOCUMENT_STORAGE_DIR=$${DOCUMENT_STORAGE_DIR}"
-        "DOCUMENT_PPTX_TEMPLATE_PATH=$${DOCUMENT_PPTX_TEMPLATE_PATH}"
-        "DOCUMENT_MAX_SAVE_BYTES=$${DOCUMENT_MAX_SAVE_BYTES}"
-        "DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"
-        "DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"
+        "AI_RELAY_INTERNAL_SECRET_FILE=/run/secrets/ai_relay_internal_secret"
+        "COPILOT_BIND_ADDRESS=0.0.0.0"
+        "ALLOW_LEGACY_UUID_ATTACH=false"
         > /run/onlyoffice-copilot.env &&
         chown ds:ds /run/onlyoffice-copilot.env &&
         install -m 0644 /opt/onlyoffice-copilot/nginx-document-app.conf
@@ -40,25 +39,21 @@ services:
         exec /app/ds/run-document-server.sh
     ports:
       # Bind only on host loopback; the host reverse proxy owns public ingress.
-      - "127.0.0.1:${DOCUMENTSERVER_HTTP_PORT:-8088}:80"
-      - "127.0.0.1:${DOCUMENTSERVER_HTTPS_PORT:-8443}:443"
+      - "127.0.0.1:${DOCUMENTSERVER_HTTP_PORT:-8091}:80"
     environment:
-      DOCUMENTSERVER_HTTP_PORT: "${DOCUMENTSERVER_HTTP_PORT:-8088}"
+      DOCUMENTSERVER_HTTP_PORT: "${DOCUMENTSERVER_HTTP_PORT:-8091}"
       EXAMPLE_ENABLED: "false"
       PLUGINS_ENABLED: "${ONLYOFFICE_DEFAULT_PLUGINS_ENABLED:-false}"
       JWT_ENABLED: "true"
-      JWT_SECRET: "${ONLYOFFICE_JWT_SECRET:-onlyoffice-copilot-local}"
       JWT_IN_BODY: "true"
-      COPILOT_API_BASE: "${COPILOT_API_BASE:-https://api.openai.com/v1}"
-      COPILOT_API_KEY: "${COPILOT_API_KEY:-}"
-      COPILOT_MODEL: "${COPILOT_MODEL:-}"
-      DOCUMENT_PUBLIC_ORIGIN: "${DOCUMENT_PUBLIC_ORIGIN:-http://localhost:8088}"
-      DOCUMENT_FRAME_ANCESTORS: "${DOCUMENT_FRAME_ANCESTORS:-'self'}"
-      DOCUMENT_STORAGE_DIR: "/var/lib/onlyoffice/copilot/documents"
-      DOCUMENT_PPTX_TEMPLATE_PATH: "${DOCUMENT_PPTX_TEMPLATE_PATH:-/var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/templates/new.pptx}"
-      DOCUMENT_MAX_SAVE_BYTES: "${DOCUMENT_MAX_SAVE_BYTES:-209715200}"
-      DOCUMENT_ADMIN_USERNAME: "${DOCUMENT_ADMIN_USERNAME:-}"
-      DOCUMENT_ADMIN_PASSWORD: "${DOCUMENT_ADMIN_PASSWORD:-}"
+      COPILOT_BIND_ADDRESS: "0.0.0.0"
+      AI_RELAY_INTERNAL_SECRET_FILE: "/run/secrets/ai_relay_internal_secret"
+      ALLOW_LEGACY_UUID_ATTACH: "false"
+    expose:
+      - "3001"
+    secrets:
+      - onlyoffice_jwt_secret
+      - ai_relay_internal_secret
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/info/info.json"]
       interval: 30s
@@ -71,8 +66,6 @@ services:
       - onlyoffice_logs:/var/log/onlyoffice
       - onlyoffice_lib:/var/lib/onlyoffice
       - onlyoffice_fonts:/usr/share/fonts/truetype/custom
-      # Keep generated documents in a project-visible host directory.
-      - "./data/documents:/var/lib/onlyoffice/copilot/documents"
       - "./plugins/ai-bridge:/var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}:ro"
       - "./plugins/ai-bridge/nginx-document-app.conf:/opt/onlyoffice-copilot/nginx-document-app.conf:ro"
       - "./plugins/ai-bridge/copilot_server.py:/opt/onlyoffice-copilot/copilot_server.py:ro"
@@ -84,3 +77,9 @@ volumes:
   onlyoffice_logs:
   onlyoffice_lib:
   onlyoffice_fonts:
+
+secrets:
+  onlyoffice_jwt_secret:
+    file: "${ONLYOFFICE_JWT_SECRET_FILE:?set ONLYOFFICE_JWT_SECRET_FILE}"
+  ai_relay_internal_secret:
+    file: "${AI_RELAY_INTERNAL_SECRET_FILE:?set AI_RELAY_INTERNAL_SECRET_FILE}"

@@ -1,5 +1,14 @@
 # ai-bridge
 
+> **document-hub v1 notice:** the UUID-based `/copilot-api/*` application and
+> public Relay described in legacy sections below are disabled in the hardened
+> deployment. v1 keeps the browser plugin but routes registration, persistence,
+> and external HTTPX execution through `document-hub`. HTTPX sends the same
+> externally issued user JWT on document-scoped `session`, `validate`, and
+> `execute` requests; there is no public attach, pairing code, binding token, or
+> `X-AI-Binding`. See
+> `../../../document-hub/docs/httpx-ai-bridge.zh-CN.md` in the sibling repository.
+
 `ai-bridge` is a headless ONLYOFFICE plugin. It has no panel, toolbar, chat UI,
 or model client. An external Copilot page sends allow-listed JSON tool calls to
 the plugin, and the plugin executes them in the current document with the
@@ -18,7 +27,7 @@ Plugin identity:
 External Copilot UI
   -> window.aiBridge (same-page API)
      OR client-sdk.js -> allow-listed postMessage relay
-     OR local HTTPX -> editor-JWT-bound /copilot-api/bridge relay
+     OR HTTPX -> document-hub user-JWT API -> private /bridge/internal relay
   -> host-bridge.js
   -> POST /copilot-api/images/import (image tools only)
   -> instance-bound postMessage protocol
@@ -134,14 +143,11 @@ Copilot iframe or popup can use the allow-listed `client-sdk.js` relay described
 in `INTEGRATION.zh-CN.md`. A completely unrelated tab or process with no window
 reference must relay its command through the application's authenticated
 WebSocket or HTTP channel. The bundled localhost demo now includes such an HTTP
-Relay for HTTPX: the browser registers with its signed ONLYOFFICE editor JWT,
-while HTTPX calls the atomic attach endpoint with only the UUID file name and
-fixed editor type. The Relay selects the latest ready authoritative page and
-stores the resulting scoped 12-hour binding token in HTTPX's chat state. HTTPX
-never receives the editor JWT. The binding follows the authoritative browser
-session for the same file, editor type, and user even when a save rotates
-`document.key`. The compose ports are bound to `127.0.0.1`; this demo Relay is
-not a production authentication design.
+Relay internally. In the hardened v1 deployment, HTTPX calls `document-hub`
+with a user JWT and document ID. `document-hub` verifies the local ACTIVE user
+and live owner/editor ACL, chooses that user's newest online editor page, and
+uses a private service secret when forwarding to the Relay. HTTPX never receives
+the ONLYOFFICE editor JWT, Relay key, or internal session credential.
 
 The bundled Nginx example keeps the pre-existing demo storage identity
 `185.199.108.133` stable after the loopback bind, so previously uploaded local
@@ -467,29 +473,20 @@ document identity, and expiry; URLs last 15 minutes and files are retained for
 24 hours. DOCX/PPTX insertion embeds the media into the document package, so
 the saved file does not depend on the temporary URL.
 
-## Local HTTPX Relay
+## document-hub HTTPX Relay
 
-The localhost example exposes these additional endpoints:
+Production v1 exposes these document-scoped endpoints from `document-hub`:
 
-- `POST /copilot-api/editor-config/anonymous`: verifies an existing short-lived
-  editor JWT and reissues it with the browser-stable local guest identity.
-- `POST /copilot-api/bridge/register`: the open editor page registers with its
-  signed editor JWT and receives an opaque page relay key.
-- `POST /copilot-api/bridge/poll` and `POST /copilot-api/bridge/result`: the
-  registered page receives commands and returns `window.aiBridge` results.
-- `POST /copilot-api/bridge/attach`: accepts a UUID `fileName` and fixed
-  `editorType`, waits up to 10 seconds for the latest matching ready
-  authoritative Relay, and issues a scoped 12-hour binding token.
-- `GET /copilot-api/bridge/sessions`: accepts an editor JWT or bridge binding
-  token, returns the single authoritative page, and renews the scoped binding
-  token. This endpoint remains for compatibility.
-- `POST /copilot-api/bridge/execute`: accepts the binding token, validates the
-  requested tool against the authoritative page capabilities, treats a supplied
-  browser `sessionId` as a compatibility hint, and waits for the live result.
-- `POST /copilot-api/bridge/validate`: accepts a Word, Slides, or Sheets `toolCalls`
-  batch and runs the same editor-specific normalization, schema, and semantic
-  validation as execution without polling the editor, creating a history point,
-  or saving the document.
+- `GET /api/v1/documents/{documentId}/ai/session`
+- `POST /api/v1/documents/{documentId}/ai/validate`
+- `POST /api/v1/documents/{documentId}/ai/execute`
+
+All three use `Authorization: Bearer <user-jwt>`. There is no public attach or
+binding endpoint. The `/bridge/internal/*` endpoints in this Relay remain an
+implementation detail, accept only the private `AI_RELAY_INTERNAL_SECRET`, and
+must not be exposed by Nginx. Legacy standalone Relay functions remain in the
+source for compatibility testing but are disabled when
+`ALLOW_LEGACY_UUID_ATTACH=false`.
 
 Word arguments are normalized before validation and idempotency fingerprinting.
 The machine-readable policy is `inputNormalization.word` in `public-api.json`;
@@ -499,21 +496,13 @@ variants are converted to the contract value. Responses may include
 implicit string-to-number/boolean coercion, suspicious twips-as-points values,
 and targetless destructive or pagination operations remain errors.
 
-The real `/docx/<uuid>`, `/xlsx/<uuid>`, or `/pptx/<uuid>` capability page must
-remain open in a browser with its Relay ready. The caller then sends the exact
-UUID file name to `bridge/attach`; no editor JWT, session ID, document key, or
-user identity is needed by the Agent. The issued `ai-bridge-binding` token is
-scoped to the exact file name, file type, editor type, and user. The older
-`documents/editor` plus `bridge/sessions` exchange remains available to
-compatible clients but is not part of the HTTPX Agent surface. A newly
-registered page for the stable identity supersedes the previous Relay session,
-so a storage-version change does not require another attach. Stable `requestId`
-values deduplicate retries across page handoff. The most recently registered
-page is the only active Relay. The superseded page stops polling permanently
-but remains available for manual editing. Closing the newest page does not
-restore an old page: Agent calls return `NO_ACTIVE_EDITOR` until a page is
-refreshed or opened and registers a new session. The editor page must remain
-open.
+The real document-hub editor page must remain open with its Relay ready. For
+every request, the caller sends the document ID in the URL and the same user JWT
+in `Authorization`. `document-hub` automatically selects that user's most
+recent live editor page for the document. Stable `requestId` values deduplicate
+retries. Closing the selected page, revoking the ACL, disabling the user, or
+losing the heartbeat makes subsequent Agent calls fail until an authorized page
+is opened again. No public Relay credential is returned to HTTPX.
 
 `host-bridge.js` enables this HTTP Relay by default only on loopback hosts.
 A non-loopback editor must set `window.aiBridgeOptions.httpRelay = true` before
@@ -532,47 +521,29 @@ not exposed by `getState()` or the sessions response.
 
 ## Local run
 
+The production-style v1 stack is started from the sibling repository and brings
+up both `document-hub` and this DocumentServer image/configuration:
+
 ```bash
-cp .env.copilot.example .env
-# Edit .env and replace the JWT and administrator placeholder secrets.
+cd /Users/linlay/Project/document-hub
+docker compose --env-file .env -f deploy/compose.yml up -d --build
+```
+
+This publishes the portal on host loopback port 8090 and DocumentServer on 8091.
+The internal Relay is exposed only to the private Docker network on port 3001.
+Create and open documents through the portal; the old unauthenticated
+`/new-docx`, `/new-xlsx`, `/new-pptx`, UUID editor, and Basic Auth admin routes
+are disabled.
+
+For isolated plugin development only, `docker-compose.copilot.yml` can start the
+DocumentServer container by itself on `127.0.0.1:8091`:
+
+```bash
 docker compose -f docker-compose.copilot.yml up -d
 ```
 
-`DOCUMENTSERVER_HTTP_PORT` and `DOCUMENTSERVER_HTTPS_PORT` are bound to the
-host loopback interface. If the HTTP port changes, set
-`DOCUMENT_PUBLIC_ORIGIN` to the matching browser-facing origin. For example, a
-host Nginx deployment can use port `11981` with:
-
-```dotenv
-DOCUMENTSERVER_HTTP_PORT=11981
-DOCUMENTSERVER_HTTPS_PORT=11980
-DOCUMENT_PUBLIC_ORIGIN=https://docs.example.com
-```
-
-DocumentServer downloads and callbacks always use the container's port 80
-loopback route, so they do not depend on the published host port. Until a
-public hostname is configured, an SSH-tunnel deployment can use
-`DOCUMENT_PUBLIC_ORIGIN=http://127.0.0.1:11981`.
-
-Create a document without authentication:
-
-```bash
-curl -X POST http://localhost:8088/new-docx
-curl -X POST http://localhost:8088/new-xlsx
-curl -X POST http://localhost:8088/new-pptx
-```
-
-Each response contains a UUID v4 file name and a capability URL such as
-`http://localhost:8088/docx/<uuid>`. Anyone who knows that URL can edit the
-document; there is no public list or recovery endpoint. The editor assigns a
-stable browser-local guest identity and loads ai-bridge automatically.
-
-Open `http://localhost:8088/admin/` to view UUID documents after Basic Auth.
-Set `DOCUMENT_PUBLIC_ORIGIN` when the public origin is not
-`http://localhost:8088`. The bundled sample application is disabled with
-`EXAMPLE_ENABLED=false`; legacy named files are neither listed nor migrated.
-See `../../COPILOT_PRODUCTION.md` for the production request flow, persistence,
-security boundaries, and operational checks.
+That isolated service intentionally has no document business UI; use it only as
+a target for integration tests or connect it to `document-hub`.
 
 ## Files
 

@@ -237,6 +237,8 @@
     queue: Promise.resolve(),
     inFlight: new Set(),
     responseCache: new Map(),
+    servicePending: new Map(),
+    serviceSequence: 0,
     announceTimer: null,
     defaultDocumentLanguageApplied: false,
     runtimeCapabilities: null,
@@ -782,6 +784,7 @@
       userId: typeof config.userId === "string" ? config.userId : "",
       interfaceLanguage: typeof config.interfaceLanguage === "string" ? config.interfaceLanguage : "",
       region: typeof config.region === "string" ? config.region : "",
+      persistenceViaHost: config.persistenceViaHost === true,
     };
   }
 
@@ -1044,7 +1047,29 @@
     });
   }
 
+  function hostServiceRequest(action, payload) {
+    state.serviceSequence += 1;
+    const serviceRequestId = `service:${Date.now()}:${state.serviceSequence}`;
+    return new Promise(function (resolve, reject) {
+      const timeout = window.setTimeout(function () {
+        state.servicePending.delete(serviceRequestId);
+        reject(bridgeError("PERSISTENCE_TIMEOUT", "等待文档门户确认保存超时", { action }));
+      }, 45000);
+      state.servicePending.set(serviceRequestId, { resolve, reject, timeout });
+      publish({
+        type: "service-request",
+        service: "persistence",
+        serviceRequestId,
+        action,
+        payload,
+      });
+    });
+  }
+
   async function apiRequest(path, payload) {
+    if (state.config.persistenceViaHost) {
+      return hostServiceRequest(path, payload);
+    }
     const response = await fetch(`/copilot-api/${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1328,6 +1353,23 @@
     }
     if (message.type === "host-ready") {
       publishReady();
+      return;
+    }
+    if (message.type === "service-response") {
+      const serviceRequestId = message.serviceRequestId;
+      const pending = state.servicePending.get(serviceRequestId);
+      if (!pending) return;
+      state.servicePending.delete(serviceRequestId);
+      window.clearTimeout(pending.timeout);
+      if (message.error) {
+        pending.reject(bridgeError(
+          message.error.code || "PERSISTENCE_FAILED",
+          message.error.message || "文档门户持久化操作失败",
+          message.error.details,
+        ));
+      } else {
+        pending.resolve(message.result || {});
+      }
       return;
     }
     if (message.type === "execute" || message.type === "control") processRequest(message);

@@ -31,6 +31,7 @@ from typing import Any
 
 
 PORT = int(os.environ.get("COPILOT_PORT", "3001"))
+COPILOT_BIND_ADDRESS = os.environ.get("COPILOT_BIND_ADDRESS", "127.0.0.1")
 LOCAL_CONFIG = "/etc/onlyoffice/documentserver/local.json"
 DOCUMENT_STORAGE_ROOT = "/var/lib/onlyoffice/copilot/documents"
 DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
@@ -141,6 +142,58 @@ BRIDGE_COMMANDS: dict[str, dict[str, Any]] = {}
 BRIDGE_REQUESTS: dict[tuple[tuple[str, str, str, str], str], str] = {}
 BRIDGE_REJECTED_CREDENTIALS: dict[str, dict[str, Any]] = {}
 BRIDGE_GENERATION = 0
+
+
+def configured_secret(name: str) -> str:
+    direct = os.environ.get(name, "").strip()
+    if direct:
+        return direct
+    path = os.environ.get(f"{name}_FILE", "").strip()
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            return stream.read().strip()
+    except OSError:
+        return ""
+
+
+AI_RELAY_INTERNAL_SECRET = configured_secret("AI_RELAY_INTERNAL_SECRET")
+ALLOW_LEGACY_UUID_ATTACH = os.environ.get("ALLOW_LEGACY_UUID_ATTACH", "false").lower() == "true"
+
+V1_RELAY_POST_PATHS = frozenset(
+    {
+        "/bridge/register",
+        "/bridge/poll",
+        "/bridge/result",
+        "/bridge/unregister",
+        "/bridge/internal/execute",
+        "/bridge/internal/validate",
+        "/bridge/internal/drop",
+        "/bridge/internal/images/import",
+        # Keep these paths reachable only so they can return their explicit 410
+        # migration response instead of reviving UUID/binding authorization.
+        "/bridge/attach",
+        "/bridge/execute",
+        "/bridge/validate",
+    }
+)
+
+
+def v1_relay_route_allowed(method: str, path: str) -> bool:
+    if ALLOW_LEGACY_UUID_ATTACH:
+        return True
+    normalized = path.rstrip("/") or "/"
+    if method == "POST":
+        return normalized in V1_RELAY_POST_PATHS
+    if method == "GET":
+        return (
+            normalized == "/health"
+            or normalized == "/bridge/sessions"
+            or normalized.startswith("/bridge/contract/")
+            or normalized.startswith("/images/")
+        )
+    return False
 
 
 def tool(name: str, description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -2207,6 +2260,62 @@ def bridge_authorization(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     if bridge_token_scope(token) == "ai-bridge-binding":
         return verify_bridge_binding_token(token)
     return verify_editor_jwt(token)
+
+
+def require_internal_relay(handler: BaseHTTPRequestHandler) -> None:
+    value = handler.headers.get("Authorization", "")
+    supplied = value.removeprefix("Bearer ").strip() if value.startswith("Bearer ") else ""
+    if (
+        not AI_RELAY_INTERNAL_SECRET
+        or not supplied
+        or not hmac.compare_digest(supplied, AI_RELAY_INTERNAL_SECRET)
+    ):
+        raise BridgeError(
+            401,
+            "INTERNAL_RELAY_AUTH_REQUIRED",
+            "内部 Relay 认证失败",
+        )
+
+
+def internal_bridge_claims(session_id: Any) -> dict[str, Any]:
+    requested = str(session_id or "").strip()
+    with BRIDGE_CONDITION:
+        bridge_cleanup_locked()
+        session = BRIDGE_SESSIONS.get(requested)
+        if session is None or not session.get("authoritative"):
+            raise BridgeError(401, "INVALID_RELAY_SESSION", "浏览器 Relay 会话已经失效")
+        file_name, file_type, editor_type, user_id = session["identity"]
+        return {
+            "documentKey": session["documentKey"],
+            "fileName": file_name,
+            "fileType": file_type,
+            "editorType": editor_type,
+            "userId": user_id,
+            "authKind": "binding",
+        }
+
+
+def internal_bridge_drop(session_id: Any) -> dict[str, Any]:
+    requested = str(session_id or "").strip()
+    with BRIDGE_CONDITION:
+        session = BRIDGE_SESSIONS.pop(requested, None)
+        if session is None:
+            return {"ok": True, "removed": False}
+        identity = session.get("identity")
+        if identity and BRIDGE_AUTHORITATIVE.get(identity) == requested:
+            del BRIDGE_AUTHORITATIVE[identity]
+        for command_id in list(session.get("queue") or []):
+            command = BRIDGE_COMMANDS.get(command_id)
+            if command is not None and command.get("response") is None:
+                command["response"] = {
+                    "ok": False,
+                    "error": {
+                        "code": "SESSION_REVOKED",
+                        "message": "编辑器 Relay 会话已撤销",
+                    },
+                }
+        BRIDGE_CONDITION.notify_all()
+        return {"ok": True, "removed": True}
 
 
 def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -4402,6 +4511,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed_path = urllib.parse.urlsplit(self.path)
+        request_path = parsed_path.path.rstrip("/") or "/"
+        if not v1_relay_route_allowed("GET", request_path):
+            json_response(
+                self,
+                410,
+                {
+                    "code": "LEGACY_BUSINESS_DISABLED",
+                    "error": "旧文档业务接口已迁移到 document-hub",
+                },
+            )
+            return
+        if not ALLOW_LEGACY_UUID_ATTACH and request_path != "/bridge/sessions":
+            try:
+                require_internal_relay(self)
+            except BridgeError as error:
+                self.log_bridge_error(error)
+                json_response(self, error.status, error.payload())
+                return
         storage_request = DOCUMENT_STORAGE_PATH_PATTERN.fullmatch(
             parsed_path.path
         )
@@ -4498,6 +4625,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if request_path.startswith("/images/"):
             try:
+                require_internal_relay(self)
                 asset_id = request_path.removeprefix("/images/")
                 token = urllib.parse.parse_qs(parsed_path.query).get("token", [""])[0]
                 asset_path, mime_type = verify_image_asset(asset_id, token)
@@ -4518,6 +4646,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if request_path == "/bridge/sessions":
             try:
+                if not ALLOW_LEGACY_UUID_ATTACH:
+                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧会话发现接口已关闭")
                 json_response(self, 200, bridge_sessions(bridge_authorization(self)))
             except BridgeError as error:
                 self.log_bridge_error(error)
@@ -4530,6 +4660,13 @@ class Handler(BaseHTTPRequestHandler):
         request_path = ""
         try:
             parsed_path = urllib.parse.urlsplit(self.path)
+            request_path = parsed_path.path.rstrip("/") or "/"
+            if not v1_relay_route_allowed("POST", request_path):
+                raise BridgeError(
+                    410,
+                    "LEGACY_BUSINESS_DISABLED",
+                    "旧文档业务接口已迁移到 document-hub",
+                )
             storage_request = DOCUMENT_STORAGE_PATH_PATTERN.fullmatch(
                 parsed_path.path
             )
@@ -4600,7 +4737,14 @@ class Handler(BaseHTTPRequestHandler):
             max_bytes = (
                 IMAGE_MAX_REQUEST_BYTES
                 if request_path
-                in ("/images/import", "/bridge/execute", "/bridge/validate")
+                in (
+                    "/images/import",
+                    "/bridge/execute",
+                    "/bridge/validate",
+                    "/bridge/internal/execute",
+                    "/bridge/internal/validate",
+                    "/bridge/internal/images/import",
+                )
                 else 2_000_000
             )
             content_type = (
@@ -4627,24 +4771,59 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             if request_path == "/bridge/register":
+                require_internal_relay(self)
                 json_response(self, 200, bridge_register(payload))
                 return
             if request_path == "/bridge/poll":
+                require_internal_relay(self)
                 json_response(self, 200, bridge_poll(payload))
                 return
             if request_path == "/bridge/result":
+                require_internal_relay(self)
                 json_response(self, 200, bridge_result(payload))
                 return
             if request_path == "/bridge/unregister":
+                require_internal_relay(self)
                 json_response(self, 200, bridge_unregister(payload))
                 return
+            if request_path == "/bridge/internal/execute":
+                require_internal_relay(self)
+                claims = internal_bridge_claims(payload.get("relaySessionId"))
+                payload["sessionId"] = payload.get("relaySessionId")
+                json_response(self, 200, bridge_execute(payload, claims))
+                return
+            if request_path == "/bridge/internal/validate":
+                require_internal_relay(self)
+                claims = internal_bridge_claims(payload.get("relaySessionId"))
+                payload["sessionId"] = payload.get("relaySessionId")
+                json_response(self, 200, bridge_validate(payload, claims))
+                return
+            if request_path == "/bridge/internal/drop":
+                require_internal_relay(self)
+                json_response(self, 200, internal_bridge_drop(payload.get("relaySessionId")))
+                return
+            if request_path == "/bridge/internal/images/import":
+                require_internal_relay(self)
+                claims = internal_bridge_claims(payload.get("relaySessionId"))
+                json_response(self, 200, import_image(payload.get("source"), claims))
+                return
             if request_path == "/bridge/attach":
+                if not ALLOW_LEGACY_UUID_ATTACH:
+                    raise BridgeError(
+                        410,
+                        "LEGACY_UUID_ATTACH_DISABLED",
+                        "UUID attach 已关闭，请使用 document-hub 的用户 JWT 文档接口",
+                    )
                 json_response(self, 200, bridge_attach(payload))
                 return
             if request_path == "/bridge/execute":
+                if not ALLOW_LEGACY_UUID_ATTACH:
+                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧 binding 接口已关闭")
                 json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
                 return
             if request_path == "/bridge/validate":
+                if not ALLOW_LEGACY_UUID_ATTACH:
+                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧 binding 接口已关闭")
                 json_response(self, 200, bridge_validate(payload, bridge_authorization(self)))
                 return
             if request_path == "/editor-config/anonymous":
@@ -4749,6 +4928,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"ONLYOFFICE Copilot API listening on 127.0.0.1:{PORT}", flush=True)
+    if COPILOT_BIND_ADDRESS not in {"127.0.0.1", "0.0.0.0"}:
+        raise RuntimeError("COPILOT_BIND_ADDRESS must be 127.0.0.1 or 0.0.0.0")
+    if COPILOT_BIND_ADDRESS == "0.0.0.0" and not AI_RELAY_INTERNAL_SECRET:
+        raise RuntimeError("AI_RELAY_INTERNAL_SECRET(_FILE) is required for private-network Relay")
+    server = ThreadingHTTPServer((COPILOT_BIND_ADDRESS, PORT), Handler)
+    print(f"ONLYOFFICE Copilot API listening on {COPILOT_BIND_ADDRESS}:{PORT}", flush=True)
     server.serve_forever()

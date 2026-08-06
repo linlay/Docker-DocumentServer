@@ -51,18 +51,10 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertNotIn("proxy_pass http://example", config)
         self.assertNotIn("sub_filter", config)
         self.assertNotIn("/__document_editor/", config)
-        self.assertIn("location ^~ /__document_storage/ {", config)
-        self.assertIn("allow 127.0.0.1;", config)
-        self.assertIn("deny all;", config)
-        self.assertIn("proxy_pass http://127.0.0.1:3001/documents/storage/;", config)
-        self.assertIn("location ^~ /__document_files/ {", config)
-        self.assertIn("internal;", config)
-        self.assertIn("location = /admin {", config)
-        self.assertIn("location = /admin/ {", config)
-        self.assertIn("location = /health {", config)
-        self.assertNotIn("return 308 /admin/;", config)
+        self.assertNotIn("location", config)
+        self.assertIn("document-hub", config)
 
-    def test_gateway_exposes_three_create_and_capability_routes(self):
+    def test_gateway_exposes_no_legacy_document_routes(self):
         config_path = os.path.join(
             os.path.dirname(__file__),
             "nginx-document-app.conf",
@@ -70,13 +62,43 @@ class ContractAlignmentTests(unittest.TestCase):
         with open(config_path, encoding="utf-8") as stream:
             config = stream.read()
 
-        self.assertIn("docx|xlsx|pptx", config)
-        self.assertIn("^/new-(docx|xlsx|pptx)$", config)
-        self.assertIn("location = /documents/editor", config)
-        self.assertIn("proxy_pass http://127.0.0.1:3001;", config)
-        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", config)
+        self.assertNotIn("docx|xlsx|pptx", config)
+        self.assertNotIn("proxy_pass", config)
 
-    def test_compose_passes_document_admin_environment_to_copilot_process(self):
+    def test_v1_private_relay_allows_only_internal_bridge_routes(self):
+        with mock.patch.object(copilot_server, "ALLOW_LEGACY_UUID_ATTACH", False):
+            for path in (
+                "/new-docx",
+                "/admin",
+                "/documents/editor",
+                "/documents/storage/callback/docx/example",
+                "/chat",
+                "/forcesave",
+                "/editor-config/anonymous",
+            ):
+                with self.subTest(path=path):
+                    self.assertFalse(
+                        copilot_server.v1_relay_route_allowed("POST", path)
+                    )
+            for path in (
+                "/bridge/register",
+                "/bridge/internal/execute",
+                "/bridge/internal/validate",
+                "/bridge/internal/drop",
+                "/bridge/internal/images/import",
+            ):
+                with self.subTest(path=path):
+                    self.assertTrue(
+                        copilot_server.v1_relay_route_allowed("POST", path)
+                    )
+            self.assertFalse(
+                copilot_server.v1_relay_route_allowed("GET", "/admin")
+            )
+            self.assertTrue(
+                copilot_server.v1_relay_route_allowed("GET", "/health")
+            )
+
+    def test_compose_passes_only_private_relay_environment_to_copilot_process(self):
         base_dir = os.path.dirname(__file__)
         with open(
             os.path.join(base_dir, "..", "..", "docker-compose.copilot.yml"),
@@ -94,19 +116,25 @@ class ContractAlignmentTests(unittest.TestCase):
         ) as stream:
             runner = stream.read()
 
-        self.assertIn('"DOCUMENT_ADMIN_USERNAME=$${DOCUMENT_ADMIN_USERNAME}"', compose)
-        self.assertIn('"DOCUMENT_ADMIN_PASSWORD=$${DOCUMENT_ADMIN_PASSWORD}"', compose)
-        self.assertIn(
-            '"DOCUMENT_FRAME_ANCESTORS=$${DOCUMENT_FRAME_ANCESTORS}"',
-            compose,
-        )
-        self.assertIn('"DOCUMENT_STORAGE_DIR=$${DOCUMENT_STORAGE_DIR}"', compose)
+        self.assertNotIn("DOCUMENT_ADMIN_USERNAME", compose)
+        self.assertNotIn("DOCUMENT_ADMIN_PASSWORD", compose)
+        self.assertNotIn("DOCUMENT_STORAGE_DIR", compose)
+        self.assertNotIn("COPILOT_API_KEY", compose)
         self.assertIn("> /run/onlyoffice-copilot.env", compose)
         self.assertIn('EXAMPLE_ENABLED: "false"', compose)
-        self.assertIn(
+        self.assertNotIn(
             '"./data/documents:/var/lib/onlyoffice/copilot/documents"',
             compose,
         )
+        self.assertIn('AI_RELAY_INTERNAL_SECRET_FILE: "/run/secrets/ai_relay_internal_secret"', compose)
+        self.assertIn('ALLOW_LEGACY_UUID_ATTACH: "false"', compose)
+        self.assertIn('COPILOT_BIND_ADDRESS: "0.0.0.0"', compose)
+        self.assertIn(
+            '"AI_RELAY_INTERNAL_SECRET_FILE=/run/secrets/ai_relay_internal_secret"',
+            compose,
+        )
+        self.assertIn("ONLYOFFICE JWT secret must contain at least 32 bytes", compose)
+        self.assertNotIn("onlyoffice-copilot-local", compose)
         self.assertNotIn("nginx-copilot-loopback.conf", compose)
         self.assertIn(
             "command=/bin/bash /opt/onlyoffice-copilot/run-copilot.sh",
@@ -2435,7 +2463,7 @@ class HttpRelayTests(unittest.TestCase):
             "http-session:attach-after-refresh",
         )
 
-    def test_attach_http_endpoint_is_post_only_and_no_store(self):
+    def test_legacy_uuid_attach_is_disabled_by_default(self):
         file_name = self.create_document_file(
             "99999999-9999-4999-8999-999999999999",
             "docx",
@@ -2445,64 +2473,10 @@ class HttpRelayTests(unittest.TestCase):
             "document-key-http",
             file_name=file_name,
         )
-        server = copilot_server.ThreadingHTTPServer(
-            ("127.0.0.1", 0),
-            copilot_server.Handler,
-        )
-        worker = threading.Thread(target=server.serve_forever, daemon=True)
-        worker.start()
-        self.addCleanup(server.server_close)
-        self.addCleanup(server.shutdown)
-
-        connection = http.client.HTTPConnection(
-            "127.0.0.1",
-            server.server_address[1],
-            timeout=2,
-        )
-        self.addCleanup(connection.close)
-        body = json.dumps(
-            {"fileName": file_name, "editorType": "word"}
-        ).encode("utf-8")
-        connection.request(
-            "POST",
-            "/bridge/attach",
-            body=body,
-            headers={"Content-Type": "application/json"},
-        )
-        response = connection.getresponse()
-        payload = json.loads(response.read().decode("utf-8"))
-
-        self.assertEqual(response.status, 200)
-        self.assertEqual(response.getheader("Cache-Control"), "no-store")
-        self.assertTrue(payload["bindingToken"])
-        self.assertEqual(payload["session"]["sessionId"], "http-session:attach-http")
-
-        connection.close()
-        connection = http.client.HTTPConnection(
-            "127.0.0.1",
-            server.server_address[1],
-            timeout=2,
-        )
-        connection.request("GET", "/bridge/attach")
-        get_response = connection.getresponse()
-        get_response.read()
-        self.assertEqual(get_response.status, 404)
-
-        connection.request(
-            "POST",
-            "/bridge/attach",
-            body=json.dumps({"fileName": file_name, "editorType": "word"}),
-            headers={"Content-Type": "text/plain"},
-        )
-        content_type_response = connection.getresponse()
-        content_type_payload = json.loads(
-            content_type_response.read().decode("utf-8")
-        )
-        self.assertEqual(content_type_response.status, 415)
-        self.assertEqual(
-            content_type_payload["error"]["code"],
-            "UNSUPPORTED_MEDIA_TYPE",
-        )
+        self.assertFalse(copilot_server.ALLOW_LEGACY_UUID_ATTACH)
+        claims = copilot_server.internal_bridge_claims("http-session:attach-http")
+        self.assertEqual(claims["authKind"], "binding")
+        self.assertEqual(claims["fileName"], file_name)
 
     def test_editor_jwt_binds_to_the_ready_local_guest_session(self):
         anonymous_id = "123e4567-e89b-42d3-a456-426614174000"
