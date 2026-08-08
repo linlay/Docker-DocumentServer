@@ -38,7 +38,7 @@ EDITOR_CONFIG = {
         "fileType": "docx",
         "prefix": "word_",
         "label": "Word",
-        "attachAction": "attach_current_word",
+        "sessionAction": "word_session",
         "unitKey": "word",
         "normalizationKey": "word",
     },
@@ -49,7 +49,7 @@ EDITOR_CONFIG = {
         "fileType": "pptx",
         "prefix": "slides_",
         "label": "Slides",
-        "attachAction": "attach_current_pptx",
+        "sessionAction": "slides_session",
         "unitKey": "slide",
         "normalizationKey": "slide",
     },
@@ -60,7 +60,7 @@ EDITOR_CONFIG = {
         "fileType": "xlsx",
         "prefix": "sheets_",
         "label": "Sheets",
-        "attachAction": "attach_current_xlsx",
+        "sessionAction": "sheets_session",
         "unitKey": "sheet",
         "normalizationKey": "sheet",
     },
@@ -797,6 +797,19 @@ def action_params(kind: str) -> list[str]:
     ]
 
 
+def document_path_source(action: str) -> str:
+    if action not in {"session", "validate", "execute"}:
+        raise ValueError(f"unsupported document action: {action}")
+    command = (
+        "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
+        "case \"$document_id\" in "
+        "????????-????-4???-[89ab]???-????????????) ;; *) exit 64 ;; esac; "
+        "case \"$document_id\" in *[!0-9a-f-]*) exit 64 ;; esac; "
+        f"printf \"%s\" \"/api/v1/documents/$document_id/ai/{action}\""
+    )
+    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
+
+
 def normalize_httpx_base_url(value: str | None) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(
@@ -826,14 +839,15 @@ def render_toml(
     config = EDITOR_CONFIG[editor]
     file_type = config["fileType"]
     label = config["label"]
-    attach_action = config["attachAction"]
+    session_action = config["sessionAction"]
     base_url = normalize_httpx_base_url(httpx_base_url)
     lines = [
         "version = 1",
         (
             "description = "
             + toml_string(
-                f"OFFICE {label} bridge；业务参数由 ai-bridge {contract['version']} 契约定义"
+                f"OFFICE {label} bridge（document-hub 匿名访问）；"
+                f"业务参数由 ai-bridge {contract['version']} 契约定义"
             )
         ),
         f"base_url = {toml_string(base_url)}",
@@ -846,67 +860,64 @@ def render_toml(
         f'User-Agent = "agent-platform-httpx/{config["site"]}"',
         "",
         "[actions.health]",
-        'description = "检查 OFFICE bridge 服务和当前契约身份"',
-        'path = "/copilot-api/health"',
+        'description = "检查 document-hub 服务健康状态"',
+        'path = "/health/ready"',
         "expect_status = 200",
         'extract_type = "jq"',
         'extract_expr = ".body"',
-        "",
-        "[actions.contract]",
-        f'description = "读取自包含 {label} bridge 契约"',
-        f'path = "/copilot-api/bridge/contract/{editor}"',
-        "expect_status = 200",
-        'extract_type = "jq"',
-        'extract_expr = ".body"',
-        "",
-        f"[actions.new_{file_type}]",
-        f'description = "匿名新建 UUID v4 {file_type.upper()} 文档"',
-        'method = "POST"',
-        f'path = "/new-{file_type}"',
-        "expect_status = 201",
-        'extract_type = "jq"',
-        'extract_expr = ".body"',
-        "",
-        f"[actions.{attach_action}]",
-        f'description = "将当前 Chat 绑定到 ready 的 {label} Relay，并返回契约身份"',
-        'method = "POST"',
-        'path = "/copilot-api/bridge/attach"',
-        (
-            "body = { fileName = { from = \"param\", key = \"file_name\" }, "
-            f'editorType = {{ from = "literal", value = "{editor}" }} }}'
-        ),
-        "expect_status = 200",
-        "params = [",
-        f'  {{ name = "file_name", type = "string", required = true, description = "规范 UUID v4 .{file_type} 文件名" }}',
-        "]",
-        'extract_type = "jq"',
-        (
-            "extract_expr = '''if (.body.ok == true and .body.session.ready == true "
-            f'and .body.session.editorType == "{editor}") then '
-            "{attached:true,ready:true,editorType:.body.session.editorType,"
-            "capabilities:(.body.session.capabilities//{}),"
-            "contractVersion:.body.contractVersion,"
-            "contractSha256:.body.contractSha256} "
-            f"else error(\"ATTACH_FAILED: {config['site']}\") end'''"
-        ),
-        "",
-        f"[actions.{attach_action}.save]",
-        '"auth.bridge" = \'\'\'"Bearer " + .body.bindingToken\'\'\'',
-        "",
-        "[actions.get_state]",
-        f'description = "读取当前 {label} bridge state 和契约身份"',
-        'method = "POST"',
-        'path = "/copilot-api/bridge/execute"',
-        'headers = { Authorization = { from = "state", scope = "chat", key = "auth.bridge" } }',
-        'body = { method = "getState", requestId = { from = "param", key = "request_id" }, timeoutMs = { from = "param", key = "timeout_ms", default = 30000 } }',
-        "expect_status = 200",
-        "params = [",
-        *action_params("control"),
-        "]",
-        'extract_type = "jq"',
-        'extract_expr = ".body | del(.session)"',
         "",
     ]
+    lines.extend(
+        [
+            f"[actions.new_{file_type}]",
+            f'description = "以固定 Platform 主体新建 {file_type.upper()} 文档"',
+            'method = "POST"',
+            'path = "/api/v1/documents"',
+            (
+                'body = { title = { from = "param", key = "title" }, '
+                f'fileType = {{ from = "literal", value = "{file_type}" }} }}'
+            ),
+            "expect_status = 201",
+            "params = [",
+            f'  {{ name = "title", type = "string", required = true, description = "新建 {file_type.upper()} 文档标题" }}',
+            "]",
+            'extract_type = "jq"',
+            (
+                "extract_expr = '''.body | . + "
+                f'{{documentId:.id,fileName:(.id + ".{file_type}"),'
+                f'editorUrl:("{base_url}/documents/" + .id)}}'
+                "'''"
+            ),
+            "",
+        ]
+    )
+    lines.extend(
+        [
+            f"[actions.{session_action}]",
+            f'description = "确认固定 Platform 主体在目标文档上存在在线 {label} 编辑器"',
+            f"path = {document_path_source('session')}",
+            "expect_status = 200",
+            'extract_type = "jq"',
+            (
+                "extract_expr = '''if (.body.online == true "
+                f'and .body.editorType == "{editor}") then .body '
+                f"else error(\"EDITOR_SESSION_UNAVAILABLE: {config['site']}\") end'''"
+            ),
+            "",
+            "[actions.get_state]",
+            f'description = "读取当前 {label} bridge state 和契约身份"',
+            'method = "POST"',
+            f"path = {document_path_source('execute')}",
+            'body = { method = "getState", requestId = { from = "param", key = "request_id" }, timeoutMs = { from = "param", key = "timeout_ms", default = 30000 } }',
+            "expect_status = 200",
+            "params = [",
+            *action_params("control"),
+            "]",
+            'extract_type = "jq"',
+            'extract_expr = ".body | del(.session)"',
+            "",
+        ]
+    )
     for name, schema in contract["tools"][editor].items():
         lines.extend(
             [
@@ -918,8 +929,7 @@ def render_toml(
                     )
                 ),
                 'method = "POST"',
-                'path = "/copilot-api/bridge/execute"',
-                'headers = { Authorization = { from = "state", scope = "chat", key = "auth.bridge" } }',
+                f"path = {document_path_source('execute')}",
                 (
                     'body = { method = "executeTool", '
                     f'name = "{name}", argumentsJson = {{ from = "param", key = "arguments_json" }}, '
@@ -937,9 +947,9 @@ def render_toml(
         )
     batch_name = f"execute_{config['prefix'].rstrip('_')}_batch"
     validate_name = f"validate_{config['prefix'].rstrip('_')}_batch"
-    for action_name, path, method, kind in (
-        (validate_name, "/copilot-api/bridge/validate", None, "validate"),
-        (batch_name, "/copilot-api/bridge/execute", "executeBatch", "batch"),
+    for action_name, document_action, method, kind in (
+        (validate_name, "validate", None, "validate"),
+        (batch_name, "execute", "executeBatch", "batch"),
     ):
         body_parts = []
         if method:
@@ -956,8 +966,7 @@ def render_toml(
                 f"[actions.{action_name}]",
                 f'description = "{label} 批量{"预检" if kind == "validate" else "执行"}"',
                 'method = "POST"',
-                f'path = "{path}"',
-                'headers = { Authorization = { from = "state", scope = "chat", key = "auth.bridge" } }',
+                f"path = {document_path_source(document_action)}",
                 "body = { " + ", ".join(body_parts) + " }",
                 "expect_status = 200",
                 "params = [",
@@ -974,8 +983,7 @@ def render_toml(
                 f"[actions.{control}]",
                 f'description = "执行 {label} {control} 控制操作"',
                 'method = "POST"',
-                'path = "/copilot-api/bridge/execute"',
-                'headers = { Authorization = { from = "state", scope = "chat", key = "auth.bridge" } }',
+                f"path = {document_path_source('execute')}",
                 (
                     f'body = {{ method = "{control}", '
                     'requestId = { from = "param", key = "request_id" }, '
@@ -1148,7 +1156,7 @@ def build_artifacts(
         scoped = scoped_contract(contract, editor, sha256)
         skill_root = (
             zenmind_root
-            / "skills-market"
+            / "skills-center"
             / config["skill"]
         )
         references = skill_root / "references"

@@ -7,9 +7,13 @@
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
+  const DOCUMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const EXTERNAL_CLIENT_SOURCE = "ai-bridge-client";
   const EXTERNAL_RELAY_SOURCE = "ai-bridge-relay";
   const currentScript = document.currentScript;
+  const configuredOptions = window.aiBridgeOptions && typeof window.aiBridgeOptions === "object"
+    ? window.aiBridgeOptions
+    : {};
   const pluginOrigin = currentScript
     ? new URL(currentScript.src, window.location.href).origin
     : window.location.origin;
@@ -59,158 +63,6 @@
 
   markStartup("hostScriptMs");
   window.addEventListener("load", function () { markStartup("windowLoadMs"); });
-
-  const editorUiStyleId = "ai-bridge-editor-ui-customization";
-  const editorQuickAccessId = "ai-bridge-quick-access";
-  const editorQuickAccessSlotSelectors = [
-    "#slot-btn-dt-save",
-    "#slot-btn-dt-undo",
-    "#slot-btn-dt-redo",
-  ];
-  const editorUiStyle = [
-    "#left-menu,",
-    "#view-left-menu,",
-    "#btn-go-back,",
-    "#id-btn-favorite,",
-    'li[data-layout-name="toolbar-collaboration"],',
-    'li[data-layout-name="toolbar-plugins"]',
-    "{ display: none !important; }",
-    "#left-menu {",
-    "  width: 0 !important;",
-    "  min-width: 0 !important;",
-    "  max-width: 0 !important;",
-    "  flex: 0 0 0 !important;",
-    "}",
-    'html[data-ai-bridge-compact-header="true"] #app-title {',
-    "  display: none !important;",
-    "  height: 0 !important;",
-    "  min-height: 0 !important;",
-    "  max-height: 0 !important;",
-    "  flex: 0 0 0 !important;",
-    "  overflow: hidden !important;",
-    "}",
-    `#${editorQuickAccessId} {`,
-    "  display: flex !important;",
-    "  align-items: center !important;",
-    "  flex: 0 0 auto !important;",
-    "  height: 27px !important;",
-    "}",
-  ].join("\n");
-
-  function hideDynamicEditorUi(editorDocument) {
-    const aiLinks = editorDocument.querySelectorAll('li.ribtab > a[data-title="AI"]');
-    for (const link of aiLinks) {
-      if (link.parentElement) link.parentElement.style.setProperty("display", "none", "important");
-    }
-  }
-
-  function compactEditorHeader(editorDocument) {
-    const rightGroup = editorDocument.querySelector("#box-right-btn-group");
-    const editModeGroup = editorDocument.querySelector('[data-layout-name="header-editMode"]');
-    const appTitle = editorDocument.querySelector("#app-title");
-    const quickAccessSlots = editorQuickAccessSlotSelectors.map(function (selector) {
-      return editorDocument.querySelector(selector);
-    });
-    if (
-      !rightGroup
-      || !editModeGroup
-      || !appTitle
-      || quickAccessSlots.some(function (slot) { return !slot; })
-    ) {
-      return false;
-    }
-
-    let changed = false;
-    let quickAccess = editorDocument.querySelector(`#${editorQuickAccessId}`);
-    if (!quickAccess) {
-      quickAccess = editorDocument.createElement("div");
-      quickAccess.id = editorQuickAccessId;
-      quickAccess.className = "hedset ai-bridge-quick-access";
-      quickAccess.setAttribute("role", "menubar");
-      quickAccess.setAttribute("aria-label", "Quick access toolbar");
-      changed = true;
-    }
-
-    const rightChildren = Array.from(rightGroup.children);
-    if (
-      quickAccess.parentElement !== rightGroup
-      || rightChildren.indexOf(quickAccess) + 1 !== rightChildren.indexOf(editModeGroup)
-    ) {
-      rightGroup.insertBefore(quickAccess, editModeGroup);
-      changed = true;
-    }
-
-    const currentSlots = Array.from(quickAccess.children);
-    if (
-      currentSlots.length !== quickAccessSlots.length
-      || quickAccessSlots.some(function (slot, index) { return currentSlots[index] !== slot; })
-    ) {
-      for (const slot of quickAccessSlots) quickAccess.appendChild(slot);
-      changed = true;
-    }
-
-    if (editorDocument.documentElement.dataset.aiBridgeCompactHeader !== "true") {
-      editorDocument.documentElement.dataset.aiBridgeCompactHeader = "true";
-      changed = true;
-    }
-    return changed;
-  }
-
-  function requestEditorResize(editorDocument) {
-    const editorWindow = editorDocument.defaultView;
-    if (!editorWindow) return;
-    editorWindow.requestAnimationFrame(function () {
-      editorWindow.dispatchEvent(new editorWindow.Event("resize"));
-    });
-  }
-
-  function customizeEditorFrame(frame) {
-    try {
-      const editorDocument = frame.contentDocument;
-      if (!editorDocument || !editorDocument.documentElement) return;
-      if (editorDocument.documentElement.dataset.aiBridgeUiCustomized === "true") return;
-      editorDocument.documentElement.dataset.aiBridgeUiCustomized = "true";
-
-      const style = editorDocument.createElement("style");
-      style.id = editorUiStyleId;
-      style.textContent = editorUiStyle;
-      (editorDocument.head || editorDocument.documentElement).appendChild(style);
-
-      hideDynamicEditorUi(editorDocument);
-      compactEditorHeader(editorDocument);
-      requestEditorResize(editorDocument);
-      const observer = new MutationObserver(function () {
-        hideDynamicEditorUi(editorDocument);
-        if (compactEditorHeader(editorDocument)) requestEditorResize(editorDocument);
-      });
-      observer.observe(editorDocument.documentElement, { childList: true, subtree: true });
-    } catch (error) {
-      // The bundled example is same-origin. Cross-origin integrations use the
-      // supported customization.layout settings injected into editorConfig.
-    }
-  }
-
-  function installEditorUiCustomization() {
-    const frame = document.querySelector('iframe[src*="/web-apps/apps/"]');
-    if (!frame) return false;
-    markStartup("editorFrameSeenMs");
-    frame.addEventListener("load", function () {
-      markStartup("editorFrameLoadMs");
-      customizeEditorFrame(frame);
-    });
-    if (frame.contentDocument && frame.contentDocument.readyState === "complete") {
-      markStartup("editorFrameLoadMs");
-    }
-    customizeEditorFrame(frame);
-    return true;
-  }
-
-  if (!installEditorUiCustomization()) {
-    const frameObserver = new MutationObserver(function () {
-      if (installEditorUiCustomization()) frameObserver.disconnect();
-    });
-    frameObserver.observe(document.documentElement, { childList: true, subtree: true });
-  }
 
   class AiBridgeError extends Error {
     constructor(code, message, options) {
@@ -263,8 +115,8 @@
   }
 
   function editorConfiguration() {
-    if (window.aiBridgeOptions && typeof window.aiBridgeOptions.getEditorConfig === "function") {
-      return window.aiBridgeOptions.getEditorConfig() || {};
+    if (typeof configuredOptions.getEditorConfig === "function") {
+      return configuredOptions.getEditorConfig() || {};
     }
     return typeof config === "object" && config ? config : {};
   }
@@ -309,9 +161,21 @@
     return typeof editorConfig.token === "string" ? editorConfig.token : "";
   }
 
+  function configuredDocumentId(editorConfig) {
+    const configured = [editorConfig.documentId, configuredOptions.documentId].find(function (value) {
+      return typeof value === "string" && DOCUMENT_ID_PATTERN.test(value);
+    });
+    if (configured) return configured;
+    const match = String(window.location.pathname || "").match(
+      /^\/documents\/([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/?$/,
+    );
+    return match ? match[1] : "";
+  }
+
   function currentConfig() {
     const editorConfig = editorConfiguration();
     return {
+      documentId: configuredDocumentId(editorConfig),
       documentKey: editorConfig.document && editorConfig.document.key || "",
       fileName: editorConfig.document && editorConfig.document.title || "",
       fileType: editorConfig.document && editorConfig.document.fileType || "",
@@ -327,6 +191,7 @@
   function publicContext() {
     const context = currentConfig();
     return {
+      documentId: context.documentId,
       documentKey: context.documentKey,
       fileName: context.fileName,
       fileType: context.fileType,
@@ -753,7 +618,7 @@
   }
 
   function configuredClientOrigins() {
-    const values = window.aiBridgeOptions && window.aiBridgeOptions.clientOrigins;
+    const values = configuredOptions.clientOrigins;
     if (!Array.isArray(values)) return [];
     return values.map(function (origin) {
       if (typeof origin !== "string" || !origin || origin === "*") return null;
@@ -1053,7 +918,7 @@
   window.AiBridgeError = window.AiBridgeError || AiBridgeError;
 
   function httpRelayEnabled() {
-    const configured = window.aiBridgeOptions && window.aiBridgeOptions.httpRelay;
+    const configured = configuredOptions.httpRelay;
     if (configured === false) return false;
     const loopback = window.location.hostname === "localhost"
       || window.location.hostname === "127.0.0.1"
@@ -1064,17 +929,17 @@
   }
 
   function httpRelayBaseURL() {
-    const configured = window.aiBridgeOptions && window.aiBridgeOptions.relayBaseUrl;
+    const configured = configuredOptions.relayBaseUrl;
     return String(configured || "/copilot-api/bridge").replace(/\/$/, "");
   }
 
   function imageRelayBaseURL() {
-    const configured = window.aiBridgeOptions && window.aiBridgeOptions.imageBaseUrl;
+    const configured = configuredOptions.imageBaseUrl;
     return String(configured || "/copilot-api/images").replace(/\/$/, "");
   }
 
   function persistenceBaseURL() {
-    const configured = window.aiBridgeOptions && window.aiBridgeOptions.persistenceBaseUrl;
+    const configured = configuredOptions.persistenceBaseUrl;
     if (typeof configured !== "string" || !configured) return "";
     try {
       const resolved = new URL(configured, window.location.href);
@@ -1087,9 +952,8 @@
 
   function httpRelayHeaders() {
     const headers = { "Content-Type": "application/json" };
-    const options = window.aiBridgeOptions || {};
-    if (options.editorSessionId) {
-      headers["X-Editor-Session-ID"] = String(options.editorSessionId);
+    if (configuredOptions.editorSessionId) {
+      headers["X-Editor-Session-ID"] = String(configuredOptions.editorSessionId);
     }
     const csrf = String(document.cookie || "").split("; ").find(function (item) {
       return item.indexOf("document_hub_csrf=") === 0;

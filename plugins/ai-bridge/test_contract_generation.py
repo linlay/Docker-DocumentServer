@@ -210,17 +210,17 @@ class ContractGenerationTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, second.stdout)
 
-    def test_httpx_toml_uses_configured_origin_and_skill_attach_names(
+    def test_httpx_toml_uses_anonymous_document_hub_transport(
         self,
     ) -> None:
         base_url = "https://office.example.test/"
         sha256 = sync_contract.contract_sha256(self.contract)
-        expected_attach_actions = {
-            "word": "attach_current_word",
-            "slide": "attach_current_pptx",
-            "cell": "attach_current_xlsx",
+        expected_session_actions = {
+            "word": "word_session",
+            "slide": "slides_session",
+            "cell": "sheets_session",
         }
-        for editor, attach_action in expected_attach_actions.items():
+        for editor, session_action in expected_session_actions.items():
             with self.subTest(editor=editor):
                 rendered = sync_contract.render_toml(
                     self.contract,
@@ -232,18 +232,24 @@ class ContractGenerationTests(unittest.TestCase):
                     'base_url = "https://office.example.test"',
                     rendered,
                 )
-                self.assertIn(f"[actions.{attach_action}]", rendered)
-                self.assertIn(f"[actions.{attach_action}.save]", rendered)
-                self.assertIn(
-                    f'editorType = {{ from = "literal", value = "{editor}" }}',
-                    rendered,
-                )
+                self.assertIn(f"[actions.{session_action}]", rendered)
+                self.assertNotIn("Authorization", rendered)
+                self.assertNotIn("AP_ACCESS_TOKEN", rendered)
+                self.assertNotIn("X-HTTPX-Direct-Secret", rendered)
+                self.assertIn("document_id=$DOCUMENT_HUB_DOCUMENT_ID", rendered)
+                self.assertIn('path = "/api/v1/documents"', rendered)
+                self.assertIn("/ai/session", rendered)
+                self.assertIn("/ai/validate", rendered)
+                self.assertIn("/ai/execute", rendered)
+                self.assertNotIn("/copilot-api/bridge/attach", rendered)
+                self.assertNotIn("auth.bridge", rendered)
+                self.assertNotIn("bindingToken", rendered)
                 site = sync_contract.EDITOR_CONFIG[editor]["site"]
                 self.assertIn(
                     f'User-Agent = "agent-platform-httpx/{site}"',
                     rendered,
                 )
-                self.assertIn(f"ATTACH_FAILED: {site}", rendered)
+                self.assertIn(f"EDITOR_SESSION_UNAVAILABLE: {site}", rendered)
 
     def test_skill_version_projection_preserves_frontmatter_and_body(self) -> None:
         source = (
@@ -288,7 +294,7 @@ class ContractGenerationTests(unittest.TestCase):
             zenmind_root = Path(directory)
             for config in sync_contract.EDITOR_CONFIG.values():
                 skill_root = (
-                    zenmind_root / "skills-market" / config["skill"]
+                    zenmind_root / "skills-center" / config["skill"]
                 )
                 skill_root.mkdir(parents=True)
                 (skill_root / "SKILL.md").write_text(
@@ -313,7 +319,7 @@ class ContractGenerationTests(unittest.TestCase):
             )
             for config in sync_contract.EDITOR_CONFIG.values():
                 skill_root = (
-                    zenmind_root / "skills-market" / config["skill"]
+                    zenmind_root / "skills-center" / config["skill"]
                 )
                 skill_path = skill_root / "SKILL.md"
                 toml_path = (

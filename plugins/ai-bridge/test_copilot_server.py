@@ -66,37 +66,48 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertNotIn("proxy_pass", config)
 
     def test_v1_private_relay_allows_only_internal_bridge_routes(self):
-        with mock.patch.object(copilot_server, "ALLOW_LEGACY_UUID_ATTACH", False):
-            for path in (
-                "/new-docx",
-                "/admin",
-                "/documents/editor",
-                "/documents/storage/callback/docx/example",
-                "/chat",
-                "/forcesave",
-                "/editor-config/anonymous",
-            ):
-                with self.subTest(path=path):
-                    self.assertFalse(
-                        copilot_server.v1_relay_route_allowed("POST", path)
-                    )
-            for path in (
-                "/bridge/register",
-                "/bridge/internal/execute",
-                "/bridge/internal/validate",
-                "/bridge/internal/drop",
-                "/bridge/internal/images/import",
-            ):
-                with self.subTest(path=path):
-                    self.assertTrue(
-                        copilot_server.v1_relay_route_allowed("POST", path)
-                    )
-            self.assertFalse(
-                copilot_server.v1_relay_route_allowed("GET", "/admin")
-            )
-            self.assertTrue(
-                copilot_server.v1_relay_route_allowed("GET", "/health")
-            )
+        for path in (
+            "/new-docx",
+            "/admin",
+            "/documents/editor",
+            "/documents/storage/callback/docx/example",
+            "/chat",
+            "/forcesave",
+            "/editor-config/anonymous",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(
+                    copilot_server.v1_relay_route_allowed("POST", path)
+                )
+        for path in (
+            "/bridge/register",
+            "/bridge/internal/execute",
+            "/bridge/internal/validate",
+            "/bridge/internal/drop",
+            "/bridge/internal/images/import",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(
+                    copilot_server.v1_relay_route_allowed("POST", path)
+                )
+        self.assertFalse(
+            copilot_server.v1_relay_route_allowed("GET", "/admin")
+        )
+        self.assertTrue(
+            copilot_server.v1_relay_route_allowed("GET", "/health")
+        )
+        for method, path in (
+            ("POST", "/bridge/direct/attach"),
+            ("GET", "/bridge/direct/health"),
+            ("POST", "/bridge/attach"),
+            ("POST", "/bridge/execute"),
+            ("POST", "/bridge/validate"),
+            ("GET", "/bridge/sessions"),
+        ):
+            with self.subTest(method=method, path=path):
+                self.assertFalse(
+                    copilot_server.v1_relay_route_allowed(method, path)
+                )
 
     def test_compose_passes_only_private_relay_environment_to_copilot_process(self):
         base_dir = os.path.dirname(__file__)
@@ -127,7 +138,6 @@ class ContractAlignmentTests(unittest.TestCase):
             compose,
         )
         self.assertIn('AI_RELAY_INTERNAL_SECRET_FILE: "/run/secrets/ai_relay_internal_secret"', compose)
-        self.assertIn('ALLOW_LEGACY_UUID_ATTACH: "false"', compose)
         self.assertIn('COPILOT_BIND_ADDRESS: "0.0.0.0"', compose)
         self.assertIn(
             '"AI_RELAY_INTERNAL_SECRET_FILE=/run/secrets/ai_relay_internal_secret"',
@@ -144,10 +154,10 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        revision = "0.1.0-rev1"
+        editor_revision = "0.1.0-rev1"
+        plugin_config_revision = "0.1.0-rev3"
         stale_revision = "0.1.0-rev0"
         paths = [
-            "config.json",
             "index.html",
             "README.md",
             "INTEGRATION.zh-CN.md",
@@ -156,9 +166,13 @@ class ContractAlignmentTests(unittest.TestCase):
             with self.subTest(path=relative_path):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
                     contents = stream.read()
-                self.assertIn(revision, contents)
+                self.assertIn(editor_revision, contents)
                 self.assertNotIn(stale_revision, contents)
-        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, revision)
+        with open(os.path.join(base_dir, "config.json"), encoding="utf-8") as stream:
+            plugin_config = stream.read()
+        self.assertIn(plugin_config_revision, plugin_config)
+        self.assertNotIn(stale_revision, plugin_config)
+        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, editor_revision)
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
@@ -1197,6 +1211,7 @@ class HttpRelayTests(unittest.TestCase):
         document_key="document-key-v1",
         expires_in=300,
         *,
+        document_id="",
         file_name="demo.docx",
         file_type="docx",
         editor_type="word",
@@ -1204,6 +1219,7 @@ class HttpRelayTests(unittest.TestCase):
     ):
         return copilot_server.sign_jwt(
             {
+                "documentId": document_id,
                 "document": {
                     "key": document_key,
                     "title": file_name,
@@ -1220,6 +1236,7 @@ class HttpRelayTests(unittest.TestCase):
         self,
         document_key="document-key-v1",
         *,
+        document_id="",
         file_name="demo.docx",
         file_type="docx",
         editor_type="word",
@@ -1235,6 +1252,7 @@ class HttpRelayTests(unittest.TestCase):
             "ready": ready,
             "editorType": editor_type,
             "context": {
+                "documentId": document_id,
                 "documentKey": document_key,
                 "fileName": file_name,
                 "fileType": file_type,
@@ -1252,6 +1270,7 @@ class HttpRelayTests(unittest.TestCase):
         session_id="http-session:test",
         document_key="document-key-v1",
         *,
+        document_id="",
         file_name="demo.docx",
         file_type="docx",
         editor_type="word",
@@ -1263,6 +1282,7 @@ class HttpRelayTests(unittest.TestCase):
                 "sessionId": session_id,
                 "editorToken": self.editor_token(
                     document_key,
+                    document_id=document_id,
                     file_name=file_name,
                     file_type=file_type,
                     editor_type=editor_type,
@@ -1270,6 +1290,7 @@ class HttpRelayTests(unittest.TestCase):
                 ),
                 "state": self.editor_state(
                     document_key,
+                    document_id=document_id,
                     file_name=file_name,
                     file_type=file_type,
                     editor_type=editor_type,
@@ -1397,6 +1418,38 @@ class HttpRelayTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "DOCUMENT_MISMATCH")
+
+    def test_document_id_is_stable_when_onlyoffice_normalizes_title(self):
+        document_id = "99999999-9999-4999-8999-999999999999"
+        normalized_state = self.editor_state(
+            document_id=document_id,
+            file_name="Platform 匿名模式验收.docx",
+        )
+        registration = copilot_server.bridge_register(
+            {
+                "sessionId": "http-session:title-normalized",
+                "editorToken": self.editor_token(
+                    document_id=document_id,
+                    file_name="Platform 匿名模式验收",
+                ),
+                "state": normalized_state,
+            }
+        )
+
+        self.assertTrue(registration["ok"])
+        self.assertEqual(
+            registration["session"]["documentId"],
+            document_id,
+        )
+        polled = copilot_server.bridge_poll(
+            {
+                "sessionId": "http-session:title-normalized",
+                "relayKey": registration["relayKey"],
+                "timeoutMs": 100,
+                "state": normalized_state,
+            }
+        )
+        self.assertIsNone(polled["command"])
 
     def test_expired_editor_token_is_rejected(self):
         with self.assertRaises(copilot_server.BridgeError) as raised:
@@ -2462,21 +2515,6 @@ class HttpRelayTests(unittest.TestCase):
             refreshed["sessions"][0]["sessionId"],
             "http-session:attach-after-refresh",
         )
-
-    def test_legacy_uuid_attach_is_disabled_by_default(self):
-        file_name = self.create_document_file(
-            "99999999-9999-4999-8999-999999999999",
-            "docx",
-        )
-        self.register(
-            "http-session:attach-http",
-            "document-key-http",
-            file_name=file_name,
-        )
-        self.assertFalse(copilot_server.ALLOW_LEGACY_UUID_ATTACH)
-        claims = copilot_server.internal_bridge_claims("http-session:attach-http")
-        self.assertEqual(claims["authKind"], "binding")
-        self.assertEqual(claims["fileName"], file_name)
 
     def test_editor_jwt_binds_to_the_ready_local_guest_session(self):
         anonymous_id = "123e4567-e89b-42d3-a456-426614174000"

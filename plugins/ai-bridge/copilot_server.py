@@ -159,7 +159,6 @@ def configured_secret(name: str) -> str:
 
 
 AI_RELAY_INTERNAL_SECRET = configured_secret("AI_RELAY_INTERNAL_SECRET")
-ALLOW_LEGACY_UUID_ATTACH = os.environ.get("ALLOW_LEGACY_UUID_ATTACH", "false").lower() == "true"
 
 V1_RELAY_POST_PATHS = frozenset(
     {
@@ -171,25 +170,17 @@ V1_RELAY_POST_PATHS = frozenset(
         "/bridge/internal/validate",
         "/bridge/internal/drop",
         "/bridge/internal/images/import",
-        # Keep these paths reachable only so they can return their explicit 410
-        # migration response instead of reviving UUID/binding authorization.
-        "/bridge/attach",
-        "/bridge/execute",
-        "/bridge/validate",
     }
 )
 
 
 def v1_relay_route_allowed(method: str, path: str) -> bool:
-    if ALLOW_LEGACY_UUID_ATTACH:
-        return True
     normalized = path.rstrip("/") or "/"
     if method == "POST":
         return normalized in V1_RELAY_POST_PATHS
     if method == "GET":
         return (
             normalized == "/health"
-            or normalized == "/bridge/sessions"
             or normalized.startswith("/bridge/contract/")
             or normalized.startswith("/images/")
         )
@@ -1576,6 +1567,7 @@ def verify_editor_jwt(token: str) -> dict[str, Any]:
     editor_config = payload.get("editorConfig") if isinstance(payload.get("editorConfig"), dict) else {}
     user = editor_config.get("user") if isinstance(editor_config.get("user"), dict) else {}
     return {
+        "documentId": str(payload.get("documentId", "")).strip(),
         "documentKey": str(document.get("key", "")).strip(),
         "fileName": str(document.get("title", "")),
         "fileType": str(document.get("fileType", "")),
@@ -1648,8 +1640,11 @@ def issue_anonymous_editor_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def bridge_identity(claims: dict[str, Any]) -> tuple[str, str, str, str]:
+    stable_document_identity = str(claims.get("documentId", "")).strip()
+    if not stable_document_identity:
+        stable_document_identity = str(claims.get("fileName", "")).strip()
     identity = (
-        str(claims.get("fileName", "")).strip(),
+        stable_document_identity,
         str(claims.get("fileType", "")).strip(),
         str(claims.get("editorType", "")).strip(),
         str(claims.get("userId", "")).strip(),
@@ -2198,6 +2193,7 @@ def bridge_resume_token(session_id: str, claims: dict[str, Any]) -> str:
         {
             "scope": "ai-bridge-resume",
             "sessionId": session_id,
+            "documentId": claims.get("documentId", ""),
             "documentKey": claims["documentKey"],
             "fileName": claims.get("fileName", ""),
             "fileType": claims.get("fileType", ""),
@@ -2235,6 +2231,7 @@ def verify_bridge_resume_token(token: str, session_id: str) -> dict[str, Any]:
         if not document_key or not editor_type:
             raise ValueError("document")
         return {
+            "documentId": str(payload.get("documentId", "")),
             "documentKey": document_key,
             "fileName": str(payload.get("fileName", "")),
             "fileType": str(payload.get("fileType", "")),
@@ -2284,13 +2281,8 @@ def internal_bridge_claims(session_id: Any) -> dict[str, Any]:
         session = BRIDGE_SESSIONS.get(requested)
         if session is None or not session.get("authoritative"):
             raise BridgeError(401, "INVALID_RELAY_SESSION", "浏览器 Relay 会话已经失效")
-        file_name, file_type, editor_type, user_id = session["identity"]
         return {
-            "documentKey": session["documentKey"],
-            "fileName": file_name,
-            "fileType": file_type,
-            "editorType": editor_type,
-            "userId": user_id,
+            **bridge_session_claims(session),
             "authKind": "binding",
         }
 
@@ -2323,6 +2315,7 @@ def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str,
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
     return {
         "sessionId": session_id,
+        "documentId": context.get("documentId"),
         "ready": bool(state.get("ready")),
         "editorType": state.get("editorType") or context.get("editorType"),
         "documentKey": context.get("documentKey"),
@@ -2336,6 +2329,19 @@ def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str,
         "registeredAt": session.get("registeredAt"),
         "generation": session.get("generation"),
         "authoritative": bool(session.get("authoritative")),
+    }
+
+
+def bridge_session_claims(session: dict[str, Any]) -> dict[str, Any]:
+    state = session.get("state") if isinstance(session.get("state"), dict) else {}
+    context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    return {
+        "documentId": str(context.get("documentId", "")).strip(),
+        "documentKey": session["documentKey"],
+        "fileName": str(context.get("fileName", "")).strip(),
+        "fileType": str(context.get("fileType", "")).strip(),
+        "editorType": str(state.get("editorType") or context.get("editorType") or "").strip(),
+        "userId": str(context.get("userId", "")).strip(),
     }
 
 
@@ -2433,6 +2439,19 @@ def bridge_assert_state_matches(claims: dict[str, Any], state: Any) -> dict[str,
     if not isinstance(state, dict):
         raise BridgeError(400, "INVALID_STATE", "state 必须是对象")
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    claimed_document_id = str(claims.get("documentId", "")).strip()
+    context_document_id = str(context.get("documentId", "")).strip()
+    if claimed_document_id and context_document_id != claimed_document_id:
+        raise BridgeError(
+            409,
+            "DOCUMENT_IDENTITY_MISMATCH",
+            "编辑器页面与凭证的 documentId 不一致",
+            {
+                "identityField": "documentId",
+                "claimedIdentityHash": hashlib.sha256(claimed_document_id.encode()).hexdigest()[:12],
+                "contextIdentityHash": hashlib.sha256(context_document_id.encode()).hexdigest()[:12],
+            },
+        )
     if context.get("documentKey") != claims["documentKey"]:
         raise BridgeError(409, "DOCUMENT_MISMATCH", "编辑器页面与凭证绑定的 document.key 不一致")
     if (state.get("editorType") or context.get("editorType")) != claims["editorType"]:
@@ -2456,12 +2475,14 @@ def bridge_assert_state_matches(claims: dict[str, Any], state: Any) -> dict[str,
                 "receivedContractSha256": state_contract_sha256,
             },
         )
-    for key in ("fileName", "fileType", "userId"):
+    stable_keys = ("fileType", "userId") if claimed_document_id else ("fileName", "fileType", "userId")
+    for key in stable_keys:
         if str(context.get(key, "")).strip() != str(claims.get(key, "")).strip():
             raise BridgeError(
                 409,
                 "DOCUMENT_IDENTITY_MISMATCH",
                 "编辑器页面与凭证的稳定文档身份不一致",
+                {"identityField": key},
             )
     return state
 
@@ -2635,13 +2656,7 @@ def bridge_authenticate_page_locked(
         raise BridgeError(401, "INVALID_RELAY_SESSION", "浏览器 Relay 会话无效，请重新加载编辑器页面")
     state = payload.get("state")
     if state is not None:
-        claims = {
-            "documentKey": session["documentKey"],
-            "fileName": session["identity"][0],
-            "fileType": session["identity"][1],
-            "editorType": session["identity"][2],
-            "userId": session["identity"][3],
-        }
+        claims = bridge_session_claims(session)
         session["state"] = bridge_assert_state_matches(claims, state)
     session["lastSeen"] = time.time()
     return session_id, session
@@ -4522,13 +4537,12 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
             return
-        if not ALLOW_LEGACY_UUID_ATTACH and request_path != "/bridge/sessions":
-            try:
-                require_internal_relay(self)
-            except BridgeError as error:
-                self.log_bridge_error(error)
-                json_response(self, error.status, error.payload())
-                return
+        try:
+            require_internal_relay(self)
+        except BridgeError as error:
+            self.log_bridge_error(error)
+            json_response(self, error.status, error.payload())
+            return
         storage_request = DOCUMENT_STORAGE_PATH_PATTERN.fullmatch(
             parsed_path.path
         )
@@ -4644,15 +4658,6 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
             return
-        if request_path == "/bridge/sessions":
-            try:
-                if not ALLOW_LEGACY_UUID_ATTACH:
-                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧会话发现接口已关闭")
-                json_response(self, 200, bridge_sessions(bridge_authorization(self)))
-            except BridgeError as error:
-                self.log_bridge_error(error)
-                json_response(self, error.status, error.payload())
-            return
         json_response(self, 404, {"error": "Not found"})
 
     def do_POST(self) -> None:
@@ -4738,9 +4743,6 @@ class Handler(BaseHTTPRequestHandler):
                 IMAGE_MAX_REQUEST_BYTES
                 if request_path
                 in (
-                    "/images/import",
-                    "/bridge/execute",
-                    "/bridge/validate",
                     "/bridge/internal/execute",
                     "/bridge/internal/validate",
                     "/bridge/internal/images/import",
@@ -4753,23 +4755,7 @@ class Handler(BaseHTTPRequestHandler):
                 .strip()
                 .lower()
             )
-            if (
-                request_path == "/bridge/attach"
-                and content_type != "application/json"
-            ):
-                raise BridgeError(
-                    415,
-                    "UNSUPPORTED_MEDIA_TYPE",
-                    "Content-Type 必须是 application/json",
-                )
             payload = read_json(self, max_bytes)
-            if request_path == "/images/import":
-                json_response(
-                    self,
-                    200,
-                    import_image(payload.get("source"), bridge_authorization(self)),
-                )
-                return
             if request_path == "/bridge/register":
                 require_internal_relay(self)
                 json_response(self, 200, bridge_register(payload))
@@ -4806,25 +4792,6 @@ class Handler(BaseHTTPRequestHandler):
                 require_internal_relay(self)
                 claims = internal_bridge_claims(payload.get("relaySessionId"))
                 json_response(self, 200, import_image(payload.get("source"), claims))
-                return
-            if request_path == "/bridge/attach":
-                if not ALLOW_LEGACY_UUID_ATTACH:
-                    raise BridgeError(
-                        410,
-                        "LEGACY_UUID_ATTACH_DISABLED",
-                        "UUID attach 已关闭，请使用 document-hub 的用户 JWT 文档接口",
-                    )
-                json_response(self, 200, bridge_attach(payload))
-                return
-            if request_path == "/bridge/execute":
-                if not ALLOW_LEGACY_UUID_ATTACH:
-                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧 binding 接口已关闭")
-                json_response(self, 200, bridge_execute(payload, bridge_authorization(self)))
-                return
-            if request_path == "/bridge/validate":
-                if not ALLOW_LEGACY_UUID_ATTACH:
-                    raise BridgeError(410, "LEGACY_BINDING_DISABLED", "旧 binding 接口已关闭")
-                json_response(self, 200, bridge_validate(payload, bridge_authorization(self)))
                 return
             if request_path == "/editor-config/anonymous":
                 json_response(self, 200, issue_anonymous_editor_config(payload))
@@ -4920,6 +4887,13 @@ class Handler(BaseHTTPRequestHandler):
         phase = str(details.get("phase", "")).strip()
         if phase in BRIDGE_LOG_PHASES:
             event["phase"] = phase
+        identity_field = str(details.get("identityField", "")).strip()
+        if identity_field in {"documentId", "fileName", "fileType", "userId"}:
+            event["identityField"] = identity_field
+        for hash_field in ("claimedIdentityHash", "contextIdentityHash"):
+            identity_hash = str(details.get(hash_field, "")).strip()
+            if re.fullmatch(r"[0-9a-f]{12}", identity_hash):
+                event[hash_field] = identity_hash
         print(
             "[bridge-error] "
             + compact_json(event),

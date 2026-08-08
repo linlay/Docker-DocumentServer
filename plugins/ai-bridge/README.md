@@ -103,25 +103,17 @@ server-signed user `{ id: "local-guest:<uuid>", name: "访客" }`. The endpoint
 only accepts an existing valid editor JWT and a UUID; it does not accept a
 document config, permissions, or caller-selected name.
 
-The signed configuration removes the complete left-menu layout container,
-including its reserved width, and hides the unused Collaboration, Plugins, and
-default AI toolbar tabs without changing document permissions. It enables
-ONLYOFFICE's native compact toolbar: the ribbon starts folded, a normal tab
-click expands it, and clicking the active tab folds it again and clears the
-selected tab. Existing ONLYOFFICE toolbar preferences still take precedence.
-External integrations that want the same behavior must set
-`editorConfig.customization.compactToolbar` to `true` before constructing
-`DocsAPI.DocEditor`.
-
-When `host-bridge.js` can access the editor iframe on the same origin, it also
-moves the native Save, Undo, and Redo slots immediately before the Editing
-control and hides the complete 28-pixel document-title row. This removes the
-logo, document-name, title-row user name, Print shortcut, and quick-access menu
-without cloning the three retained buttons. The Open file location and Mark as
-favorite header buttons are hidden as well. Print remains available from File,
-and the toolbar collaboration status remains visible. If the expected semantic
-slots are missing, the original title row is left intact. Cross-origin editor
-iframes cannot use this DOM compaction.
+The signed configuration removes the complete left-menu layout container and
+hides the unused Collaboration and Plugins toolbar tabs without changing
+document permissions. The editor chrome is implemented by the source-patched
+DocumentServer image built from `Dockerfile.source-ui`, not by plugin-side DOM
+or CSS interception. `compactHeader` removes the separate document-title row;
+`compactHeaderQuickAccess` creates native Save, Print, Undo, and Redo controls
+in the toolbar's right-side header panel; `compactHeaderHideLogo` avoids
+mounting the logo into that row; and `forceCompactToolbar` makes the signed
+`compactToolbar` value authoritative over an older browser preference.
+`sourceUiLayout` applies layout visibility without enabling extended branding.
+ONLYOFFICE's native Mixtbar handles double-click expand/fold behavior.
 
 ## Load the external-page API
 
@@ -481,12 +473,13 @@ Production v1 exposes these document-scoped endpoints from `document-hub`:
 - `POST /api/v1/documents/{documentId}/ai/validate`
 - `POST /api/v1/documents/{documentId}/ai/execute`
 
-All three use `Authorization: Bearer <user-jwt>`. There is no public attach or
-binding endpoint. The `/bridge/internal/*` endpoints in this Relay remain an
-implementation detail, accept only the private `AI_RELAY_INTERNAL_SECRET`, and
-must not be exposed by Nginx. Legacy standalone Relay functions remain in the
-source for compatibility testing but are disabled when
-`ALLOW_LEGACY_UUID_ATTACH=false`.
+Authentication is owned by `document-hub`. In normal mode all three use
+`Authorization: Bearer <user-jwt>`. When `ANONYMOUS_ACCESS_ENABLED=true`, the
+same endpoints require no caller credential and every request runs as the fixed
+`Platform` principal. There is no public attach or binding endpoint. The
+`/bridge/internal/*` endpoints in this Relay remain an implementation detail,
+accept only the private `AI_RELAY_INTERNAL_SECRET`, and must not be exposed by
+Nginx.
 
 Word arguments are normalized before validation and idempotency fingerprinting.
 The machine-readable policy is `inputNormalization.word` in `public-api.json`;
@@ -497,12 +490,13 @@ implicit string-to-number/boolean coercion, suspicious twips-as-points values,
 and targetless destructive or pagination operations remain errors.
 
 The real document-hub editor page must remain open with its Relay ready. For
-every request, the caller sends the document ID in the URL and the same user JWT
-in `Authorization`. `document-hub` automatically selects that user's most
-recent live editor page for the document. Stable `requestId` values deduplicate
-retries. Closing the selected page, revoking the ACL, disabling the user, or
-losing the heartbeat makes subsequent Agent calls fail until an authorized page
-is opened again. No public Relay credential is returned to HTTPX.
+every request, the caller sends the document ID in the URL. In normal mode,
+`document-hub` selects the JWT user's most recent live editor page. In anonymous
+mode, it selects the fixed `Platform` principal's page. Stable `requestId`
+values deduplicate retries. Closing the selected page, revoking the applicable
+ACL, disabling the normal-mode user, or losing the heartbeat makes subsequent
+Agent calls fail until an authorized page is opened again. No public Relay
+credential is returned to HTTPX.
 
 `host-bridge.js` enables this HTTP Relay by default only on loopback hosts.
 A non-loopback editor must set `window.aiBridgeOptions.httpRelay = true` before

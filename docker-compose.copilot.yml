@@ -28,7 +28,6 @@ services:
         "JWT_SECRET=$${JWT_SECRET}"
         "AI_RELAY_INTERNAL_SECRET_FILE=/run/secrets/ai_relay_internal_secret"
         "COPILOT_BIND_ADDRESS=0.0.0.0"
-        "ALLOW_LEGACY_UUID_ATTACH=false"
         > /run/onlyoffice-copilot.env &&
         chown ds:ds /run/onlyoffice-copilot.env &&
         install -m 0644 /opt/onlyoffice-copilot/nginx-document-app.conf
@@ -48,7 +47,6 @@ services:
       JWT_IN_BODY: "true"
       COPILOT_BIND_ADDRESS: "0.0.0.0"
       AI_RELAY_INTERNAL_SECRET_FILE: "/run/secrets/ai_relay_internal_secret"
-      ALLOW_LEGACY_UUID_ATTACH: "false"
     expose:
       - "3001"
     secrets:

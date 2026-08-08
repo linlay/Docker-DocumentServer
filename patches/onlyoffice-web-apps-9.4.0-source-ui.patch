@@ -1,0 +1,148 @@
+--- a/apps/common/main/lib/view/Header.js
++++ b/apps/common/main/lib/view/Header.js
+@@ -100,6 +100,14 @@
+                                     '<div class="btn-slot" id="slot-hbtn-print-quick"></div>' +
+                                     '<div class="btn-slot" id="slot-hbtn-download"></div>' +
+                                 '</div>' +
++                                '<% if (compactHeaderQuickAccess) { %>' +
++                                '<div class="hedset" role="menubar" aria-label="<%= scope.ariaQuickAccessToolbar %>">' +
++                                    '<div class="btn-slot" id="slot-btn-dt-save" data-layout-name="header-save"></div>' +
++                                    '<div class="btn-slot" id="slot-btn-dt-print"></div>' +
++                                    '<div class="btn-slot" id="slot-btn-dt-undo"></div>' +
++                                    '<div class="btn-slot" id="slot-btn-dt-redo"></div>' +
++                                '</div>' +
++                                '<% } %>' +
+                                 '<div class="hedset" data-layout-name="header-editMode">' +
+                                     '<div class="btn-slot" id="slot-btn-edit-mode"></div>' +
+                                 '</div>' +
+@@ -899,7 +907,9 @@
+                 if ( role == 'right' ) {
+                     var $html = $(_.template(templateRightBox)({
+                         tipUsers: this.labelCoUsersDescr,
+-                        textShare: this.textShare
++                        textShare: this.textShare,
++                        scope: me,
++                        compactHeaderQuickAccess: !!(config.compactHeader && config.customization && config.customization.compactHeaderQuickAccess)
+                     }));
+ 
+                     if ( !$labelDocName ) {
+@@ -926,7 +936,48 @@
+                     } else {
+                         $html.find('#slot-btn-favorite').hide();
+                     }
++
++                    if (config.compactHeader && config.customization && config.customization.compactHeaderQuickAccess) {
++                        if (config.canPrint) {
++                            me.btnPrint = createTitleButton('toolbar__icon icon--inverse btn-print', $html.findById('#slot-btn-dt-print'), true, undefined, undefined, 'P');
++                            me.shortcutHints.PrintPreviewAndPrint = {
++                                btn: me.btnPrint,
++                                label: me.tipPrint
++                            };
++                        } else {
++                            $html.find('#slot-btn-dt-print').hide();
++                        }
+ 
++                        if (config.showSaveButton) {
++                            let save_icon = config.canSaveToFile || config.isDesktopApp && config.isOffline ? 'btn-save' : 'btn-download';
++                            me.btnSave = createTitleButton('toolbar__icon icon--inverse ' + save_icon, $html.findById('#slot-btn-dt-save'), true, undefined, undefined, 'S');
++                            if (appConfig.canSaveToFile || appConfig.isDesktopApp && appConfig.isOffline) {
++                                me.shortcutHints.Save = {
++                                    btn: me.btnSave,
++                                    label: me.tipSave
++                                };
++                            } else {
++                                me.btnSave.updateHint(me.tipDownload);
++                            }
++                        } else {
++                            $html.find('#slot-btn-dt-save').hide();
++                        }
++
++                        me.btnUndo = createTitleButton('toolbar__icon icon--inverse btn-undo icon-rtl', $html.findById('#slot-btn-dt-undo'), true, undefined, undefined, 'Z',
++                                                        [Common.enumLock.undoLock, Common.enumLock.fileMenuOpened, Common.enumLock.lostConnect]);
++                        me.shortcutHints.EditUndo = {
++                            btn: me.btnUndo,
++                            label: me.tipUndo
++                        };
++
++                        me.btnRedo = createTitleButton('toolbar__icon icon--inverse btn-redo icon-rtl', $html.findById('#slot-btn-dt-redo'), true, undefined, undefined, 'Y',
++                                                        [Common.enumLock.redoLock, Common.enumLock.fileMenuOpened, Common.enumLock.lostConnect]);
++                        me.shortcutHints.EditRedo = {
++                            btn: me.btnRedo,
++                            label: me.tipRedo
++                        };
++                    }
++
+                     if ( !config.twoLevelHeader) {
+                         if ( (config.canDownload || config.canDownloadOrigin) && !config.isOffline  )
+                             this.btnDownload = createTitleButton('toolbar__icon icon--inverse btn-download', $html.findById('#slot-hbtn-download'), undefined, 'bottom', 'big');
+--- a/apps/documenteditor/main/app/controller/Main.js
++++ b/apps/documenteditor/main/app/controller/Main.js
+@@ -1801,7 +1801,9 @@
+                 this.appOptions.fileKey = this.document.key;
+ 
+                 this.appOptions.canBrandingExt = params.asc_getCanBranding() && (typeof this.editorConfig.customization == 'object' || this.editorConfig.plugins);
+-                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null, this.appOptions.canBrandingExt, this.api);
++                this.appOptions.canSourceUiLayout = typeof this.editorConfig.customization == 'object' && this.editorConfig.customization.sourceUiLayout === true;
++                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null,
++                                              this.appOptions.canBrandingExt || this.appOptions.canSourceUiLayout, this.api);
+                 this.editorConfig.customization && Common.UI.FeaturesManager.init(this.editorConfig.customization.features, this.appOptions.canBrandingExt);
+ 
+                 Common.UI.TabStyler.init(this.editorConfig.customization); // call after Common.UI.FeaturesManager.init() !!!
+@@ -2664,6 +2666,8 @@
+                                 console.log("Obsolete: The 'toolbar' parameter of the 'customization' section is deprecated. Please use 'toolbar' parameter in the 'customization.layout' section instead.");
+                         }
+                         promise = this.getApplication().getController('Common.Controllers.Plugins').applyUICustomization();
++                    } else if (this.appOptions.canSourceUiLayout) {
++                        Common.UI.LayoutManager.applyCustomization();
+                     }
+                 }
+                 Common.NotificationCenter.trigger('layout:changed', 'main');
+--- a/apps/documenteditor/main/app/controller/Toolbar.js
++++ b/apps/documenteditor/main/app/controller/Toolbar.js
+@@ -3919,7 +3919,9 @@
+ 
+             var editmode = config.isEdit || config.isRestrictedEdit && config.canFillForms && config.isFormCreator,
+                 compactview = !editmode;
+-            if ( Common.localStorage.itemExists(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar") ) {
++            if (config.customization && config.customization.forceCompactToolbar) {
++                compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
++            } else if ( Common.localStorage.itemExists(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar") ) {
+                 compactview = Common.localStorage.getBool(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar");
+             } else if (config.customization) {
+                 compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
+@@ -3940,7 +3942,7 @@
+ 
+                 me.toolbar.btnSave.on('disabled', _.bind(me.onBtnChangeState, me, 'save:disabled'));
+ 
+-                if (!config.compactHeader) {
++                if (!config.compactHeader || config.customization && config.customization.compactHeaderQuickAccess) {
+                     // hide 'print' and 'save' buttons group and next separator
+                     me.toolbar.btnPrint.$el.parents('.group').hide().next().hide();
+ 
+--- a/apps/documenteditor/main/app/controller/Viewport.js
++++ b/apps/documenteditor/main/app/controller/Viewport.js
+@@ -79,7 +79,8 @@
+                     'render:before' : function (toolbar) {
+                         var config = DE.getController('Main').appOptions;
+                         toolbar.setExtra('right', me.header.getPanel('right', config));
+-                        if (!config.twoLevelHeader || config.compactHeader)
++                        if ((!config.twoLevelHeader || config.compactHeader) &&
++                            !(config.customization && config.customization.compactHeaderHideLogo))
+                             toolbar.setExtra('left', me.header.getPanel('left', config));
+                         me.toolbar = toolbar;
+                         /*var value = Common.localStorage.getBool("de-settings-quick-print-button", true);
+@@ -181,10 +182,12 @@
+             var _intvars = Common.Utils.InternalSettings;
+             var $filemenu = $('.toolbar-fullview-panel');
+             $filemenu.css('top', Common.UI.LayoutManager.isElementVisible('toolbar') ? _intvars.get('toolbar-height-tabs') : 0);
++            var forceCompactToolbar = config.customization && config.customization.forceCompactToolbar,
++                compactToolbar = config.customization && config.customization.compactToolbar;
+ 
+             if ( !(config.isEdit || config.isRestrictedEdit && config.canFillForms && config.isFormCreator) ||
+-                ( !Common.localStorage.itemExists("de-compact-toolbar") &&
+-                config.customization && config.customization.compactToolbar )) {
++                (forceCompactToolbar && compactToolbar) ||
++                (!forceCompactToolbar && !Common.localStorage.itemExists("de-compact-toolbar") && compactToolbar)) {
+ 
+                 var panel = me.viewport.vlayout.getItem('toolbar');
+                 if ( panel ) panel.height = _intvars.get('toolbar-height-tabs');
