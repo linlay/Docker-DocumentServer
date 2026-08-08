@@ -168,6 +168,7 @@ V1_RELAY_POST_PATHS = frozenset(
         "/bridge/unregister",
         "/bridge/internal/execute",
         "/bridge/internal/validate",
+        "/bridge/internal/session",
         "/bridge/internal/drop",
         "/bridge/internal/images/import",
     }
@@ -2284,6 +2285,19 @@ def internal_bridge_claims(session_id: Any) -> dict[str, Any]:
         return {
             **bridge_session_claims(session),
             "authKind": "binding",
+        }
+
+
+def internal_bridge_session(session_id: Any) -> dict[str, Any]:
+    requested = str(session_id or "").strip()
+    with BRIDGE_CONDITION:
+        bridge_cleanup_locked()
+        session = BRIDGE_SESSIONS.get(requested)
+        if session is None or not session.get("authoritative"):
+            raise BridgeError(401, "INVALID_RELAY_SESSION", "浏览器 Relay 会话已经失效")
+        return {
+            "ok": True,
+            **bridge_public_session(requested, session),
         }
 
 
@@ -4783,6 +4797,10 @@ class Handler(BaseHTTPRequestHandler):
                 claims = internal_bridge_claims(payload.get("relaySessionId"))
                 payload["sessionId"] = payload.get("relaySessionId")
                 json_response(self, 200, bridge_validate(payload, claims))
+                return
+            if request_path == "/bridge/internal/session":
+                require_internal_relay(self)
+                json_response(self, 200, internal_bridge_session(payload.get("relaySessionId")))
                 return
             if request_path == "/bridge/internal/drop":
                 require_internal_relay(self)

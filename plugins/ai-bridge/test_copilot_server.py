@@ -83,6 +83,7 @@ class ContractAlignmentTests(unittest.TestCase):
             "/bridge/register",
             "/bridge/internal/execute",
             "/bridge/internal/validate",
+            "/bridge/internal/session",
             "/bridge/internal/drop",
             "/bridge/internal/images/import",
         ):
@@ -1251,6 +1252,8 @@ class HttpRelayTests(unittest.TestCase):
         return {
             "ready": ready,
             "editorType": editor_type,
+            "contractVersion": copilot_server.PUBLIC_API_CONTRACT_VERSION,
+            "contractSha256": copilot_server.PUBLIC_API_CONTRACT_SHA256,
             "context": {
                 "documentId": document_id,
                 "documentKey": document_key,
@@ -2343,6 +2346,35 @@ class HttpRelayTests(unittest.TestCase):
         self.assertGreater(response["bindingExpiresAt"], int(time.time()))
         self.assertEqual(len(response["sessions"]), 1)
         self.assertTrue(response["sessions"][0]["authoritative"])
+
+    def test_internal_session_reports_ready_authoritative_contract_state(self):
+        self.register(
+            document_id="11111111-1111-4111-8111-111111111111",
+            ready=True,
+        )
+
+        response = copilot_server.internal_bridge_session("http-session:test")
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["ready"])
+        self.assertTrue(response["authoritative"])
+        self.assertEqual(response["editorType"], "word")
+        self.assertEqual(response["contractVersion"], copilot_server.PUBLIC_API_CONTRACT_VERSION)
+        self.assertEqual(response["contractSha256"], copilot_server.PUBLIC_API_CONTRACT_SHA256)
+        self.assertIsInstance(response["lastSeen"], float)
+
+    def test_internal_session_exposes_registering_state_and_rejects_superseded_session(self):
+        self.register(ready=False)
+        registering = copilot_server.internal_bridge_session("http-session:test")
+        self.assertFalse(registering["ready"])
+
+        self.register(session_id="http-session:newer", ready=True)
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.internal_bridge_session("http-session:test")
+        self.assertEqual(raised.exception.code, "INVALID_RELAY_SESSION")
+        self.assertTrue(
+            copilot_server.internal_bridge_session("http-session:newer")["ready"]
+        )
 
     def test_attach_issues_binding_for_ready_docx_xlsx_and_pptx_relays(self):
         cases = [

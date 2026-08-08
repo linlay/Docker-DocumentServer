@@ -2537,8 +2537,6 @@
                 }
 
                 case "word_set_document_properties": {
-                  var propertyCore = typeof doc.GetCore === "function" ? doc.GetCore() : null;
-                  if (!propertyCore) commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持文档核心属性");
                   var propertyMap = {
                     title: "SetTitle",
                     subject: "SetSubject",
@@ -2553,24 +2551,83 @@
                     created: "SetCreated",
                     modified: "SetModified",
                   };
-                  var updatedProperties = [];
+                  var hasCoreProperties = false;
+                  for (var requestedPropertyName in propertyMap) {
+                    if (
+                      Object.prototype.hasOwnProperty.call(propertyMap, requestedPropertyName)
+                      && args[requestedPropertyName] !== undefined
+                    ) {
+                      hasCoreProperties = true;
+                      break;
+                    }
+                  }
+                  var propertyCore = null;
+                  if (hasCoreProperties) {
+                    propertyCore = typeof doc.GetCore === "function" ? doc.GetCore() : null;
+                    if (
+                      propertyCore
+                      && !propertyCore.Core
+                      && doc.Document
+                      && !doc.Document.Core
+                      && typeof AscCommon !== "undefined"
+                      && typeof AscCommon.CCore === "function"
+                    ) {
+                      doc.Document.Core = new AscCommon.CCore();
+                      propertyCore = doc.GetCore();
+                    }
+                    if (!propertyCore || !propertyCore.Core) {
+                      commandError(
+                        "WORD_API_UNSUPPORTED",
+                        "当前 ONLYOFFICE 版本无法初始化文档核心属性",
+                        { partialMutationPossible: false }
+                      );
+                    }
+                  }
+                  var pendingCoreProperties = [];
                   for (var propertyName in propertyMap) {
                     if (!Object.prototype.hasOwnProperty.call(propertyMap, propertyName) || args[propertyName] === undefined) continue;
                     var setterName = propertyMap[propertyName];
                     if (typeof propertyCore[setterName] !== "function") {
-                      commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持核心属性：" + propertyName);
+                      commandError(
+                        "WORD_API_UNSUPPORTED",
+                        "当前 ONLYOFFICE 版本不支持核心属性：" + propertyName,
+                        { partialMutationPossible: false }
+                      );
                     }
                     var propertyValue = args[propertyName];
                     if (propertyName === "created" || propertyName === "modified") {
                       propertyValue = validDate(propertyValue, propertyName);
                     }
-                    propertyCore[setterName](propertyValue);
-                    updatedProperties.push(propertyName);
+                    pendingCoreProperties.push({
+                      name: propertyName,
+                      setterName: setterName,
+                      value: propertyValue,
+                    });
                   }
+                  var updatedProperties = [];
                   var customOperations = Array.isArray(args.custom) ? args.custom : [];
+                  var pendingCustomProperties = [];
+                  var customProperties = null;
                   if (customOperations.length) {
-                    var customProperties = typeof doc.GetCustomProperties === "function" ? doc.GetCustomProperties() : null;
-                    if (!customProperties) commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持自定义文档属性");
+                    customProperties = typeof doc.GetCustomProperties === "function" ? doc.GetCustomProperties() : null;
+                    if (
+                      customProperties
+                      && !customProperties.CustomProperties
+                      && doc.Document
+                      && !doc.Document.CustomProperties
+                      && typeof AscCommon !== "undefined"
+                      && typeof AscCommon.CCustomProperties === "function"
+                    ) {
+                      doc.Document.CustomProperties = new AscCommon.CCustomProperties();
+                      customProperties = doc.GetCustomProperties();
+                    }
+                    if (!customProperties || !customProperties.CustomProperties || typeof customProperties.Add !== "function") {
+                      commandError(
+                        "WORD_API_UNSUPPORTED",
+                        "当前 ONLYOFFICE 版本无法初始化自定义文档属性",
+                        { partialMutationPossible: false }
+                      );
+                    }
                     for (var customIndex = 0; customIndex < customOperations.length; customIndex += 1) {
                       var operation = customOperations[customIndex] || {};
                       var customName = String(operation.name || "");
@@ -2589,13 +2646,24 @@
                       } else if (operation.valueType === "string") {
                         customValue = String(customValue);
                       }
-                      if (typeof customProperties.Add !== "function" || customProperties.Add(customName, customValue) === false) {
-                        throw new Error("ONLYOFFICE 无法写入自定义属性：" + customName);
-                      }
-                      updatedProperties.push("custom:" + customName);
+                      pendingCustomProperties.push({ name: customName, value: customValue });
                     }
                   }
-                  if (!updatedProperties.length) throw new Error("word_set_document_properties 至少需要一个属性");
+                  if (!pendingCoreProperties.length && !pendingCustomProperties.length) {
+                    throw new Error("word_set_document_properties 至少需要一个属性");
+                  }
+                  for (var pendingCoreIndex = 0; pendingCoreIndex < pendingCoreProperties.length; pendingCoreIndex += 1) {
+                    var pendingCore = pendingCoreProperties[pendingCoreIndex];
+                    propertyCore[pendingCore.setterName](pendingCore.value);
+                    updatedProperties.push(pendingCore.name);
+                  }
+                  for (var pendingCustomIndex = 0; pendingCustomIndex < pendingCustomProperties.length; pendingCustomIndex += 1) {
+                    var pendingCustom = pendingCustomProperties[pendingCustomIndex];
+                    if (customProperties.Add(pendingCustom.name, pendingCustom.value) === false) {
+                      throw new Error("ONLYOFFICE 无法写入自定义属性：" + pendingCustom.name);
+                    }
+                    updatedProperties.push("custom:" + pendingCustom.name);
+                  }
                   changed += updatedProperties.length;
                   results.push({ name: call.name, updated: updatedProperties });
                   break;

@@ -17,6 +17,7 @@ const docxCapabilityMatrix = fs.readFileSync(
 
 function eventTarget(target) {
   const listeners = new Map();
+  target.dispatchedEvents = [];
   target.addEventListener = (name, listener) => {
     const entries = listeners.get(name) || [];
     entries.push(listener);
@@ -29,7 +30,11 @@ function eventTarget(target) {
   target.dispatch = (name, event) => {
     for (const listener of listeners.get(name) || []) listener(event);
   };
-  target.dispatchEvent = () => true;
+  target.dispatchEvent = event => {
+    target.dispatchedEvents.push(event);
+    target.dispatch(event.type, event);
+    return true;
+  };
   return target;
 }
 
@@ -380,6 +385,44 @@ function createWordBridgeHarness(options = {}) {
   const internalStyles = [];
   let historyPoints = 0;
 
+  const coreFields = [
+    "Title", "Subject", "Creator", "Description", "Keywords", "Category",
+    "Language", "Identifier", "LastModifiedBy", "Revision", "Created", "Modified",
+  ];
+
+  function createCoreBacking(initial = {}) {
+    const backing = {};
+    for (const field of coreFields) {
+      const key = field.charAt(0).toLowerCase() + field.slice(1);
+      backing[key] = Object.prototype.hasOwnProperty.call(initial, key) ? initial[key] : null;
+      backing[`set${field}`] = function (value) { this[key] = value; };
+      backing[`asc_get${field}`] = function () { return this[key]; };
+    }
+    return backing;
+  }
+
+  function createApiCore(backing) {
+    const core = { Core: backing };
+    for (const field of coreFields) {
+      core[`Set${field}`] = function (value) { this.Core[`set${field}`](value); };
+      core[`Get${field}`] = function () { return this.Core[`asc_get${field}`](); };
+    }
+    if (options.missingCoreSetter) delete core[String(options.missingCoreSetter)];
+    return core;
+  }
+
+  function createCustomPropertiesBacking(initial = {}) {
+    return { values: { ...initial } };
+  }
+
+  function createApiCustomProperties(backing) {
+    return {
+      CustomProperties: backing,
+      Add(name, value) { this.CustomProperties.values[String(name)] = value; return true; },
+      Get(name) { return this.CustomProperties.values[String(name)]; },
+    };
+  }
+
   function createStyle(name, type) {
     const style = {
       id: `1_${createdStyles.length + 30}`,
@@ -652,10 +695,20 @@ function createWordBridgeHarness(options = {}) {
   const initialDocumentTables = initialDocumentElements.filter(element => (
     element && typeof element.GetRowsCount === "function" && typeof element.GetRow === "function"
   ));
+  const initialCore = Object.prototype.hasOwnProperty.call(options, "core")
+    ? options.core
+    : createCoreBacking(options.coreValues || {});
+  const initialCustomProperties = Object.prototype.hasOwnProperty.call(options, "customProperties")
+    ? options.customProperties
+    : createCustomPropertiesBacking(options.customPropertyValues || {});
   const document = {
     Document: {
+      Core: initialCore,
+      CustomProperties: initialCustomProperties,
       Get_Styles() { return internalStyleCollection; },
     },
+    GetCore() { return createApiCore(this.Document.Core); },
+    GetCustomProperties() { return createApiCustomProperties(this.Document.CustomProperties); },
     GetText() { return documentText; },
     GetContent() {
       return [
@@ -808,6 +861,14 @@ function createWordBridgeHarness(options = {}) {
   }
   const officeContext = vm.createContext({
     Asc: { scope },
+    AscCommon: {
+      CCore: options.coreFactorySupported === false
+        ? undefined
+        : function () { return createCoreBacking(); },
+      CCustomProperties: options.customPropertiesFactorySupported === false
+        ? undefined
+        : function () { return createCustomPropertiesBacking(); },
+    },
     Api: {
       GetDocument: () => document,
       CreateParagraph: () => createParagraph(),
@@ -1190,6 +1251,16 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
 
   assert.equal(registerCalls, 1);
   assert.equal(pollCalls, 1);
+  assert.deepEqual(
+    harness.hostWindow.dispatchedEvents
+      .filter(event => event.type === "ai-bridge-relay-state")
+      .map(event => ({ state: event.detail.state, code: event.detail.code })),
+    [
+      { state: "registering", code: null },
+      { state: "ready", code: null },
+      { state: "superseded", code: "SESSION_SUPERSEDED" },
+    ],
+  );
 });
 
 test("explicit HTTP opt-in does not start Relay on a public host", async () => {
@@ -2601,6 +2672,94 @@ test("word bridge creates ONLYOFFICE run styles for public character styles and 
   assert.equal(result.results[0].type, "character");
   assert.equal(harness.appliedStyles.length, 2);
   assert.ok(harness.appliedStyles.every(entry => entry.style === harness.createdStyles[0]));
+});
+
+test("word document properties initialize an empty core and round-trip through advanced inspection", async () => {
+  const harness = createWordBridgeHarness({
+    text: "空白文档",
+    core: null,
+    customProperties: null,
+  });
+
+  const updated = await harness.bridge.execute([{
+    name: "word_set_document_properties",
+    arguments: {
+      title: "雨停之前",
+      subject: "短篇小说",
+      creator: "佚名",
+      keywords: "故乡,车站,雨",
+      custom: [{ name: "ReviewState", value: "Final", valueType: "string" }],
+    },
+  }]);
+  const inspected = await harness.bridge.execute([{
+    name: "word_inspect_advanced",
+    arguments: {
+      includeProperties: true,
+      customPropertyNames: ["ReviewState"],
+    },
+  }]);
+
+  assert.equal(updated.changed, 5);
+  assert.deepEqual(JSON.parse(JSON.stringify(updated.results[0].updated)), [
+    "title", "subject", "creator", "keywords", "custom:ReviewState",
+  ]);
+  assert.ok(harness.document.Document.Core);
+  assert.ok(harness.document.Document.CustomProperties);
+  assert.deepEqual(JSON.parse(JSON.stringify(inspected.results[0].properties.core)), {
+    title: "雨停之前",
+    subject: "短篇小说",
+    creator: "佚名",
+    description: null,
+    keywords: "故乡,车站,雨",
+    category: null,
+    language: null,
+    identifier: null,
+    lastModifiedBy: null,
+    revision: null,
+    created: null,
+    modified: null,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(inspected.results[0].properties.custom)), {
+    ReviewState: "Final",
+  });
+});
+
+test("word document properties validate every setter before mutating the core", async () => {
+  const harness = createWordBridgeHarness({
+    text: "属性校验",
+    coreValues: { title: "原始标题", subject: "原始主题" },
+    missingCoreSetter: "SetSubject",
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_set_document_properties",
+      arguments: { title: "新标题", subject: "新主题" },
+    }]),
+    error => error.code === "WORD_API_UNSUPPORTED"
+      && error.details.partialMutationPossible === false,
+  );
+
+  assert.equal(harness.document.Document.Core.title, "原始标题");
+  assert.equal(harness.document.Document.Core.subject, "原始主题");
+});
+
+test("word document properties return a stable capability error when an empty core cannot initialize", async () => {
+  const harness = createWordBridgeHarness({
+    text: "属性能力",
+    core: null,
+    coreFactorySupported: false,
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_set_document_properties",
+      arguments: { title: "无法写入" },
+    }]),
+    error => error.code === "WORD_API_UNSUPPORTED"
+      && /无法初始化文档核心属性/.test(error.message)
+      && error.details.partialMutationPossible === false,
+  );
 });
 
 test("word advanced inspection includes styles omitted by ONLYOFFICE 9.4 GetAllStyles", async () => {

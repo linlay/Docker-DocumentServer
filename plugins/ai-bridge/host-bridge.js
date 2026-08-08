@@ -1047,10 +1047,16 @@
     let stopped = false;
     let retryDelayMs = 1000;
 
-    function setRelayState(value) {
+    function setRelayState(value, code) {
       if (document.documentElement && document.documentElement.dataset) {
         document.documentElement.dataset.aiBridgeRelayState = value;
       }
+      window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", {
+        detail: {
+          state: value,
+          code: code || null,
+        },
+      }));
     }
 
     function credentialReloadKey() {
@@ -1119,7 +1125,7 @@
     function stopRelay(reason, code) {
       stopped = true;
       relayKey = null;
-      setRelayState(reason);
+      setRelayState(reason, code);
       emit("relayError", { reason, code: code || "HTTP_RELAY_STOPPED" });
     }
 
@@ -1137,6 +1143,7 @@
     }
 
     async function register() {
+      setRelayState("registering");
       await waitUntilReady(30000);
       const payload = {
         sessionId: httpSessionId,
@@ -1213,7 +1220,7 @@
             reloadForCredentialError(code);
             return;
           }
-          setRelayState("retrying");
+          setRelayState("retrying", code);
           await new Promise(function (resolve) { window.setTimeout(resolve, retryDelayMs); });
           retryDelayMs = Math.min(10000, retryDelayMs * 2);
         }
