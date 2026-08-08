@@ -11,7 +11,7 @@
       "descriptionLocale": {
         "zh": "供外部 Copilot 调用的无界面文档执行桥。"
       },
-      "url": "index.html?v=0.1.0-rev3",
+      "url": "index.html?v=0.1.0-rev4",
       "icons": [
         "resources/icon.svg"
       ],

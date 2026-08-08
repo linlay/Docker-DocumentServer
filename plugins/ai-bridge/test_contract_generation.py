@@ -336,6 +336,74 @@ class ContractGenerationTests(unittest.TestCase):
                     artifacts[toml_path],
                 )
 
+    def test_generated_runtime_preserves_transport_errors_and_classifies_contract_metadata(self) -> None:
+        scoped = sync_contract.scoped_contract(
+            self.contract,
+            "word",
+            sync_contract.contract_sha256(self.contract),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            skill_root = Path(directory)
+            scripts = skill_root / "scripts"
+            references = skill_root / "references"
+            scripts.mkdir()
+            references.mkdir()
+            runtime_path = scripts / "_docx_contract_runtime.py"
+            runtime_path.write_text(
+                sync_contract.render_runtime_helper(scoped),
+                encoding="utf-8",
+            )
+            (references / "contract.generated.json").write_text(
+                json.dumps(scoped),
+                encoding="utf-8",
+            )
+            spec = importlib.util.spec_from_file_location(
+                "generated_docx_contract_runtime",
+                runtime_path,
+            )
+            assert spec is not None and spec.loader is not None
+            runtime = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(runtime)
+
+            offline = {
+                "ok": False,
+                "status": 409,
+                "body": {"error": {"code": "editor_not_online"}},
+            }
+            self.assertIsNone(runtime.contract_mismatch(offline))
+
+            missing = runtime.contract_mismatch(
+                {"ok": True, "status": 200, "body": {"online": True}}
+            )
+            self.assertEqual(
+                missing["error"]["code"],
+                "CONTRACT_METADATA_MISSING",
+            )
+
+            mismatch = runtime.contract_mismatch(
+                {
+                    "ok": True,
+                    "status": 200,
+                    "body": {"contractSha256": "different-non-empty-sha"},
+                }
+            )
+            self.assertEqual(
+                mismatch["error"]["code"],
+                "CONTRACT_VERSION_MISMATCH",
+            )
+
+            self.assertIsNone(
+                runtime.contract_mismatch(
+                    {
+                        "ok": True,
+                        "status": 200,
+                        "body": {
+                            "contractSha256": scoped["contractSha256"]
+                        },
+                    }
+                )
+            )
+
     def test_httpx_base_url_rejects_non_origin_values(self) -> None:
         invalid_values = (
             None,

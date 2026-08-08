@@ -1051,12 +1051,9 @@
       if (document.documentElement && document.documentElement.dataset) {
         document.documentElement.dataset.aiBridgeRelayState = value;
       }
-      window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", {
-        detail: {
-          state: value,
-          code: code || null,
-        },
-      }));
+      const detail = { state: value };
+      if (code) detail.code = code;
+      window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", { detail }));
     }
 
     function credentialReloadKey() {

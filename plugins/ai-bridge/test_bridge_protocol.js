@@ -1254,10 +1254,12 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
   assert.deepEqual(
     harness.hostWindow.dispatchedEvents
       .filter(event => event.type === "ai-bridge-relay-state")
-      .map(event => ({ state: event.detail.state, code: event.detail.code })),
+      .map(event => event.detail.code
+        ? { state: event.detail.state, code: event.detail.code }
+        : { state: event.detail.state }),
     [
-      { state: "registering", code: null },
-      { state: "ready", code: null },
+      { state: "registering" },
+      { state: "ready" },
       { state: "superseded", code: "SESSION_SUPERSEDED" },
     ],
   );

@@ -1074,6 +1074,30 @@ def contract_mismatch(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     received_sha256 = body.get("contractSha256")
     if received_sha256 == CONTRACT_SHA256:
         return None
+    status = payload.get("status")
+    request_failed = (
+        payload.get("ok") is False
+        or body.get("ok") is False
+        or isinstance(payload.get("error"), dict)
+        or (isinstance(status, int) and not 200 <= status < 300)
+    )
+    if request_failed:
+        return None
+    if not isinstance(received_sha256, str) or not received_sha256.strip():
+        return {{
+            "ok": False,
+            "phase": "contract",
+            "error": {{
+                "code": "CONTRACT_METADATA_MISSING",
+                "message": "成功响应缺少 ai-bridge 契约元数据。",
+                "details": {{
+                    "expectedContractVersion": CONTRACT_VERSION,
+                    "expectedContractSha256": CONTRACT_SHA256,
+                    "receivedContractVersion": received_version,
+                    "receivedContractSha256": received_sha256,
+                }},
+            }},
+        }}
     return {{
         "ok": False,
         "phase": "contract",

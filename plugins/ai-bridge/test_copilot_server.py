@@ -156,7 +156,8 @@ class ContractAlignmentTests(unittest.TestCase):
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
         editor_revision = "0.1.0-rev1"
-        plugin_config_revision = "0.1.0-rev3"
+        word_bridge_revision = "0.1.0-rev2"
+        plugin_config_revision = "0.1.0-rev4"
         stale_revision = "0.1.0-rev0"
         paths = [
             "index.html",
@@ -169,6 +170,12 @@ class ContractAlignmentTests(unittest.TestCase):
                     contents = stream.read()
                 self.assertIn(editor_revision, contents)
                 self.assertNotIn(stale_revision, contents)
+        with open(os.path.join(base_dir, "index.html"), encoding="utf-8") as stream:
+            plugin_index = stream.read()
+        self.assertIn(
+            f'bridges/word-bridge.js?v={word_bridge_revision}',
+            plugin_index,
+        )
         with open(os.path.join(base_dir, "config.json"), encoding="utf-8") as stream:
             plugin_config = stream.read()
         self.assertIn(plugin_config_revision, plugin_config)
