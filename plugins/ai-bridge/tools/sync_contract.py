@@ -41,7 +41,6 @@ EDITOR_CONFIG = {
         "sessionAction": "session",
         "unitKey": "word",
         "normalizationKey": "word",
-        "runtimeHelper": False,
     },
     "slide": {
         "skill": "online-pptx",
@@ -53,7 +52,6 @@ EDITOR_CONFIG = {
         "sessionAction": "session",
         "unitKey": "slide",
         "normalizationKey": "slide",
-        "runtimeHelper": True,
     },
     "cell": {
         "skill": "online-xlsx",
@@ -65,7 +63,6 @@ EDITOR_CONFIG = {
         "sessionAction": "session",
         "unitKey": "sheet",
         "normalizationKey": "sheet",
-        "runtimeHelper": True,
     },
 }
 
@@ -638,6 +635,9 @@ def scoped_contract(
             or {}
         ),
         "controls": contract.get("controls") or [],
+        "runtimeCapabilities": (
+            (contract.get("runtimeCapabilities") or {}).get(editor) or {}
+        ),
         "errors": contract.get("errors") or [],
         "$defs": contract.get("$defs") or {},
         "tools": tools,
@@ -688,6 +688,12 @@ def render_markdown(scoped: dict[str, Any]) -> str:
         f"- 协议版本：`{scoped['protocolVersion']}`",
         f"- SHA-256：`{scoped['contractSha256']}`",
         f"- 工具数量：`{len(scoped['tools'])}`",
+        "",
+        "## 运行时能力位",
+        "",
+        "```json",
+        json.dumps(scoped.get("runtimeCapabilities") or {}, ensure_ascii=False, indent=2),
+        "```",
         "",
         "## 限制",
         "",
@@ -814,7 +820,7 @@ def action_params(kind: str) -> list[str]:
 
 
 def document_path_source(action: str) -> str:
-    if action not in {"session", "validate", "execute"}:
+    if action not in {"session", "validate", "execute", "commit", "qa"}:
         raise ValueError(f"unsupported document action: {action}")
     command = (
         "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
@@ -916,14 +922,16 @@ def render_toml(
             'extract_type = "jq"',
             (
                 "extract_expr = '''if (.body.online == true "
-                f'and .body.editorType == "{editor}") then .body '
+                f'and .body.saveReady == true and .body.editorType == "{editor}") then .body '
                 f"else error(\"EDITOR_SESSION_UNAVAILABLE: {config['site']}\") end'''"
             ),
+            'save = { "session.lease" = ".body.sessionLease", "session.contract_sha256" = ".body.contractSha256" }',
             "",
             "[actions.get_state]",
             f'description = "读取当前 {label} bridge state 和契约身份"',
             'method = "POST"',
             f"path = {document_path_source('execute')}",
+            'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
             'body = { method = "getState", requestId = { from = "param", key = "request_id" }, timeoutMs = { from = "param", key = "timeout_ms", default = 30000 } }',
             "expect_status = 200",
             "params = [",
@@ -947,6 +955,7 @@ def render_toml(
                 ),
                 'method = "POST"',
                 f"path = {document_path_source('execute')}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
                 (
                     'body = { method = "executeTool", '
                     f'name = "{name}", argumentsJson = {{ from = "param", key = "arguments_json" }}, '
@@ -984,6 +993,7 @@ def render_toml(
                 f'description = "{label} 批量{"预检" if kind == "validate" else "执行"}"',
                 'method = "POST"',
                 f"path = {document_path_source(document_action)}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
                 "body = { " + ", ".join(body_parts) + " }",
                 "expect_status = 200",
                 "params = [",
@@ -994,6 +1004,41 @@ def render_toml(
                 "",
             ]
         )
+    lines.extend(
+        [
+            "[actions.commit]",
+            f'description = "仅重试 {label} force-save，不重放工具调用；用于消费 mutation receipt"',
+            'method = "POST"',
+            f"path = {document_path_source('commit')}",
+            'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
+            'body = { mutationReceipt = { from = "param", key = "mutation_receipt" } }',
+            "expect_status = 200",
+            "params = [",
+            '  { name = "mutation_receipt", type = "string", required = true, description = "执行失败响应返回的 mutationReceipt；commit 不会重放业务修改" }',
+            "]",
+            'extract_type = "jq"',
+            'extract_expr = ".body"',
+            "",
+        ]
+    )
+    if editor == "word":
+        lines.extend(
+            [
+                "[actions.qa]",
+                'description = "强制保存并对 DOCX 执行 OOXML、样式、编号、字段、批注和逐页渲染验收"',
+                'method = "POST"',
+                f"path = {document_path_source('qa')}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
+                'body = { qaJson = { from = "param", key = "qa_json" } }',
+                "expect_status = 200",
+                "params = [",
+                '  { name = "qa_json", type = "json object string", required = true, description = "QA 要求 JSON；支持 requiredStyles、numberingSequences、requireSeq、requireRef、requireCommentAnchors、allowedBlankPages" }',
+                "]",
+                'extract_type = "jq"',
+                'extract_expr = ".body"',
+                "",
+            ]
+        )
     for control in contract.get("controls") or []:
         lines.extend(
             [
@@ -1001,6 +1046,7 @@ def render_toml(
                 f'description = "执行 {label} {control} 控制操作"',
                 'method = "POST"',
                 f"path = {document_path_source('execute')}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
                 (
                     f'body = {{ method = "{control}", '
                     'requestId = { from = "param", key = "request_id" }, '
@@ -1016,118 +1062,6 @@ def render_toml(
             ]
         )
     return "\n".join(lines).rstrip() + "\n"
-
-
-def render_runtime_helper(scoped: dict[str, Any]) -> str:
-    editor = scoped["editorType"]
-    limits = scoped["limits"]
-    return f'''"""Generated ai-bridge contract loader. Do not edit."""
-
-from __future__ import annotations
-
-import json
-import re
-from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
-
-
-CONTRACT_PATH = Path(__file__).resolve().parents[1] / "references" / "contract.generated.json"
-CONTRACT: Dict[str, Any] = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
-CONTRACT_VERSION = str(CONTRACT["version"])
-CONTRACT_SHA256 = str(CONTRACT["contractSha256"])
-EDITOR_TYPE = {editor!r}
-TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = dict(CONTRACT["tools"])
-TOOL_NAMES = frozenset(TOOL_SCHEMAS)
-READ_ONLY_ACTIONS = frozenset(
-    name for name, schema in TOOL_SCHEMAS.items()
-    if schema.get("x-effects") == "read"
-)
-IMAGE_SOURCE_ACTIONS = frozenset(
-    name for name, schema in TOOL_SCHEMAS.items()
-    if schema.get("x-argumentLimitClass") == "image"
-)
-MAX_BATCH_CALLS = int(CONTRACT["limits"]["maxToolCalls"])
-MAX_ARGUMENT_CHARS = int(CONTRACT["limits"]["maxArgumentsJsonChars"])
-MAX_IMAGE_REQUEST_BYTES = int(CONTRACT["limits"]["maxImageRequestBytes"])
-MAX_REQUEST_ID_CHARS = int(CONTRACT["limits"]["maxRequestIdChars"])
-MAX_TIMEOUT_MS = int(CONTRACT["limits"]["maxTimeoutMs"])
-REQUEST_ID_PATTERN = re.compile(
-    r"^[A-Za-z0-9._:-]{{1," + str(MAX_REQUEST_ID_CHARS) + r"}}$"
-)
-
-
-def argument_limit_class(tool_names: Iterable[str]) -> str:
-    return "image" if any(name in IMAGE_SOURCE_ACTIONS for name in tool_names) else "standard"
-
-
-def validate_arguments_size(
-    value: Any,
-    label: str,
-    tool_names: Iterable[str],
-) -> None:
-    encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    limit_class = argument_limit_class(tool_names)
-    actual = len(encoded.encode("utf-8")) if limit_class == "image" else len(encoded)
-    limit = MAX_IMAGE_REQUEST_BYTES if limit_class == "image" else MAX_ARGUMENT_CHARS
-    unit = "bytes" if limit_class == "image" else "characters"
-    if actual > limit:
-        raise ValueError(
-            "{{0}} exceeds {{1}} serialized {{2}} ({{3}} limit class)".format(
-                label, limit, unit, limit_class
-            )
-        )
-
-
-def response_body(payload: Dict[str, Any]) -> Dict[str, Any]:
-    body = payload.get("body")
-    return body if isinstance(body, dict) else payload
-
-
-def contract_mismatch(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    body = response_body(payload)
-    received_version = body.get("contractVersion")
-    received_sha256 = body.get("contractSha256")
-    if received_sha256 == CONTRACT_SHA256:
-        return None
-    status = payload.get("status")
-    request_failed = (
-        payload.get("ok") is False
-        or body.get("ok") is False
-        or isinstance(payload.get("error"), dict)
-        or (isinstance(status, int) and not 200 <= status < 300)
-    )
-    if request_failed:
-        return None
-    if not isinstance(received_sha256, str) or not received_sha256.strip():
-        return {{
-            "ok": False,
-            "phase": "contract",
-            "error": {{
-                "code": "CONTRACT_METADATA_MISSING",
-                "message": "成功响应缺少 ai-bridge 契约元数据。",
-                "details": {{
-                    "expectedContractVersion": CONTRACT_VERSION,
-                    "expectedContractSha256": CONTRACT_SHA256,
-                    "receivedContractVersion": received_version,
-                    "receivedContractSha256": received_sha256,
-                }},
-            }},
-        }}
-    return {{
-        "ok": False,
-        "phase": "contract",
-        "error": {{
-            "code": "CONTRACT_VERSION_MISMATCH",
-            "message": "生成技能契约与当前 ai-bridge 服务不一致。",
-            "details": {{
-                "expectedContractVersion": CONTRACT_VERSION,
-                "expectedContractSha256": CONTRACT_SHA256,
-                "receivedContractVersion": received_version,
-                "receivedContractSha256": received_sha256,
-            }},
-        }},
-    }}
-'''
 
 
 def build_artifacts(
@@ -1190,6 +1124,7 @@ def build_artifacts(
         return artifacts
     if not zenmind_root.is_dir():
         raise ValueError(f"zenmind root does not exist: {zenmind_root}")
+    validate_skill_layout(zenmind_root)
     normalized_httpx_base_url = normalize_httpx_base_url(httpx_base_url)
     for editor, config in EDITOR_CONFIG.items():
         scoped = scoped_contract(contract, editor, sha256)
@@ -1208,12 +1143,6 @@ def build_artifacts(
             json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
         )
         artifacts[references / "contract.generated.md"] = render_markdown(scoped)
-        if config["runtimeHelper"]:
-            artifacts[
-                skill_root
-                / "scripts"
-                / f"_{config['fileType']}_contract_runtime.py"
-            ] = render_runtime_helper(scoped)
         artifacts[
             skill_root / ".config" / "httpx" / config["toml"]
         ] = render_toml(
@@ -1225,9 +1154,23 @@ def build_artifacts(
     return artifacts
 
 
+def validate_skill_layout(zenmind_root: Path) -> None:
+    forbidden = [
+        zenmind_root / "skills-center" / config["skill"] / "scripts"
+        for config in EDITOR_CONFIG.values()
+        if (zenmind_root / "skills-center" / config["skill"] / "scripts").exists()
+    ]
+    if forbidden:
+        paths = ", ".join(str(path) for path in forbidden)
+        raise ValueError(
+            "generated online skills must not contain scripts directories: "
+            + paths
+        )
+
+
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.0":
-        raise ValueError("public-api.json version must be 0.2.0")
+    if contract.get("version") != "0.2.1":
+        raise ValueError("public-api.json version must be 0.2.1")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     naming = contract.get("toolNaming") or {}

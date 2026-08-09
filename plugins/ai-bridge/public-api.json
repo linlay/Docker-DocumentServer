@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "toolNaming": {
@@ -113,6 +113,43 @@
     "undo",
     "redo"
   ],
+  "runtimeCapabilities": {
+    "cell": {
+      "features": {
+        "sheets": {
+          "rangeFill": {
+            "fillDown": "boolean",
+            "fillUp": "boolean",
+            "fillLeft": "boolean",
+            "fillRight": "boolean"
+          },
+          "arrayFormula": {
+            "set": "boolean"
+          },
+          "validation": {
+            "manage": "boolean"
+          },
+          "comments": {
+            "create": "boolean",
+            "inspect": "boolean",
+            "update": "boolean",
+            "delete": "boolean"
+          },
+          "freezePanes": {
+            "inspect": "boolean",
+            "manage": "boolean"
+          },
+          "charts": {
+            "create": "boolean",
+            "inspect": "boolean",
+            "update": "boolean",
+            "delete": "boolean",
+            "addSeriesOnCreate": "boolean"
+          }
+        }
+      }
+    }
+  },
   "errors": [
     "NOT_READY",
     "CONNECTION_TIMEOUT",
@@ -155,6 +192,7 @@
     "IMAGE_API_UNSUPPORTED",
     "WORD_API_UNSUPPORTED",
     "SHEETS_API_UNSUPPORTED",
+    "BATCH_DEPENDENCY_REQUIRES_SPLIT",
     "SHEETS_CHART_CREATE_FAILED",
     "SHEETS_RUNTIME_INCOMPATIBLE",
     "SHEETS_CHART_PARTIAL_MUTATION",
@@ -201,7 +239,7 @@
           }
         }
       ],
-      "description": "标量只允许写入单个单元格；多单元格区域必须传入与目标区域同尺寸的非空等宽二维矩阵。"
+      "description": "标量只允许写入单个单元格；多单元格区域必须传入与目标区域同尺寸的非空等宽二维矩阵。null 表示清空对应单元格，不得映射为公式错误值。"
     },
     "sheet": {
       "type": "string",
@@ -715,6 +753,52 @@
       },
       "additionalProperties": false
     },
+    "wordParagraphTarget": {
+      "type": "object",
+      "properties": {
+        "paragraphId": { "type": ["string", "number"] },
+        "internalId": { "type": ["string", "number"] },
+        "paragraphIndex": { "type": "integer", "minimum": 1 },
+        "search": { "type": "string", "minLength": 1 },
+        "occurrence": { "type": "integer", "minimum": 1 },
+        "matchCase": { "type": "boolean" },
+        "matchMode": { "enum": ["contains", "exact"] }
+      },
+      "additionalProperties": false,
+      "description": "Stable paragraph target. Prefer paragraphId from inspect; paragraphIndex and search are compatibility fallbacks."
+    },
+    "wordNumberingAssignment": {
+      "type": "object",
+      "required": ["level"],
+      "properties": {
+        "level": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "paragraphId": { "type": ["string", "number"] },
+        "internalId": { "type": ["string", "number"] },
+        "paragraphIndex": { "type": "integer", "minimum": 1 },
+        "search": { "type": "string", "minLength": 1 },
+        "occurrence": { "type": "integer", "minimum": 1 },
+        "matchCase": { "type": "boolean" },
+        "matchMode": { "enum": ["contains", "exact"] }
+      },
+      "additionalProperties": false,
+      "description": "One paragraph and its level in a shared multilevel numbering instance."
+    },
+    "wordSectionBoundary": {
+      "type": "object",
+      "required": ["position"],
+      "properties": {
+        "position": { "enum": ["before", "after"] },
+        "paragraphId": { "type": ["string", "number"] },
+        "internalId": { "type": ["string", "number"] },
+        "paragraphIndex": { "type": "integer", "minimum": 1 },
+        "search": { "type": "string", "minLength": 1 },
+        "occurrence": { "type": "integer", "minimum": 1 },
+        "matchCase": { "type": "boolean" },
+        "matchMode": { "enum": ["contains", "exact"] }
+      },
+      "additionalProperties": false,
+      "description": "Section boundary relative to one paragraph. ONLYOFFICE CreateSection ends the current section at the resolved boundary paragraph."
+    },
     "wordTableCell": {
       "type": "object",
       "required": [
@@ -722,6 +806,19 @@
       ],
       "properties": {
         "text": {
+          "type": "string"
+        },
+        "paragraphStyleName": {
+          "type": "string",
+          "description": "Paragraph style applied to the paragraph(s) inside this cell."
+        },
+        "styleName": {
+          "type": "string",
+          "deprecated": true,
+          "x-canonicalProperty": "paragraphStyleName",
+          "description": "Compatibility alias for paragraphStyleName; prefer paragraphStyleName."
+        },
+        "characterStyleName": {
           "type": "string"
         },
         "fontSize": {
@@ -2181,6 +2278,12 @@
             "type": "integer",
             "minimum": 1
           },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "search": {
             "type": "string",
             "minLength": 1
@@ -2191,6 +2294,9 @@
           },
           "matchCase": {
             "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
           },
           "wrapping": {
             "enum": [
@@ -2370,7 +2476,18 @@
           },
           "paragraphIndex": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "deprecated": true,
+            "x-canonicalProperty": "endParagraphIndex",
+            "description": "Compatibility alias: the current section ends at this paragraph. Prefer boundary or endParagraphIndex."
+          },
+          "endParagraphIndex": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Compatibility form of boundary.position=after; the current section ends at this paragraph."
+          },
+          "boundary": {
+            "$ref": "#/$defs/wordSectionBoundary"
           },
           "type": {
             "enum": [
@@ -2435,7 +2552,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "创建或配置 Word 文档节、分节类型、起始页码和分栏",
+        "description": "创建或配置 Word 文档节。CreateSection 的目标是当前节的结束段落；新节从其后开始。",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": [],
@@ -2452,8 +2569,10 @@
               ]
             },
             "then": {
-              "required": [
-                "paragraphIndex"
+              "anyOf": [
+                { "required": ["boundary"] },
+                { "required": ["endParagraphIndex"] },
+                { "required": ["paragraphIndex"] }
               ]
             }
           }
@@ -2606,6 +2725,16 @@
           "tabs"
         ],
         "properties": {
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
@@ -2737,13 +2866,42 @@
               "additionalProperties": false
             }
           },
+          "assignments": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": { "$ref": "#/$defs/wordNumberingAssignment" },
+            "description": "All assignments in one call share one numbering definition; use this for continuous multilevel lists."
+          },
+          "continueFrom": {
+            "$ref": "#/$defs/wordParagraphTarget",
+            "description": "Reuse the numbering definition of an already-numbered paragraph."
+          },
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1,
+            "deprecated": true,
+            "description": "Legacy single-level target; prefer assignments[]."
+          },
+          "paragraphId": {
+            "type": ["string", "number"],
+            "deprecated": true,
+            "description": "Legacy single-level target; prefer assignments[]."
+          },
+          "internalId": {
+            "type": ["string", "number"],
+            "deprecated": true,
+            "description": "Legacy single-level target; prefer assignments[]."
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
               "type": "integer",
               "minimum": 1
             },
-            "maxItems": 500
+            "maxItems": 500,
+            "deprecated": true,
+            "description": "Legacy single-level targeting. Each set_numbering call creates a separate list; do not use repeated legacy calls for a multilevel list."
           },
           "search": {
             "type": "string"
@@ -2774,7 +2932,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "设置 Word 段落的高级编号属性",
+        "description": "创建或延续一个 Word 编号定义，并把同一实例的不同层级应用到多个段落",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -2959,7 +3117,18 @@
             "description": "Whole-table alignment; cell paragraph alignment belongs in data cell objects."
           },
           "styleName": {
-            "type": "string"
+            "type": "string",
+            "deprecated": true,
+            "x-canonicalProperty": "tableStyleName",
+            "description": "Compatibility alias for tableStyleName; prefer tableStyleName."
+          },
+          "tableStyleName": {
+            "type": "string",
+            "description": "A table style for the nested table."
+          },
+          "cellParagraphStyleName": {
+            "type": "string",
+            "description": "Paragraph style applied to every nested-table cell paragraph."
           },
           "fontSize": {
             "type": "number"
@@ -3128,6 +3297,26 @@
             "type": "integer",
             "minimum": 1
           },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "occurrence": {
+            "type": "integer",
+            "minimum": 1
+          },
           "current": {
             "type": "boolean"
           },
@@ -3240,6 +3429,26 @@
             "type": "integer",
             "minimum": 1
           },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "occurrence": {
+            "type": "integer",
+            "minimum": 1
+          },
           "current": {
             "type": "boolean"
           }
@@ -3267,6 +3476,26 @@
             ]
           },
           "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "occurrence": {
             "type": "integer",
             "minimum": 1
           },
@@ -3306,6 +3535,26 @@
             "exclusiveMinimum": 0
           },
           "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "occurrence": {
             "type": "integer",
             "minimum": 1
           },
@@ -3351,6 +3600,12 @@
           "paragraphIndex": {
             "type": "integer",
             "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
           }
         },
         "additionalProperties": false,
@@ -3402,6 +3657,31 @@
           "paragraphIndex": {
             "type": "integer",
             "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "tableIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "insertAt": {
+            "enum": ["before", "after", "replaceEmpty"],
+            "description": "addToc defaults to replaceEmpty; addCaption uses before or after."
+          },
+          "styleName": {
+            "type": "string",
+            "description": "Paragraph style for a generated caption."
           },
           "label": {
             "type": "string"
@@ -3457,6 +3737,12 @@
             "type": "integer",
             "minimum": 1
           },
+          "targetParagraphId": {
+            "type": ["string", "number"]
+          },
+          "targetInternalId": {
+            "type": ["string", "number"]
+          },
           "captionIndex": {
             "type": "integer",
             "minimum": 1
@@ -3473,6 +3759,18 @@
           "numberSeparator": {
             "type": "string"
           },
+          "replaceSearch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Replace an exact placeholder range with a REF field; currently supported for bookmark references."
+          },
+          "occurrence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
           "noteText": {
             "type": "string"
           },
@@ -3481,7 +3779,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "管理 Word 目录、题注、图表目录、交叉引用、脚注尾注和书签",
+        "description": "管理 Word 目录、真实 SEQ 题注、REF 交叉引用、脚注尾注和书签",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -3688,6 +3986,26 @@
             "type": "integer",
             "minimum": 1
           },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
+          "search": {
+            "type": "string",
+            "minLength": 1
+          },
+          "matchCase": {
+            "type": "boolean"
+          },
+          "matchMode": {
+            "enum": ["contains", "exact"]
+          },
+          "occurrence": {
+            "type": "integer",
+            "minimum": 1
+          },
           "current": {
             "type": "boolean"
           },
@@ -3871,6 +4189,16 @@
       "word_format_paragraphs": {
         "type": "object",
         "properties": {
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
@@ -4067,6 +4395,16 @@
           "text": {
             "type": "string"
           },
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
@@ -4257,6 +4595,16 @@
       "word_delete_paragraphs": {
         "type": "object",
         "properties": {
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
@@ -4316,6 +4664,16 @@
             "minimum": 0,
             "maximum": 8
           },
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
+          },
           "paragraphIndexes": {
             "type": "array",
             "items": {
@@ -4369,6 +4727,16 @@
               "before",
               "after"
             ]
+          },
+          "paragraphIndex": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
           },
           "paragraphIndexes": {
             "type": "array",
@@ -4549,7 +4917,18 @@
             "description": "Whole-table alignment; cell paragraph alignment belongs in data cell objects."
           },
           "styleName": {
-            "type": "string"
+            "type": "string",
+            "deprecated": true,
+            "x-canonicalProperty": "tableStyleName",
+            "description": "Compatibility alias for tableStyleName; prefer tableStyleName."
+          },
+          "tableStyleName": {
+            "type": "string",
+            "description": "A table style; Bridge rejects paragraph, character, or numbering styles here."
+          },
+          "cellParagraphStyleName": {
+            "type": "string",
+            "description": "Paragraph style applied to every cell paragraph; per-cell paragraphStyleName overrides it."
           },
           "firstRow": {
             "type": "boolean"
@@ -4601,6 +4980,12 @@
           "paragraphIndex": {
             "type": "integer",
             "minimum": 1
+          },
+          "paragraphId": {
+            "type": ["string", "number"]
+          },
+          "internalId": {
+            "type": ["string", "number"]
           },
           "tableIndex": {
             "type": "integer",
@@ -4721,7 +5106,14 @@
             ]
           },
           "styleName": {
-            "type": "string"
+            "type": "string",
+            "deprecated": true,
+            "x-canonicalProperty": "paragraphStyleName",
+            "description": "Compatibility alias for paragraphStyleName; prefer paragraphStyleName."
+          },
+          "paragraphStyleName": {
+            "type": "string",
+            "description": "Paragraph style applied inside this cell."
           },
           "headingLevel": {
             "type": "integer",
@@ -4846,7 +5238,17 @@
             ]
           },
           "styleName": {
+            "type": "string",
+            "deprecated": true,
+            "x-canonicalProperty": "tableStyleName",
+            "description": "Compatibility alias for tableStyleName; prefer tableStyleName."
+          },
+          "tableStyleName": {
             "type": "string"
+          },
+          "cellParagraphStyleName": {
+            "type": "string",
+            "description": "Paragraph style applied to all cell paragraphs."
           },
           "backgroundColor": {
             "$ref": "#/$defs/color"
@@ -4899,7 +5301,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "设置指定 Word 表格的宽度、样式、外观和单元格格式",
+        "description": "设置指定 Word 表格的宽度、tableStyleName 外观和 cellParagraphStyleName 单元格段落格式",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
@@ -9021,7 +9423,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "向 XLSX 单元格写入标量或严格匹配目标区域尺寸的二维值矩阵",
+        "description": "向 XLSX 单元格写入标量或严格匹配目标区域尺寸的二维值矩阵；null 明确定义为清空对应单元格",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": [
@@ -9046,7 +9448,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "向 XLSX 单元格写入单格公式或严格匹配目标区域尺寸的二维公式矩阵",
+        "description": "向 XLSX 单元格写入单格公式或严格匹配目标区域尺寸的二维公式矩阵；多单元格公式默认使用显式目标尺寸矩阵",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": [
@@ -10283,6 +10685,20 @@
               "action": {
                 "const": "unfreeze"
               }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "range"
+                  ]
+                },
+                {
+                  "required": [
+                    "count"
+                  ]
+                }
+              ]
             }
           },
           {
@@ -10293,6 +10709,11 @@
               "action": {
                 "const": "freezeAt"
               }
+            },
+            "not": {
+              "required": [
+                "count"
+              ]
             }
           },
           {
@@ -10303,6 +10724,11 @@
               "action": {
                 "const": "freezeRows"
               }
+            },
+            "not": {
+              "required": [
+                "range"
+              ]
             }
           },
           {
@@ -10313,6 +10739,11 @@
               "action": {
                 "const": "freezeColumns"
               }
+            },
+            "not": {
+              "required": [
+                "range"
+              ]
             }
           }
         ],

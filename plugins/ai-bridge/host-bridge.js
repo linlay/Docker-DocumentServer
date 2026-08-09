@@ -1,9 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.2.0";
+  const VERSION = "0.2.1";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "e3467b75206952228df12e986d6d9d2bfdefbd99f2941c4bf747c6f26199d2f7";
+  const CONTRACT_SHA256 = "c27cbdb14e1c89b3f5a0db9f409089a2eed9f1db7c95d81cfa360547b52ea17a";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -37,6 +37,9 @@
   let bridgeCapabilities = null;
   let bridgeContractVersion = VERSION;
   let bridgeContractSha256 = CONTRACT_SHA256;
+  let capabilityProbedAt = null;
+  let saveStatus = "idle";
+  let saveStatusAt = Date.now();
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -225,6 +228,18 @@
   }
 
   function stateSnapshot() {
+    const documentReady = startupMarks.documentReadyMs !== undefined;
+    const capabilityProbeComplete = Boolean(
+      ready
+      && bridgeCapabilities
+      && (
+        editorType !== "cell"
+        || (
+          bridgeCapabilities.features
+          && bridgeCapabilities.features.sheets
+        )
+      )
+    );
     return {
       version: VERSION,
       protocolVersion: PROTOCOL_VERSION,
@@ -232,6 +247,12 @@
       contractVersion: bridgeContractVersion,
       contractSha256: bridgeContractSha256,
       ready,
+      documentReady,
+      capabilityProbeComplete,
+      capabilityProbedAt,
+      saveReady: Boolean(ready && documentReady && capabilityProbeComplete && saveStatus !== "saving"),
+      saveStatus,
+      saveStatusAt,
       editorType,
       context: publicContext(),
       capabilities: bridgeCapabilities,
@@ -298,6 +319,7 @@
     ready = true;
     editorType = message.editorType || editorType;
     bridgeCapabilities = message.capabilities || bridgeCapabilities;
+    if (bridgeCapabilities && capabilityProbedAt === null) capabilityProbedAt = Date.now();
     document.documentElement.dataset.aiBridgeState = "ready";
     document.documentElement.dataset.aiBridgeVersion = VERSION;
     for (const waiter of readyWaiters) waiter.resolve();
@@ -339,6 +361,11 @@
     }
     if (message.type === "service-request") {
       handlePluginService(message);
+      return;
+    }
+    if (message.type === "persistence-state") {
+      saveStatus = String(message.saveStatus || "unknown");
+      saveStatusAt = Number(message.saveStatusAt) || Date.now();
       return;
     }
     if (message.type !== "result" || !message.requestId) return;
@@ -1003,9 +1030,21 @@
       return;
     }
     try {
+      if (message.action === "forcesave") {
+        saveStatus = "saving";
+        saveStatusAt = Date.now();
+      }
       const result = await persistenceRequest(message.action, requestId, message.payload);
+      if (message.action === "forcesave") {
+        saveStatus = "saved";
+        saveStatusAt = Date.now();
+      }
       send({ type: "service-response", serviceRequestId: requestId, result });
     } catch (error) {
+      if (message.action === "forcesave") {
+        saveStatus = "failed";
+        saveStatusAt = Date.now();
+      }
       send({
         type: "service-response",
         serviceRequestId: requestId,

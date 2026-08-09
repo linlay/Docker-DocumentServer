@@ -17,7 +17,13 @@ RUN set -eux; \
       /var/www/onlyoffice/documentserver/web-apps/apps/common/main/lib/view/Header.js \
       /var/www/onlyoffice/documentserver/web-apps/apps/documenteditor/main/app/controller/Main.js \
       /var/www/onlyoffice/documentserver/web-apps/apps/documenteditor/main/app/controller/Toolbar.js \
-      /var/www/onlyoffice/documentserver/web-apps/apps/documenteditor/main/app/controller/Viewport.js; do \
+      /var/www/onlyoffice/documentserver/web-apps/apps/documenteditor/main/app/controller/Viewport.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/spreadsheeteditor/main/app/controller/Main.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/spreadsheeteditor/main/app/controller/Toolbar.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/spreadsheeteditor/main/app/controller/Viewport.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/presentationeditor/main/app/controller/Main.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/presentationeditor/main/app/controller/Toolbar.js \
+      /var/www/onlyoffice/documentserver/web-apps/apps/presentationeditor/main/app/controller/Viewport.js; do \
         gzip -n -9 -c "${source_file}" > "${source_file}.gz"; \
         chown ds:ds "${source_file}" "${source_file}.gz"; \
         chmod 0444 "${source_file}" "${source_file}.gz"; \

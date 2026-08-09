@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 155)
-        self.assertEqual(self.contract["version"], "0.2.0")
+        self.assertEqual(self.contract["version"], "0.2.1")
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -74,6 +74,43 @@ class ContractGenerationTests(unittest.TestCase):
             ["auto", "placeholder", "textbox"],
         )
         self.assertEqual(title_placement["default"], "auto")
+
+    def test_sheets_runtime_capability_contract_is_granular(self) -> None:
+        sheets = self.contract["runtimeCapabilities"]["cell"]["features"]["sheets"]
+        self.assertEqual(
+            sheets["rangeFill"],
+            {
+                "fillDown": "boolean",
+                "fillUp": "boolean",
+                "fillLeft": "boolean",
+                "fillRight": "boolean",
+            },
+        )
+        self.assertEqual(sheets["arrayFormula"], {"set": "boolean"})
+        self.assertEqual(sheets["validation"], {"manage": "boolean"})
+        self.assertEqual(
+            sheets["comments"],
+            {
+                "create": "boolean",
+                "inspect": "boolean",
+                "update": "boolean",
+                "delete": "boolean",
+            },
+        )
+        self.assertEqual(
+            sheets["freezePanes"],
+            {"inspect": "boolean", "manage": "boolean"},
+        )
+        self.assertEqual(
+            sheets["charts"],
+            {
+                "create": "boolean",
+                "inspect": "boolean",
+                "update": "boolean",
+                "delete": "boolean",
+                "addSeriesOnCreate": "boolean",
+            },
+        )
 
     def test_slides_image_background_contract_is_safe_and_mutually_exclusive(self) -> None:
         slide_schema = self.contract["tools"]["slide"]["slides_set_background"]
@@ -258,6 +295,25 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn("/ai/session", rendered)
                 self.assertIn("/ai/validate", rendered)
                 self.assertIn("/ai/execute", rendered)
+                self.assertIn("/ai/commit", rendered)
+                self.assertIn("[actions.commit]", rendered)
+                self.assertIn(".body.saveReady == true", rendered)
+                self.assertIn('"session.lease" = ".body.sessionLease"', rendered)
+                self.assertIn(
+                    '"X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" }',
+                    rendered,
+                )
+                self.assertIn('key = "mutation_receipt"', rendered)
+                if editor == "word":
+                    self.assertIn("[actions.qa]", rendered)
+                    self.assertIn("/ai/qa", rendered)
+                    self.assertIn('key = "qa_json"', rendered)
+                    qa_action = rendered.split("[actions.qa]", 1)[1].split("\n[actions.", 1)[0]
+                    self.assertIn('"X-AI-Session-Lease"', qa_action)
+                    self.assertIn('key = "session.lease"', qa_action)
+                else:
+                    self.assertNotIn("[actions.qa]", rendered)
+                    self.assertNotIn("/ai/qa", rendered)
                 self.assertNotIn("/copilot-api/bridge/attach", rendered)
                 self.assertNotIn("auth.bridge", rendered)
                 self.assertNotIn("bindingToken", rendered)
@@ -309,7 +365,7 @@ class ContractGenerationTests(unittest.TestCase):
     def test_cross_repo_projections_live_inside_each_skill(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             zenmind_root = Path(directory)
-            for config in sync_contract.EDITOR_CONFIG.values():
+            for editor, config in sync_contract.EDITOR_CONFIG.items():
                 skill_root = (
                     zenmind_root / "skills-center" / config["skill"]
                 )
@@ -334,7 +390,7 @@ class ContractGenerationTests(unittest.TestCase):
                     for path in artifacts
                 )
             )
-            for config in sync_contract.EDITOR_CONFIG.values():
+            for editor, config in sync_contract.EDITOR_CONFIG.items():
                 skill_root = (
                     zenmind_root / "skills-center" / config["skill"]
                 )
@@ -345,97 +401,65 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(skill_path, artifacts)
                 self.assertIn(toml_path, artifacts)
                 self.assertIn(
-                    '  version: "0.2.0"',
+                    '  version: "0.2.1"',
                     artifacts[skill_path],
                 )
                 self.assertIn(
                     f'agent-platform-httpx/{config["site"]}',
                     artifacts[toml_path],
                 )
-                runtime_path = (
-                    skill_root
-                    / "scripts"
-                    / f"_{config['fileType']}_contract_runtime.py"
+                scripts_root = skill_root / "scripts"
+                self.assertFalse(
+                    any(scripts_root in path.parents for path in artifacts),
+                    f"{config['skill']} must not generate scripts artifacts",
                 )
-                if config["runtimeHelper"]:
-                    self.assertIn(runtime_path, artifacts)
-                else:
-                    scripts_root = skill_root / "scripts"
-                    self.assertFalse(
-                        any(scripts_root in path.parents for path in artifacts),
-                        f"{config['skill']} must not generate scripts artifacts",
+                action_names = set(
+                    re.findall(
+                        r"^\[actions\.([^]]+)\]$",
+                        artifacts[toml_path],
+                        re.MULTILINE,
                     )
-
-    def test_generated_runtime_preserves_transport_errors_and_classifies_contract_metadata(self) -> None:
-        scoped = sync_contract.scoped_contract(
-            self.contract,
-            "cell",
-            sync_contract.contract_sha256(self.contract),
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            skill_root = Path(directory)
-            scripts = skill_root / "scripts"
-            references = skill_root / "references"
-            scripts.mkdir()
-            references.mkdir()
-            runtime_path = scripts / "_xlsx_contract_runtime.py"
-            runtime_path.write_text(
-                sync_contract.render_runtime_helper(scoped),
-                encoding="utf-8",
-            )
-            (references / "contract.generated.json").write_text(
-                json.dumps(scoped),
-                encoding="utf-8",
-            )
-            spec = importlib.util.spec_from_file_location(
-                "generated_xlsx_contract_runtime",
-                runtime_path,
-            )
-            assert spec is not None and spec.loader is not None
-            runtime = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(runtime)
-
-            self.assertIn("inspect", runtime.TOOL_NAMES)
-            self.assertNotIn("sheets_inspect", runtime.TOOL_NAMES)
-
-            offline = {
-                "ok": False,
-                "status": 409,
-                "body": {"error": {"code": "editor_not_online"}},
-            }
-            self.assertIsNone(runtime.contract_mismatch(offline))
-
-            missing = runtime.contract_mismatch(
-                {"ok": True, "status": 200, "body": {"online": True}}
-            )
-            self.assertEqual(
-                missing["error"]["code"],
-                "CONTRACT_METADATA_MISSING",
-            )
-
-            mismatch = runtime.contract_mismatch(
-                {
-                    "ok": True,
-                    "status": 200,
-                    "body": {"contractSha256": "different-non-empty-sha"},
-                }
-            )
-            self.assertEqual(
-                mismatch["error"]["code"],
-                "CONTRACT_VERSION_MISMATCH",
-            )
-
-            self.assertIsNone(
-                runtime.contract_mismatch(
-                    {
-                        "ok": True,
-                        "status": 200,
-                        "body": {
-                            "contractSha256": scoped["contractSha256"]
-                        },
-                    }
                 )
-            )
+                expected_actions = {
+                    "health",
+                    "create",
+                    "session",
+                    "get_state",
+                    "validate_batch",
+                    "execute_batch",
+                    "commit",
+                    *self.contract["controls"],
+                    *(
+                        sync_contract.public_tool_name(editor, name)
+                        for name in self.contract["tools"][editor]
+                    ),
+                }
+                if editor == "word":
+                    expected_actions.add("qa")
+                self.assertEqual(action_names, expected_actions)
+
+    def test_generation_rejects_scripts_directories_for_every_online_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            zenmind_root = Path(directory)
+            for config in sync_contract.EDITOR_CONFIG.values():
+                skill_root = zenmind_root / "skills-center" / config["skill"]
+                skill_root.mkdir(parents=True)
+                (skill_root / "SKILL.md").write_text(
+                    "---\nname: example\n---\n\n# Body\n",
+                    encoding="utf-8",
+                )
+                scripts_root = skill_root / "scripts"
+                scripts_root.mkdir()
+                with self.subTest(skill=config["skill"]), self.assertRaisesRegex(
+                    ValueError,
+                    "must not contain scripts directories",
+                ):
+                    sync_contract.build_artifacts(
+                        self.contract,
+                        zenmind_root,
+                        "https://office.example.test",
+                    )
+                scripts_root.rmdir()
 
     def test_httpx_base_url_rejects_non_origin_values(self) -> None:
         invalid_values = (
@@ -571,6 +595,60 @@ class ContractGenerationTests(unittest.TestCase):
             "xlValidateList",
         )
         self.assertEqual(changes[0]["kind"], "enumCanonicalization")
+
+    def test_freeze_panes_actions_have_strict_mutually_exclusive_shapes(self) -> None:
+        valid_arguments = (
+            {"action": "unfreeze"},
+            {"action": "freezeAt", "range": "A1:C4"},
+            {"action": "freezeRows", "count": 2},
+            {"action": "freezeColumns", "count": 3},
+        )
+        for arguments in valid_arguments:
+            with self.subTest(valid=arguments):
+                normalized, changes = copilot_server.require_valid_editor_tool_calls(
+                    "cell",
+                    [
+                        {
+                            "name": "sheets_manage_freeze_panes",
+                            "arguments": arguments,
+                        }
+                    ],
+                )
+                self.assertEqual(normalized[0]["arguments"], arguments)
+                self.assertEqual(changes, [])
+
+        invalid_arguments = (
+            {"action": "unfreeze", "range": "A1:B2"},
+            {"action": "unfreeze", "count": 1},
+            {"action": "freezeAt"},
+            {"action": "freezeAt", "range": "A1:B2", "count": 1},
+            {"action": "freezeRows"},
+            {"action": "freezeRows", "count": 1, "range": "A1:B2"},
+            {"action": "freezeRows", "count": 0},
+            {"action": "freezeColumns"},
+            {"action": "freezeColumns", "count": 1, "range": "A1:B2"},
+            {"action": "freezeColumns", "count": -1},
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(invalid=arguments):
+                with self.assertRaises(copilot_server.BridgeError) as caught:
+                    copilot_server.require_valid_editor_tool_calls(
+                        "cell",
+                        [
+                            {
+                                "name": "sheets_manage_freeze_panes",
+                                "arguments": arguments,
+                            }
+                        ],
+                    )
+                self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+                self.assertEqual(
+                    caught.exception.details["completedToolCalls"],
+                    0,
+                )
+                self.assertFalse(
+                    caught.exception.details["partialMutationPossible"]
+                )
 
     def test_chart_type_contract_accepts_supported_values_and_rejects_unknowns(self) -> None:
         supported = self.contract["$defs"]["chartType"]["enum"]
@@ -709,8 +787,8 @@ class ContractGenerationTests(unittest.TestCase):
         validation_errors = caught.exception.details["validationErrors"]
         self.assertTrue(
             any(
-                error["path"] == "arguments.paragraphIndex"
-                and error["keyword"] == "required"
+                error["path"] == "arguments"
+                and error["keyword"] == "anyOf"
                 for error in validation_errors
             )
         )
@@ -751,7 +829,7 @@ class ContractGenerationTests(unittest.TestCase):
             [
                 (0, "arguments.internalNote", "additionalProperties"),
                 (0, "arguments.text", "type"),
-                (1, "arguments.paragraphIndex", "required"),
+                (1, "arguments", "anyOf"),
                 (2, "arguments.target", "semantic"),
             ],
         )

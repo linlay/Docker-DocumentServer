@@ -44,6 +44,7 @@
             var charts = sheet && typeof sheet.GetAllCharts === "function"
               ? sheet.GetAllCharts()
               : [];
+            var firstChart = Array.isArray(charts) && charts.length ? charts[0] : null;
             var chartDelete = false;
             if (Array.isArray(charts)) {
               for (var chartIndex = 0; chartIndex < charts.length; chartIndex += 1) {
@@ -53,6 +54,16 @@
                 }
               }
             }
+            var validation = probeRange && typeof probeRange.GetValidation === "function"
+              ? probeRange.GetValidation()
+              : null;
+            var freezePanes = sheet && typeof sheet.GetFreezePanes === "function"
+              ? sheet.GetFreezePanes()
+              : null;
+            var comments = sheet && typeof sheet.GetComments === "function"
+              ? sheet.GetComments()
+              : [];
+            var firstComment = Array.isArray(comments) && comments.length ? comments[0] : null;
             var version = null;
             try {
               if (
@@ -92,8 +103,43 @@
                       && typeof probeRange.GetFormatConditions === "function"
                     ),
                   },
+                  rangeFill: {
+                    fillDown: Boolean(probeRange && typeof probeRange.FillDown === "function"),
+                    fillUp: Boolean(probeRange && typeof probeRange.FillUp === "function"),
+                    fillLeft: Boolean(probeRange && typeof probeRange.FillLeft === "function"),
+                    fillRight: Boolean(probeRange && typeof probeRange.FillRight === "function"),
+                  },
+                  arrayFormula: {
+                    set: Boolean(probeRange && typeof probeRange.SetFormulaArray === "function"),
+                  },
+                  validation: {
+                    manage: Boolean(
+                      validation
+                      && typeof validation.Add === "function"
+                      && typeof validation.Modify === "function"
+                      && typeof validation.Delete === "function"
+                    ),
+                  },
+                  comments: {
+                    create: Boolean(probeRange && typeof probeRange.AddComment === "function"),
+                    inspect: Boolean(sheet && typeof sheet.GetComments === "function"),
+                    update: Boolean(firstComment && typeof firstComment.SetText === "function"),
+                    delete: Boolean(firstComment && typeof firstComment.Delete === "function"),
+                  },
+                  freezePanes: {
+                    inspect: Boolean(sheet && typeof sheet.GetFreezePanes === "function"),
+                    manage: Boolean(
+                      freezePanes
+                      && typeof freezePanes.Unfreeze === "function"
+                      && typeof freezePanes.FreezeAt === "function"
+                      && typeof freezePanes.FreezeRows === "function"
+                      && typeof freezePanes.FreezeColumns === "function"
+                    ),
+                  },
                   charts: {
                     create: Boolean(sheet && typeof sheet.AddChart === "function"),
+                    inspect: Boolean(sheet && typeof sheet.GetAllCharts === "function"),
+                    update: Boolean(firstChart && typeof firstChart.SetTitle === "function"),
                     // Adding series while a chart is being created is kept
                     // conservative because affected Community builds expose
                     // AddSeria but fail inside createDuplicate.
@@ -127,7 +173,12 @@
                   nativeTables: { create: false, inspect: false },
                   rangeStyleTables: { create: false },
                   conditionalFormatting: { create: false },
-                  charts: { create: false, addSeriesOnCreate: false, delete: false },
+                  rangeFill: { fillDown: false, fillUp: false, fillLeft: false, fillRight: false },
+                  arrayFormula: { set: false },
+                  validation: { manage: false },
+                  comments: { create: false, inspect: false, update: false, delete: false },
+                  freezePanes: { inspect: false, manage: false },
+                  charts: { create: false, inspect: false, update: false, addSeriesOnCreate: false, delete: false },
                 },
               },
             });
@@ -2267,7 +2318,80 @@
               );
             }
 
+            function containsNull(value) {
+              if (value === null) return true;
+              if (!Array.isArray(value)) return false;
+              for (var nullIndex = 0; nullIndex < value.length; nullIndex += 1) {
+                if (containsNull(value[nullIndex])) return true;
+              }
+              return false;
+            }
+
+            function batchReferencesSheet(key, value, sheetName) {
+              if (Array.isArray(value)) {
+                for (var valueIndex = 0; valueIndex < value.length; valueIndex += 1) {
+                  if (batchReferencesSheet(key, value[valueIndex], sheetName)) return true;
+                }
+                return false;
+              }
+              if (isObject(value)) {
+                for (var nestedKey in value) {
+                  if (hasOwn(value, nestedKey) && batchReferencesSheet(nestedKey, value[nestedKey], sheetName)) return true;
+                }
+                return false;
+              }
+              if (typeof value !== "string") return false;
+              if (
+                (key === "sheet" || key === "destinationSheet" || key === "beforeSheet" || key === "sourceSheet")
+                && value === sheetName
+              ) return true;
+              if (
+                key !== "formula" && key !== "formula1" && key !== "formula2"
+                && key !== "categoryRange" && key !== "valuesRange" && key !== "xValuesRange"
+              ) return false;
+              var escaped = sheetName.replace(/'/g, "''");
+              return value.indexOf("'" + escaped + "'!") >= 0 || value.indexOf(sheetName + "!") >= 0;
+            }
+
+            function preflightBatchDependencies(toolCalls) {
+              var createdSheets = {};
+              for (var dependencyIndex = 0; dependencyIndex < toolCalls.length; dependencyIndex += 1) {
+                var dependencyCall = toolCalls[dependencyIndex] || {};
+                var dependencyArgs = getArgs(dependencyCall);
+                for (var createdName in createdSheets) {
+                  if (!hasOwn(createdSheets, createdName)) continue;
+                  var referenced = false;
+                  for (var dependencyKey in dependencyArgs) {
+                    if (hasOwn(dependencyArgs, dependencyKey) && batchReferencesSheet(dependencyKey, dependencyArgs[dependencyKey], createdName)) {
+                      referenced = true;
+                      break;
+                    }
+                  }
+                  if (referenced) {
+                    throw sheetError(
+                      "BATCH_DEPENDENCY_REQUIRES_SPLIT",
+                      "同一批次不能引用刚新增或刚重命名的工作表；请拆分批次",
+                      {
+                        sheet: createdName,
+                        sourceToolCallIndex: createdSheets[createdName],
+                        toolCallIndex: dependencyIndex,
+                        completedToolCalls: 0,
+                        partialMutationPossible: false,
+                        mutationState: "none",
+                      }
+                    );
+                  }
+                }
+                var newSheetName = null;
+                if (dependencyCall.name === "sheets_add_sheet") newSheetName = dependencyArgs.name;
+                else if (dependencyCall.name === "sheets_rename_sheet") newSheetName = dependencyArgs.newName;
+                else if (dependencyCall.name === "sheets_manage_sheet" && dependencyArgs.action === "copy") newSheetName = dependencyArgs.newName;
+                if (typeof newSheetName === "string" && newSheetName) createdSheets[newSheetName] = dependencyIndex;
+              }
+            }
+
             function preflightRuntimeCalls(toolCalls) {
+              preflightBatchDependencies(toolCalls);
               for (var preflightIndex = 0; preflightIndex < toolCalls.length; preflightIndex += 1) {
                 var preflightCall = toolCalls[preflightIndex] || {};
                 var preflightArgs = getArgs(preflightCall);
@@ -2328,6 +2452,80 @@
                       "当前 ONLYOFFICE 运行时不支持条件格式"
                     );
                   }
+                } else if (preflightCall.name === "sheets_set_values" && containsNull(preflightArgs.values)) {
+                  var preflightValuesSheet = getSheet(preflightArgs.sheet);
+                  var preflightValuesRange = getRange(preflightValuesSheet, preflightArgs.range);
+                  if (!preflightValuesRange || typeof preflightValuesRange.ClearContents !== "function") {
+                    unsupportedFeature(
+                      "sheets.values.clearNull",
+                      "当前 ONLYOFFICE 运行时无法按 null=清空单元格 的语义安全写入"
+                    );
+                  }
+                } else if (preflightCall.name === "sheets_set_array_formula") {
+                  var preflightArraySheet = getSheet(preflightArgs.sheet);
+                  var preflightArrayRange = getRange(preflightArraySheet, preflightArgs.range);
+                  if (!preflightArrayRange || typeof preflightArrayRange.SetFormulaArray !== "function") {
+                    unsupportedFeature("sheets.arrayFormula.set", "当前 ONLYOFFICE 运行时不支持数组公式");
+                  }
+                } else if (preflightCall.name === "sheets_manage_range") {
+                  var preflightManagedSheet = getSheet(preflightArgs.sheet);
+                  var preflightManagedRange = getRange(preflightManagedSheet, preflightArgs.range);
+                  var fillMethods = {
+                    fillDown: "FillDown",
+                    fillUp: "FillUp",
+                    fillLeft: "FillLeft",
+                    fillRight: "FillRight",
+                  };
+                  var fillMethod = fillMethods[String(preflightArgs.action || "")];
+                  if (fillMethod && (!preflightManagedRange || typeof preflightManagedRange[fillMethod] !== "function")) {
+                    unsupportedFeature(
+                      "sheets.rangeFill." + String(preflightArgs.action),
+                      "当前 ONLYOFFICE 运行时不支持区域操作 " + String(preflightArgs.action)
+                    );
+                  }
+                } else if (preflightCall.name === "sheets_manage_validation") {
+                  var preflightValidationRange = getRange(getSheet(preflightArgs.sheet), preflightArgs.range);
+                  var preflightValidation = preflightValidationRange && typeof preflightValidationRange.GetValidation === "function"
+                    ? preflightValidationRange.GetValidation()
+                    : null;
+                  var validationMethod = preflightArgs.action === "add" ? "Add" : (preflightArgs.action === "modify" ? "Modify" : "Delete");
+                  if (!preflightValidation || typeof preflightValidation[validationMethod] !== "function") {
+                    unsupportedFeature("sheets.validation.manage", "当前 ONLYOFFICE 运行时不支持数据验证操作");
+                  }
+                } else if (preflightCall.name === "sheets_inspect_comments") {
+                  if (typeof getSheet(preflightArgs.sheet).GetComments !== "function") {
+                    unsupportedFeature("sheets.comments.inspect", "当前 ONLYOFFICE 运行时不支持读取批注");
+                  }
+                } else if (preflightCall.name === "sheets_manage_comments" && preflightArgs.action === "add") {
+                  var preflightCommentRange = getRange(getSheet(preflightArgs.sheet), preflightArgs.range);
+                  if (!preflightCommentRange || typeof preflightCommentRange.AddComment !== "function") {
+                    unsupportedFeature("sheets.comments.create", "当前 ONLYOFFICE 运行时不支持添加批注");
+                  }
+                } else if (preflightCall.name === "sheets_inspect_freeze_panes") {
+                  if (typeof getSheet(preflightArgs.sheet).GetFreezePanes !== "function") {
+                    unsupportedFeature("sheets.freezePanes.inspect", "当前 ONLYOFFICE 运行时不支持读取冻结窗格");
+                  }
+                } else if (preflightCall.name === "sheets_manage_freeze_panes") {
+                  var preflightFreezeSheet = getSheet(preflightArgs.sheet);
+                  var preflightFreeze = typeof preflightFreezeSheet.GetFreezePanes === "function" ? preflightFreezeSheet.GetFreezePanes() : null;
+                  var freezeMethod = {
+                    unfreeze: "Unfreeze",
+                    freezeAt: "FreezeAt",
+                    freezeRows: "FreezeRows",
+                    freezeColumns: "FreezeColumns",
+                  }[String(preflightArgs.action || "")];
+                  if (!preflightFreeze || !freezeMethod || typeof preflightFreeze[freezeMethod] !== "function") {
+                    unsupportedFeature("sheets.freezePanes.manage", "当前 ONLYOFFICE 运行时不支持冻结窗格操作");
+                  }
+                } else if (preflightCall.name === "sheets_inspect_charts") {
+                  if (typeof getSheet(preflightArgs.sheet).GetAllCharts !== "function") {
+                    unsupportedFeature("sheets.charts.inspect", "当前 ONLYOFFICE 运行时不支持读取图表");
+                  }
+                } else if (preflightCall.name === "sheets_update_chart") {
+                  var preflightUpdateChart = resolveChart(preflightArgs);
+                  if (!preflightUpdateChart.chart || typeof preflightUpdateChart.chart.SetTitle !== "function") {
+                    unsupportedFeature("sheets.charts.update", "当前 ONLYOFFICE 运行时不支持更新图表");
+                  }
                 } else if (preflightCall.name === "sheets_add_chart") {
                   var preflightChartSheet = getSheet(preflightArgs.sheet);
                   if (typeof preflightChartSheet.AddChart !== "function") {
@@ -2358,6 +2556,63 @@
                   }
                 }
               }
+            }
+
+            function a1ColumnLabel(columnNumber) {
+              var remainingColumn = columnNumber;
+              var label = "";
+              while (remainingColumn > 0) {
+                var remainder = (remainingColumn - 1) % 26;
+                label = String.fromCharCode(65 + remainder) + label;
+                remainingColumn = Math.floor((remainingColumn - 1) / 26);
+              }
+              return label;
+            }
+
+            function a1TopLeft(address) {
+              var localAddress = String(address || "").split("!").pop().replace(/\$/g, "");
+              var first = localAddress.split(":")[0];
+              var match = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(first);
+              if (!match) return null;
+              var column = 0;
+              for (var columnIndex = 0; columnIndex < match[1].length; columnIndex += 1) {
+                column = column * 26 + match[1].toUpperCase().charCodeAt(columnIndex) - 64;
+              }
+              return { column: column, row: Number(match[2]) };
+            }
+
+            function writeValuesWithNull(sheet, targetRange, address, values) {
+              if (!containsNull(values)) return targetRange.SetValue(values);
+              var clearResult = targetRange.ClearContents();
+              if (clearResult === false) throw new Error("ONLYOFFICE 拒绝清空 null 目标单元格");
+              if (values === null) return true;
+              var topLeft = a1TopLeft(address);
+              if (!topLeft || !Array.isArray(values)) {
+                throw sheetError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  "包含 null 的 values 必须对应明确的 A1 二维区域",
+                  { partialMutationPossible: false }
+                );
+              }
+              for (var valueRowIndex = 0; valueRowIndex < values.length; valueRowIndex += 1) {
+                var valueRow = values[valueRowIndex];
+                var runStart = -1;
+                for (var valueColumnIndex = 0; valueColumnIndex <= valueRow.length; valueColumnIndex += 1) {
+                  var atEnd = valueColumnIndex === valueRow.length;
+                  var hasValue = !atEnd && valueRow[valueColumnIndex] !== null;
+                  if (hasValue && runStart < 0) runStart = valueColumnIndex;
+                  if ((!hasValue || atEnd) && runStart >= 0) {
+                    var runEnd = valueColumnIndex - 1;
+                    var segmentStart = a1ColumnLabel(topLeft.column + runStart) + String(topLeft.row + valueRowIndex);
+                    var segmentEnd = a1ColumnLabel(topLeft.column + runEnd) + String(topLeft.row + valueRowIndex);
+                    var segmentRange = getRange(sheet, segmentStart === segmentEnd ? segmentStart : segmentStart + ":" + segmentEnd);
+                    var segmentAccepted = segmentRange.SetValue([valueRow.slice(runStart, runEnd + 1)]);
+                    if (segmentAccepted === false) throw new Error("ONLYOFFICE 拒绝写入非空单元格片段");
+                    runStart = -1;
+                  }
+                }
+              }
+              return true;
             }
 
             preflightRuntimeCalls(calls);
@@ -2437,7 +2692,7 @@
                     "values",
                     isSheetCellValue
                   );
-                  var accepted = range.SetValue(args.values);
+                  var accepted = writeValuesWithNull(valuesSheet, range, args.range, args.values);
                   if (accepted === false) throw new Error("ONLYOFFICE 拒绝写入单元格值");
                   changed += 1;
                   results.push({

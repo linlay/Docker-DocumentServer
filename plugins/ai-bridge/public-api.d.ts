@@ -62,7 +62,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.0";
+  contractVersion?: "0.2.1";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -74,18 +74,28 @@ export interface AiBridgeCapabilities {
       nativeTables: { create: boolean; inspect: boolean };
       rangeStyleTables: { create: boolean };
       conditionalFormatting: { create: boolean };
-      charts: { create: boolean; addSeriesOnCreate: boolean; delete: boolean };
+      rangeFill: { fillDown: boolean; fillUp: boolean; fillLeft: boolean; fillRight: boolean };
+      arrayFormula: { set: boolean };
+      validation: { manage: boolean };
+      comments: { create: boolean; inspect: boolean; update: boolean; delete: boolean };
+      freezePanes: { inspect: boolean; manage: boolean };
+      charts: { create: boolean; inspect: boolean; update: boolean; addSeriesOnCreate: boolean; delete: boolean };
     };
   };
 }
 
 export interface AiBridgeState {
-  version: "0.2.0";
+  version: "0.2.1";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.0";
+  contractVersion: "0.2.1";
   contractSha256: string;
   ready: boolean;
+  documentReady?: boolean;
+  capabilityProbeComplete?: boolean;
+  capabilityProbedAt?: number | null;
+  saveReady?: boolean;
+  saveStatus?: "idle" | "editor-saving" | "editor-saved" | "saving" | "saved" | "failed" | string;
   editorType: AiBridgeEditorType | null;
   context: AiBridgeContext;
   capabilities: AiBridgeCapabilities | null;
@@ -126,7 +136,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.0";
+  contractVersion: "0.2.1";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -219,6 +229,10 @@ export interface WordParagraphFormat extends TextFormat {
   pageBreakBefore?: boolean;
 }
 export interface WordParagraphTarget {
+  /** Prefer stable IDs returned by word_inspect. */
+  paragraphId?: string | number;
+  internalId?: string | number;
+  paragraphIndex?: number;
   /** One-based indexes from word_inspect.paragraphDetails. */
   paragraphIndexes?: number[];
   search?: string;
@@ -274,7 +288,7 @@ export interface WordAddBookmarkArgs {
   name: string;
   matchCase?: boolean;
 }
-export interface WordAddImageArgs {
+export interface WordAddImageArgs extends WordStableParagraphTarget {
   source: AiBridgeImageSource;
   widthMm?: number;
   heightMm?: number;
@@ -312,6 +326,10 @@ export interface WordScrollArgs { direction?: "up" | "down"; pages?: number; }
 export interface WordScaleFontArgs { scale: number; }
 export interface WordTableCellInput extends BasicTextFormat {
   text: string;
+  paragraphStyleName?: string;
+  /** @deprecated Compatibility alias for paragraphStyleName. */
+  styleName?: string;
+  characterStyleName?: string;
   /** @deprecated Compatibility alias for color. Prefer color. */
   textColor?: string;
   underline?: boolean;
@@ -338,7 +356,7 @@ export interface WordTableCellInput extends BasicTextFormat {
   verticalAlign?: "top" | "center" | "bottom";
   widthPercent?: number;
 }
-export interface WordAddTableArgs extends BasicTextFormat {
+export interface WordAddTableArgs extends BasicTextFormat, WordStableParagraphTarget {
   rows: number;
   cols: number;
   /** @deprecated Compatibility alias for cols. Prefer cols. */
@@ -347,7 +365,10 @@ export interface WordAddTableArgs extends BasicTextFormat {
   widthPercent?: number;
   /** Whole-table alignment; cell paragraph alignment belongs in data cell objects. */
   align?: "left" | "center" | "right";
+  /** @deprecated Compatibility alias for tableStyleName. */
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
   firstRow?: boolean;
   lastRow?: boolean;
   firstColumn?: boolean;
@@ -376,6 +397,7 @@ export interface WordSetTableCellArgs extends WordParagraphFormat {
   row: number;
   column: number;
   text?: string;
+  paragraphStyleName?: string;
   backgroundColor?: string;
   verticalAlign?: "top" | "center" | "bottom";
   widthPercent?: number;
@@ -384,7 +406,10 @@ export interface WordFormatTableArgs extends BasicTextFormat {
   tableIndex: number;
   widthPercent?: number;
   align?: "left" | "center" | "right";
+  /** @deprecated Compatibility alias for tableStyleName. */
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
   backgroundColor?: string;
   title?: string;
   description?: string;
@@ -487,8 +512,19 @@ export interface WordManageSectionArgs {
   action?: "configure" | "create";
   /** One-based section index for configure. */
   sectionIndex?: number;
-  /** One-based paragraph index that ends the new section. */
+  /** @deprecated One-based paragraph index that ends the current section. */
   paragraphIndex?: number;
+  endParagraphIndex?: number;
+  boundary?: {
+    position: "before" | "after";
+    paragraphId?: string | number;
+    internalId?: string | number;
+    paragraphIndex?: number;
+    search?: string;
+    occurrence?: number;
+    matchCase?: boolean;
+    matchMode?: "contains" | "exact";
+  };
   type?: "continuous" | "nextPage" | "evenPage" | "oddPage";
   startPageNumber?: number;
   titlePage?: boolean;
@@ -552,11 +588,32 @@ export interface WordNumberingLevel {
   align?: "left" | "center" | "right";
   restart?: number;
 }
+export interface WordNumberingAssignment {
+  level: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  paragraphIndex?: number;
+  search?: string;
+  occurrence?: number;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+}
+export interface WordStableParagraphTarget {
+  paragraphId?: string | number;
+  internalId?: string | number;
+  paragraphIndex?: number;
+  search?: string;
+  occurrence?: number;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+}
 export interface WordSetNumberingArgs extends WordParagraphTarget {
   kind?: "bullet" | "numbered" | "multilevel";
   level?: number;
   levels?: WordNumberingLevel[];
   restartAt?: number;
+  assignments?: WordNumberingAssignment[];
+  continueFrom?: WordStableParagraphTarget;
 }
 export interface WordBorderFormat {
   style?: "none" | "single" | "double" | "dotted" | "dashed" | "thick" | "wave";
@@ -597,7 +654,10 @@ export interface WordAddNestedTableArgs extends BasicTextFormat {
   widthPercent?: number;
   /** Whole-table alignment; cell paragraph alignment belongs in data cell objects. */
   align?: "left" | "center" | "right";
+  /** @deprecated Compatibility alias for tableStyleName. */
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
 }
 export interface WordDrawingTarget {
   drawingIndex?: number;
@@ -619,7 +679,7 @@ export interface WordManageDrawingArgs extends WordDrawingTarget {
   nameUpdate?: string;
   border?: WordBorderFormat;
 }
-export interface WordAddShapeArgs extends BasicTextFormat {
+export interface WordAddShapeArgs extends BasicTextFormat, WordStableParagraphTarget {
   shapeType: string;
   text?: string;
   widthMm?: number;
@@ -633,7 +693,7 @@ export interface WordAddShapeArgs extends BasicTextFormat {
   paragraphIndex?: number;
   current?: boolean;
 }
-export interface WordAddChartArgs {
+export interface WordAddChartArgs extends WordStableParagraphTarget {
   chartType?: AiBridgeChartType;
   data: number[][];
   seriesNames?: string[];
@@ -651,13 +711,13 @@ export interface WordAddChartArgs {
   paragraphIndex?: number;
   current?: boolean;
 }
-export interface WordAddMathArgs {
+export interface WordAddMathArgs extends WordStableParagraphTarget {
   equation: string;
   format?: "unicode" | "latex" | "mathml";
   paragraphIndex?: number;
   current?: boolean;
 }
-export interface WordAddOleObjectArgs {
+export interface WordAddOleObjectArgs extends WordStableParagraphTarget {
   /** Preview image, imported through the same protected image pipeline. */
   source: AiBridgeImageSource;
   data: string;
@@ -675,14 +735,21 @@ export interface WordManageFieldsArgs {
   occurrence?: number;
   matchCase?: boolean;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
 }
-export interface WordManageLongDocumentArgs {
+export interface WordManageLongDocumentArgs extends WordStableParagraphTarget {
   action:
     | "addToc" | "updateToc"
     | "addCaption" | "addTableOfFigures" | "updateTableOfFigures"
     | "addCrossReference" | "addFootnote" | "addEndnote"
     | "deleteBookmark";
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  tableIndex?: number;
+  insertAt?: "before" | "after" | "replaceEmpty";
+  styleName?: string;
   label?: string;
   text?: string;
   excludeLabel?: boolean;
@@ -697,11 +764,16 @@ export interface WordManageLongDocumentArgs {
   outlineLevels?: number;
   referenceKind?: "caption" | "bookmark" | "heading" | "numbered" | "footnote" | "endnote";
   targetIndex?: number;
+  targetParagraphId?: string | number;
+  targetInternalId?: string | number;
   captionIndex?: number;
   referenceType?: string;
   hyperlink?: boolean;
   aboveBelow?: boolean;
   numberSeparator?: string;
+  replaceSearch?: string;
+  occurrence?: number;
+  matchCase?: boolean;
   noteText?: string;
   bookmarkName?: string;
 }
@@ -725,7 +797,7 @@ export interface WordContentControlDataBinding {
   storeItemId: string;
   xpath: string;
 }
-export interface WordManageContentControlArgs {
+export interface WordManageContentControlArgs extends WordStableParagraphTarget {
   action: "add" | "update" | "remove" | "clear" | "check";
   kind?: "block" | "inline" | "checkbox" | "comboBox" | "dropDown" | "datePicker" | "picture";
   index?: number;
@@ -2081,9 +2153,12 @@ export type AiBridgeGeneratedWordAddImageArgs = {
   preserveAspectRatio?: boolean;
   current?: boolean;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   search?: string;
   occurrence?: number;
   matchCase?: boolean;
+  matchMode?: "contains" | "exact";
   wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
   name?: string;
 };
@@ -2126,6 +2201,17 @@ export type AiBridgeGeneratedWordManageSectionArgs = {
   action?: "configure" | "create";
   sectionIndex?: number;
   paragraphIndex?: number;
+  endParagraphIndex?: number;
+  boundary?: {
+    position: "before" | "after";
+    paragraphId?: string | number;
+    internalId?: string | number;
+    paragraphIndex?: number;
+    search?: string;
+    occurrence?: number;
+    matchCase?: boolean;
+    matchMode?: "contains" | "exact";
+  };
   type?: "continuous" | "nextPage" | "evenPage" | "oddPage";
   startPageNumber?: number;
   titlePage?: boolean;
@@ -2139,7 +2225,7 @@ export type AiBridgeGeneratedWordManageSectionArgs = {
       spaceMm?: number;
     }>;
   };
-} & ({ action: "create"; paragraphIndex: number; } | { action?: Exclude<"configure" | "create", "create">; });
+} & ({ action: "create"; } | { action?: Exclude<"configure" | "create", "create">; });
 export type AiBridgeGeneratedWordManageStyleArgs = {
   action?: "create" | "update";
   name: string;
@@ -2173,6 +2259,9 @@ export type AiBridgeGeneratedWordManageStyleArgs = {
   pageBreakBefore?: boolean;
 };
 export type AiBridgeGeneratedWordSetTabsArgs = {
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2199,6 +2288,28 @@ export type AiBridgeGeneratedWordSetNumberingArgs = {
     align?: "left" | "center" | "right";
     restart?: number;
   }>;
+  assignments?: Array<{
+    level: number;
+    paragraphId?: string | number;
+    internalId?: string | number;
+    paragraphIndex?: number;
+    search?: string;
+    occurrence?: number;
+    matchCase?: boolean;
+    matchMode?: "contains" | "exact";
+  }>;
+  continueFrom?: {
+    paragraphId?: string | number;
+    internalId?: string | number;
+    paragraphIndex?: number;
+    search?: string;
+    occurrence?: number;
+    matchCase?: boolean;
+    matchMode?: "contains" | "exact";
+  };
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2271,6 +2382,9 @@ export type AiBridgeGeneratedWordAddNestedTableArgs = {
   columns?: number;
   data?: Array<Array<(string | number | boolean | null | {
     text: string;
+    paragraphStyleName?: string;
+    styleName?: string;
+    characterStyleName?: string;
     fontSize?: number;
     fontFamily?: string;
     bold?: boolean;
@@ -2301,6 +2415,8 @@ export type AiBridgeGeneratedWordAddNestedTableArgs = {
   widthPercent?: number;
   align?: "left" | "center" | "right";
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
   fontSize?: number;
   fontFamily?: string;
   bold?: boolean;
@@ -2342,6 +2458,12 @@ export type AiBridgeGeneratedWordAddShapeArgs = {
   rotationDeg?: number;
   name?: string;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
   current?: boolean;
   fontSize?: number;
   fontFamily?: string;
@@ -2365,12 +2487,24 @@ export type AiBridgeGeneratedWordAddChartArgs = {
   showSeriesNames?: boolean;
   wrapping?: "inline" | "square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront";
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
   current?: boolean;
 };
 export type AiBridgeGeneratedWordAddMathArgs = {
   equation: string;
   format?: "unicode" | "latex" | "mathml";
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
   current?: boolean;
 };
 export type AiBridgeGeneratedWordAddOleObjectArgs = {
@@ -2386,6 +2520,12 @@ export type AiBridgeGeneratedWordAddOleObjectArgs = {
   widthMm?: number;
   heightMm?: number;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
   current?: boolean;
   name?: string;
 };
@@ -2396,10 +2536,19 @@ export type AiBridgeGeneratedWordManageFieldsArgs = {
   occurrence?: number;
   matchCase?: boolean;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
 } & ({ action: "add"; instruction: string; } | { action?: Exclude<"add" | "updateAll" | "clearForms", "add">; });
 export type AiBridgeGeneratedWordManageLongDocumentArgs = {
   action: "addToc" | "updateToc" | "addCaption" | "addTableOfFigures" | "updateTableOfFigures" | "addCrossReference" | "addFootnote" | "addEndnote" | "deleteBookmark";
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchMode?: "contains" | "exact";
+  tableIndex?: number;
+  insertAt?: "before" | "after" | "replaceEmpty";
+  styleName?: string;
   label?: string;
   text?: string;
   excludeLabel?: boolean;
@@ -2414,11 +2563,16 @@ export type AiBridgeGeneratedWordManageLongDocumentArgs = {
   outlineLevels?: number;
   referenceKind?: "caption" | "bookmark" | "heading" | "numbered" | "footnote" | "endnote";
   targetIndex?: number;
+  targetParagraphId?: string | number;
+  targetInternalId?: string | number;
   captionIndex?: number;
   referenceType?: string;
   hyperlink?: boolean;
   aboveBelow?: boolean;
   numberSeparator?: string;
+  replaceSearch?: string;
+  occurrence?: number;
+  matchCase?: boolean;
   noteText?: string;
   bookmarkName?: string;
 };
@@ -2462,6 +2616,12 @@ export type AiBridgeGeneratedWordManageContentControlArgs = {
   };
   updateFromXml?: boolean;
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  search?: string;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+  occurrence?: number;
   current?: boolean;
   tableIndex?: number;
   row?: number;
@@ -2507,6 +2667,9 @@ export type AiBridgeGeneratedWordSetWatermarkArgs = {
   color?: string;
 };
 export type AiBridgeGeneratedWordFormatParagraphsArgs = {
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2554,6 +2717,9 @@ export type AiBridgeGeneratedWordFormatParagraphsArgs = {
 };
 export type AiBridgeGeneratedWordSetParagraphTextArgs = {
   text: string;
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2600,6 +2766,9 @@ export type AiBridgeGeneratedWordSetParagraphTextArgs = {
   pageBreakBefore?: boolean;
 };
 export type AiBridgeGeneratedWordDeleteParagraphsArgs = {
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2612,6 +2781,9 @@ export type AiBridgeGeneratedWordDeleteParagraphsArgs = {
 export type AiBridgeGeneratedWordSetListArgs = {
   listType: "bullet" | "numbered";
   level?: number;
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2624,6 +2796,9 @@ export type AiBridgeGeneratedWordSetListArgs = {
 };
 export type AiBridgeGeneratedWordInsertPageBreakArgs = {
   position?: "before" | "after";
+  paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   paragraphIndexes?: Array<number>;
   search?: string;
   matchCase?: boolean;
@@ -2654,6 +2829,9 @@ export type AiBridgeGeneratedWordAddTableArgs = {
   columns?: number;
   data?: Array<Array<(string | number | boolean | null | {
     text: string;
+    paragraphStyleName?: string;
+    styleName?: string;
+    characterStyleName?: string;
     fontSize?: number;
     fontFamily?: string;
     bold?: boolean;
@@ -2684,6 +2862,8 @@ export type AiBridgeGeneratedWordAddTableArgs = {
   widthPercent?: number;
   align?: "left" | "center" | "right";
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
   firstRow?: boolean;
   lastRow?: boolean;
   firstColumn?: boolean;
@@ -2699,6 +2879,8 @@ export type AiBridgeGeneratedWordAddTableArgs = {
   color?: string;
   insertAt?: "end" | "current" | "before" | "after";
   paragraphIndex?: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
   tableIndex?: number;
   search?: string;
   matchCase?: boolean;
@@ -2729,6 +2911,7 @@ export type AiBridgeGeneratedWordSetTableCellArgs = {
   backgroundColor?: string;
   align?: "left" | "center" | "right" | "both";
   styleName?: string;
+  paragraphStyleName?: string;
   headingLevel?: number;
   outlineLevel?: number;
   spacingBefore?: number;
@@ -2756,6 +2939,8 @@ export type AiBridgeGeneratedWordFormatTableArgs = {
   widthPercent?: number;
   align?: "left" | "center" | "right";
   styleName?: string;
+  tableStyleName?: string;
+  cellParagraphStyleName?: string;
   backgroundColor?: string;
   title?: string;
   description?: string;
@@ -8060,7 +8245,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.0";
+  readonly version: "0.2.1";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

@@ -182,6 +182,7 @@
     function normalizeCell(cell, path, toolCallIndex) {
       if (!cell || typeof cell !== "object" || Array.isArray(cell)) return;
       aliasProperty(cell, "textColor", "color", path, toolCallIndex);
+      aliasProperty(cell, "styleName", "paragraphStyleName", path, toolCallIndex);
       for (const alias of Object.keys(WORD_PROPERTY_ALIASES)) {
         aliasProperty(cell, alias, WORD_PROPERTY_ALIASES[alias], path, toolCallIndex);
       }
@@ -202,6 +203,7 @@
       }
       if (toolName === "word_add_table" || toolName === "word_add_nested_table") {
         aliasProperty(args, "columns", "cols", "arguments", index);
+        aliasProperty(args, "styleName", "tableStyleName", "arguments", index);
         const data = Array.isArray(args.data) ? args.data : [];
         for (let row = 0; row < data.length; row += 1) {
           if (!Array.isArray(data[row])) continue;
@@ -213,6 +215,15 @@
             );
           }
         }
+      }
+      if (toolName === "word_format_table") {
+        aliasProperty(args, "styleName", "tableStyleName", "arguments", index);
+      }
+      if (toolName === "word_set_table_cell") {
+        aliasProperty(args, "styleName", "paragraphStyleName", "arguments", index);
+      }
+      if (toolName === "word_manage_section") {
+        aliasProperty(args, "paragraphIndex", "endParagraphIndex", "arguments", index);
       }
       if (WORD_POINT_ALIAS_TOOLS.has(toolName)) {
         for (const alias of Object.keys(WORD_PROPERTY_ALIASES)) {
@@ -252,6 +263,8 @@
     rightIndentPt: "number",
     verticalAlign: "string",
     widthPercent: "number",
+    paragraphStyleName: "string",
+    characterStyleName: "string",
   };
   const WORD_TABLE_CELL_ENUMS = {
     align: ["left", "center", "right", "both"],
@@ -389,8 +402,41 @@
       }
 
       if (name === "word_manage_section" && String(args.action || "configure") === "create") {
-        if (args.paragraphIndex === undefined) {
-          add(index, name, "paragraphIndex", "paragraphIndex is required when action is create");
+        if (args.endParagraphIndex === undefined && !isPlainObject(args.boundary)) {
+          add(index, name, "boundary", "boundary or endParagraphIndex is required when action is create");
+        }
+      }
+
+      if (name === "word_set_numbering" && Array.isArray(args.assignments)) {
+        if (!args.assignments.length) {
+          add(index, name, "assignments", "assignments must contain at least one paragraph target");
+        }
+        for (let assignmentIndex = 0; assignmentIndex < args.assignments.length; assignmentIndex += 1) {
+          const assignment = args.assignments[assignmentIndex] || {};
+          const targetCount = [
+            assignment.paragraphId,
+            assignment.internalId,
+            assignment.paragraphIndex,
+            assignment.search,
+          ].filter(value => value !== undefined && value !== "").length;
+          if (targetCount !== 1) {
+            add(
+              index,
+              name,
+              "assignments[" + assignmentIndex + "]",
+              "each assignment must identify exactly one paragraph",
+            );
+          }
+        }
+      }
+
+      if (name === "word_manage_long_document") {
+        const action = String(args.action || "");
+        if (action === "addCaption" && !args.label) {
+          add(index, name, "label", "label is required when action is addCaption");
+        }
+        if (action === "addCrossReference" && String(args.referenceKind || "caption") === "bookmark" && !args.bookmarkName) {
+          add(index, name, "bookmarkName", "bookmarkName is required for bookmark cross-references");
         }
       }
 
@@ -410,11 +456,14 @@
         const hasTarget = (
           args.all === true
           || args.current === true
+          || args.paragraphIndex !== undefined
+          || args.paragraphId !== undefined
+          || args.internalId !== undefined
           || (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length > 0)
           || (typeof args.search === "string" && args.search.length > 0)
         );
         if (!hasTarget) {
-          add(index, name, "target", "paragraphIndexes, search, all=true, or current=true is required");
+          add(index, name, "target", "paragraphId, paragraphIndex, paragraphIndexes, search, all=true, or current=true is required");
         }
       }
 
@@ -850,10 +899,12 @@
 
             function tableCellSpec(value, tableArgs) {
               var format = {};
-              var defaultKeys = ["fontSize", "fontFamily", "bold", "italic", "color"];
+              var defaultKeys = ["fontSize", "fontFamily", "bold", "italic", "color", "cellParagraphStyleName"];
               for (var defaultIndex = 0; defaultIndex < defaultKeys.length; defaultIndex += 1) {
                 var defaultKey = defaultKeys[defaultIndex];
-                if (tableArgs[defaultKey] !== undefined) format[defaultKey] = tableArgs[defaultKey];
+                if (tableArgs[defaultKey] !== undefined) {
+                  format[defaultKey === "cellParagraphStyleName" ? "paragraphStyleName" : defaultKey] = tableArgs[defaultKey];
+                }
               }
               if (value && typeof value === "object" && !Array.isArray(value)) {
                 for (var cellKey in value) {
@@ -934,18 +985,23 @@
             function resolveImageTarget(args) {
               var targetModes = 0;
               if (args.current === true) targetModes += 1;
-              if (args.paragraphIndex !== undefined) targetModes += 1;
+              var hasImageParagraphTarget = args.paragraphIndex !== undefined
+                || args.paragraphId !== undefined
+                || args.internalId !== undefined;
+              if (hasImageParagraphTarget) targetModes += 1;
               if (args.search !== undefined) targetModes += 1;
               if (targetModes > 1) {
-                throw new Error("current、paragraphIndex、search 最多只能指定一种图片插入目标");
+                throw new Error("current、段落目标、search 最多只能指定一种图片插入目标");
               }
               var paragraphs = allParagraphs();
-              if (args.paragraphIndex !== undefined) {
-                var paragraphIndex = Math.floor(finiteNumber(args.paragraphIndex, "paragraphIndex"));
-                if (paragraphIndex < 1 || paragraphIndex > paragraphs.length) {
-                  throw new Error("paragraphIndex 超出文档段落范围");
-                }
-                return { mode: "paragraph", paragraph: paragraphs[paragraphIndex - 1], paragraphIndex: paragraphIndex };
+              if (hasImageParagraphTarget) {
+                var imageTargetEntries = selectParagraphEntries(args, false);
+                if (imageTargetEntries.length !== 1) throw new Error("图片段落目标必须唯一匹配");
+                return {
+                  mode: "paragraph",
+                  paragraph: imageTargetEntries[0].paragraph,
+                  paragraphIndex: imageTargetEntries[0].index + 1,
+                };
               }
               if (args.search !== undefined) {
                 var search = String(args.search || "");
@@ -1129,6 +1185,14 @@
                 style = doc.CreateStyle(String(styleName), styleType || "paragraph");
               }
               if (!style) throw new Error("Word 中不存在样式：" + styleName);
+              var expectedType = styleType === "character" ? "run" : styleType;
+              var actualType = safeCall(style, "GetType", [], null);
+              if (actualType === "character") actualType = "run";
+              if (expectedType && actualType && String(actualType) !== String(expectedType)) {
+                throw new Error(
+                  "样式类型不匹配：" + styleName + " 是 " + actualType + " 样式，不能作为 " + expectedType + " 样式使用",
+                );
+              }
               return style;
             }
 
@@ -1198,6 +1262,13 @@
               return paragraph && typeof paragraph.GetText === "function" ? String(paragraph.GetText() || "") : "";
             }
 
+            function paragraphIdentity(paragraph) {
+              return {
+                paragraphId: safeCall(paragraph, "GetParaId", [], null),
+                internalId: safeCall(paragraph, "GetInternalId", [], safeCall(paragraph, "GetId", [], null)),
+              };
+            }
+
             function selectParagraphEntries(args, allowCurrent) {
               var paragraphs = allParagraphs();
               var selected = [];
@@ -1218,6 +1289,26 @@
                 var oneBasedIndex = Math.floor(finiteNumber(indexes[indexPosition], "paragraphIndexes"));
                 if (oneBasedIndex < 1) throw new Error("paragraphIndexes 必须从 1 开始");
                 add(oneBasedIndex - 1);
+              }
+              if (args.paragraphIndex !== undefined) {
+                var singularIndex = Math.floor(finiteNumber(args.paragraphIndex, "paragraphIndex"));
+                if (singularIndex < 1) throw new Error("paragraphIndex 必须从 1 开始");
+                add(singularIndex - 1);
+              }
+              if (args.paragraphId !== undefined || args.internalId !== undefined) {
+                var identityField = args.paragraphId !== undefined ? "paragraphId" : "internalId";
+                var identityValue = String(args[identityField]);
+                var identityMatches = [];
+                for (var identityIndex = 0; identityIndex < paragraphs.length; identityIndex += 1) {
+                  var identity = paragraphIdentity(paragraphs[identityIndex]);
+                  if (identity[identityField] !== null && String(identity[identityField]) === identityValue) {
+                    identityMatches.push(identityIndex);
+                  }
+                }
+                if (identityMatches.length !== 1) {
+                  throw new Error(identityField + " 必须唯一匹配一个段落，实际匹配 " + identityMatches.length + " 个");
+                }
+                add(identityMatches[0]);
               }
               if (args.search !== undefined && String(args.search) !== "") {
                 var search = String(args.search);
@@ -1249,7 +1340,7 @@
                 if (current) selected.push({ paragraph: current, index: -1 });
               }
               if (!selected.length) {
-                throw new Error("必须使用 paragraphIndexes、search、all=true" + (allowCurrent ? " 或 current=true" : "") + " 指定段落");
+                throw new Error("必须使用 paragraphId、internalId、paragraphIndex、paragraphIndexes、search、all=true" + (allowCurrent ? " 或 current=true" : "") + " 指定段落");
               }
               return selected;
             }
@@ -1397,16 +1488,18 @@
               ) {
                 throw new Error("word_add_table.insertAt 必须是 end、current、before 或 after");
               }
-              var hasParagraphAnchor = args.paragraphIndex !== undefined;
+              var hasParagraphAnchor = args.paragraphIndex !== undefined
+                || args.paragraphId !== undefined
+                || args.internalId !== undefined;
               var hasTableAnchor = args.tableIndex !== undefined;
               var hasSearchAnchor = args.search !== undefined;
               var anchorCount = Number(hasParagraphAnchor) + Number(hasTableAnchor) + Number(hasSearchAnchor);
               if (insertAt === "before" || insertAt === "after") {
                 if (anchorCount !== 1) {
-                  throw new Error("word_add_table 的 before/after 必须且只能提供 paragraphIndex、tableIndex 或 search 一个锚点");
+                  throw new Error("word_add_table 的 before/after 必须且只能提供段落目标、tableIndex 或 search 一个锚点");
                 }
               } else if (anchorCount) {
-                throw new Error("word_add_table 的 end/current 不接受 paragraphIndex、tableIndex 或 search 锚点");
+                throw new Error("word_add_table 的 end/current 不接受段落目标、tableIndex 或 search 锚点");
               }
               if (insertAt === "end" || insertAt === "current") {
                 return { insertAt: insertAt, position: null, anchor: null };
@@ -1417,7 +1510,9 @@
               var anchorCollectionKind;
               var anchorCollectionIndex;
               if (hasParagraphAnchor) {
-                var paragraphAnchor = paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+                var paragraphAnchors = selectParagraphEntries(args, false);
+                if (paragraphAnchors.length !== 1) throw new Error("表格段落锚点必须唯一匹配");
+                var paragraphAnchor = paragraphAnchors[0];
                 anchorElement = paragraphAnchor.paragraph;
                 anchor = { type: "paragraph", paragraphIndex: paragraphAnchor.index + 1 };
                 anchorCollectionKind = "paragraph";
@@ -1495,8 +1590,18 @@
               }
               var content = cell.GetContent();
               var cellParagraphs = typeof content.GetAllParagraphs === "function" ? content.GetAllParagraphs() : [];
+              var cellParagraphFormat = format;
+              if (format.paragraphStyleName !== undefined) {
+                cellParagraphFormat = {};
+                for (var cellFormatKey in format) {
+                  if (Object.prototype.hasOwnProperty.call(format, cellFormatKey)) {
+                    cellParagraphFormat[cellFormatKey] = format[cellFormatKey];
+                  }
+                }
+                cellParagraphFormat.styleName = format.paragraphStyleName;
+              }
               for (var paragraphIndex = 0; paragraphIndex < cellParagraphs.length; paragraphIndex += 1) {
-                applyParagraphFormat(cellParagraphs[paragraphIndex], format);
+                applyParagraphFormat(cellParagraphs[paragraphIndex], cellParagraphFormat);
               }
             }
 
@@ -1554,7 +1659,16 @@
             }
 
             function resolveInsertionParagraph(args) {
-              if (args.paragraphIndex !== undefined) return paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+              if (
+                args.paragraphIndex !== undefined
+                || args.paragraphId !== undefined
+                || args.internalId !== undefined
+                || args.search !== undefined
+              ) {
+                var insertionEntries = selectParagraphEntries(args, false);
+                if (insertionEntries.length !== 1) throw new Error("插入目标必须唯一匹配一个段落");
+                return insertionEntries[0];
+              }
               if (args.current === true && typeof doc.GetCurrentParagraph === "function") {
                 var currentParagraph = doc.GetCurrentParagraph();
                 if (currentParagraph) return { paragraph: currentParagraph, index: -1 };
@@ -1787,14 +1901,18 @@
               if (hasAnyCellCoordinate && !(hasTableIndex && hasRow && hasColumn)) {
                 throw new Error("inline 内容控件的 tableIndex、row、column 必须同时提供");
               }
+              var hasParagraphTarget = args.paragraphIndex !== undefined
+                || args.paragraphId !== undefined
+                || args.internalId !== undefined
+                || args.search !== undefined;
               var targetCount = Number(hasAnyCellCoordinate) +
-                Number(args.paragraphIndex !== undefined) +
+                Number(hasParagraphTarget) +
                 Number(args.current === true);
               if (targetCount > 1) {
                 throw new Error("inline 内容控件的段落、当前段落和表格单元格目标互斥");
               }
               if (contentMode === "replace" && targetCount !== 1) {
-                throw new Error("inline 内容控件的 contentMode=replace 必须指定 paragraphIndex、current 或表格单元格目标");
+                throw new Error("inline 内容控件的 contentMode=replace 必须指定段落目标、current 或表格单元格目标");
               }
 
               if (hasAnyCellCoordinate) {
@@ -1833,8 +1951,10 @@
 
               var paragraphTarget;
               var target;
-              if (args.paragraphIndex !== undefined) {
-                paragraphTarget = paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+              if (hasParagraphTarget) {
+                var inlineParagraphTargets = selectParagraphEntries(args, false);
+                if (inlineParagraphTargets.length !== 1) throw new Error("inline 内容控件段落目标必须唯一匹配");
+                paragraphTarget = inlineParagraphTargets[0];
                 target = { type: "paragraph", paragraphIndex: paragraphTarget.index + 1 };
               } else if (args.current === true) {
                 var currentTargetParagraph = typeof doc.GetCurrentParagraph === "function"
@@ -1912,8 +2032,13 @@
                   control,
                 );
               } else {
-                if (args.paragraphIndex !== undefined) {
-                  var selectedTarget = paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+                if (
+                  args.paragraphIndex !== undefined || args.paragraphId !== undefined
+                  || args.internalId !== undefined || args.search !== undefined
+                ) {
+                  var selectedTargets = selectParagraphEntries(args, false);
+                  if (selectedTargets.length !== 1) throw new Error("内容控件段落目标必须唯一匹配");
+                  var selectedTarget = selectedTargets[0];
                   if (typeof selectedTarget.paragraph.Select === "function") selectedTarget.paragraph.Select();
                 }
                 if (kind === "checkbox") {
@@ -1964,6 +2089,124 @@
                 target: resolvedTarget ? resolvedTarget.target : null,
               };
             }
+
+            function validateStyleReference(styleName, expectedType, label) {
+              if (!styleName) return;
+              var styleKey = String(styleName);
+              var referencedType = virtualStyleTypes[styleKey] || null;
+              var referencedStyle = !referencedType && typeof doc.GetStyle === "function"
+                ? doc.GetStyle(styleKey)
+                : null;
+              if (!referencedType && referencedStyle) referencedType = safeCall(referencedStyle, "GetType", [], null);
+              if (referencedType === "character") referencedType = "run";
+              if (referencedType && String(referencedType) !== String(expectedType)) {
+                commandError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  label + " 引用了错误类型的样式：" + styleName + " 实际为 " + referencedType,
+                  { partialMutationPossible: false },
+                );
+              }
+              virtualStyleTypes[styleKey] = String(expectedType);
+            }
+
+            var virtualStyleTypes = Object.create(null);
+            function validateDocumentState() {
+              var initialTables = typeof doc.GetAllTables === "function" ? doc.GetAllTables() || [] : [];
+              for (var validationIndex = 0; validationIndex < calls.length; validationIndex += 1) {
+                var validationCall = calls[validationIndex] || {};
+                var validationArgs = commandArgs(validationCall);
+                if (validationCall.name === "word_add_table") {
+                  validateStyleReference(validationArgs.tableStyleName, "table", "tableStyleName");
+                  validateStyleReference(validationArgs.cellParagraphStyleName, "paragraph", "cellParagraphStyleName");
+                } else if (validationCall.name === "word_add_nested_table") {
+                  validateStyleReference(validationArgs.tableStyleName, "table", "tableStyleName");
+                  validateStyleReference(validationArgs.cellParagraphStyleName, "paragraph", "cellParagraphStyleName");
+                } else if (validationCall.name === "word_format_table") {
+                  validateStyleReference(validationArgs.tableStyleName, "table", "tableStyleName");
+                  validateStyleReference(validationArgs.cellParagraphStyleName, "paragraph", "cellParagraphStyleName");
+                } else if (validationCall.name === "word_set_table_cell") {
+                  validateStyleReference(validationArgs.paragraphStyleName, "paragraph", "paragraphStyleName");
+                } else if (validationCall.name === "word_manage_style") {
+                  var updateStyleType = String(validationArgs.type || "paragraph") === "character" ? "run" : String(validationArgs.type || "paragraph");
+                  validateStyleReference(validationArgs.name, updateStyleType, "manage_style.type");
+                } else if (validationCall.name === "word_edit_table" && String(validationArgs.action || "") === "mergeCells") {
+                  var validationTableIndex = Math.floor(finiteNumber(validationArgs.tableIndex, "tableIndex")) - 1;
+                  if (validationTableIndex < 0 || validationTableIndex >= initialTables.length) {
+                    commandError("INVALID_TOOL_ARGUMENTS", "mergeCells.tableIndex 超出表格范围", { partialMutationPossible: false });
+                  }
+                  var validationTable = initialTables[validationTableIndex];
+                  var validationRows = Math.max(0, Number(safeCall(validationTable, "GetRowsCount", [], 0)) || 0);
+                  var rowStart = Math.floor(finiteNumber(validationArgs.rowStart, "rowStart"));
+                  var rowEnd = Math.floor(finiteNumber(validationArgs.rowEnd, "rowEnd"));
+                  var columnStart = Math.floor(finiteNumber(validationArgs.columnStart, "columnStart"));
+                  var columnEnd = Math.floor(finiteNumber(validationArgs.columnEnd, "columnEnd"));
+                  if (rowStart < 1 || rowEnd > validationRows) {
+                    commandError("INVALID_TOOL_ARGUMENTS", "mergeCells 行范围超出表格边界", { partialMutationPossible: false });
+                  }
+                  for (var validationRowIndex = rowStart - 1; validationRowIndex < rowEnd; validationRowIndex += 1) {
+                    var validationRow = validationTable.GetRow(validationRowIndex);
+                    var validationColumns = Math.max(0, Number(safeCall(validationRow, "GetCellsCount", [], 0)) || 0);
+                    if (columnStart < 1 || columnEnd > validationColumns) {
+                      commandError("INVALID_TOOL_ARGUMENTS", "mergeCells 列范围超出表格边界", { partialMutationPossible: false });
+                    }
+                  }
+                } else if (validationCall.name === "word_manage_section" && String(validationArgs.action || "configure") === "create") {
+                  if (validationArgs.boundary) selectParagraphEntries(validationArgs.boundary, false);
+                  else paragraphByIndex(validationArgs.endParagraphIndex, "endParagraphIndex");
+                } else if (validationCall.name === "word_set_numbering") {
+                  if (Array.isArray(validationArgs.assignments)) {
+                    for (var validationAssignmentIndex = 0; validationAssignmentIndex < validationArgs.assignments.length; validationAssignmentIndex += 1) {
+                      selectParagraphEntries(validationArgs.assignments[validationAssignmentIndex], false);
+                    }
+                  }
+                  if (validationArgs.continueFrom) {
+                    var validationContinue = selectParagraphEntries(validationArgs.continueFrom, false);
+                    var validationNumPr = safeCall(validationContinue[0].paragraph, "GetNumPr", [], null);
+                    if (!safeCall(validationNumPr, "GetNumbering", [], null)) {
+                      commandError("INVALID_TOOL_ARGUMENTS", "continueFrom 指向的段落没有编号定义", { partialMutationPossible: false });
+                    }
+                  }
+                } else if (validationCall.name === "word_manage_long_document") {
+                  var validationLongAction = String(validationArgs.action || "");
+                  var hasValidationTocTarget = validationArgs.paragraphIndex !== undefined
+                    || validationArgs.paragraphId !== undefined
+                    || validationArgs.internalId !== undefined
+                    || validationArgs.search !== undefined;
+                  if (validationLongAction === "addToc" && hasValidationTocTarget) {
+                    var validationTocTargets = selectParagraphEntries(validationArgs, false);
+                    if (validationTocTargets.length !== 1) throw new Error("目录段落目标必须唯一匹配");
+                    var validationTocTarget = validationTocTargets[0];
+                    if (String(validationArgs.insertAt || "replaceEmpty") === "replaceEmpty" && paragraphText(validationTocTarget.paragraph).trim()) {
+                      commandError("INVALID_TOOL_ARGUMENTS", "addToc 默认只允许替换空段落；请显式使用 insertAt=before 或 after", { partialMutationPossible: false });
+                    }
+                  }
+                  if (validationLongAction === "addCrossReference") {
+                    var validationReferenceKind = String(validationArgs.referenceKind || "caption");
+                    var validationReferenceIndex = validationArgs.targetIndex === undefined ? validationArgs.captionIndex : validationArgs.targetIndex;
+                    var validationReferenceTargets = null;
+                    if (validationReferenceKind === "caption" && validationReferenceIndex !== undefined) {
+                      validationReferenceTargets = safeCall(doc, "GetAllCaptionParagraphs", [String(validationArgs.label || "")], []) || [];
+                    } else if (validationReferenceKind === "heading" && validationReferenceIndex !== undefined) {
+                      validationReferenceTargets = safeCall(doc, "GetAllHeadingParagraphs", [], []) || [];
+                    } else if (validationReferenceKind === "numbered" && validationReferenceIndex !== undefined) {
+                      validationReferenceTargets = safeCall(doc, "GetAllNumberedParagraphs", [], []) || [];
+                    } else if (validationReferenceKind === "footnote" && validationReferenceIndex !== undefined) {
+                      validationReferenceTargets = safeCall(doc, "GetFootnotesFirstParagraphs", [], []) || [];
+                    } else if (validationReferenceKind === "endnote" && validationReferenceIndex !== undefined) {
+                      validationReferenceTargets = safeCall(doc, "GetEndNotesFirstParagraphs", [], []) || [];
+                    }
+                    if (validationReferenceTargets) {
+                      var validationTargetOffset = Math.floor(finiteNumber(validationReferenceIndex, "targetIndex")) - 1;
+                      if (validationTargetOffset < 0 || validationTargetOffset >= validationReferenceTargets.length) {
+                        commandError("INVALID_TOOL_ARGUMENTS", "交叉引用目标超出范围", { partialMutationPossible: false });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            validateDocumentState();
 
             var hasMutatingCall = false;
             for (var mutatingIndex = 0; mutatingIndex < calls.length; mutatingIndex += 1) {
@@ -2025,8 +2268,11 @@
                     for (var paragraphIndex = 0; paragraphIndex < Math.min(maxParagraphs, paragraphs.length); paragraphIndex += 1) {
                       var paragraph = paragraphs[paragraphIndex];
                       var style = typeof paragraph.GetStyle === "function" ? paragraph.GetStyle() : null;
+                      var inspectedIdentity = paragraphIdentity(paragraph);
                       paragraphDetails.push({
                         index: paragraphIndex + 1,
+                        paragraphId: inspectedIdentity.paragraphId,
+                        internalId: inspectedIdentity.internalId,
                         text: paragraphText(paragraph).slice(0, 500),
                         style: style && typeof style.GetName === "function" ? style.GetName() : null,
                         outlineLevel: typeof paragraph.GetOutlineLvl === "function" ? paragraph.GetOutlineLvl() : null,
@@ -2065,6 +2311,8 @@
                         text: typeof comment.GetText === "function" ? comment.GetText() : "",
                         author: typeof comment.GetAuthorName === "function" ? comment.GetAuthorName() : "",
                         solved: typeof comment.IsSolved === "function" ? comment.IsSolved() : false,
+                        quoteText: typeof comment.GetQuoteText === "function" ? String(comment.GetQuoteText() || "") : "",
+                        anchored: typeof comment.GetQuoteText === "function" ? Boolean(String(comment.GetQuoteText() || "")) : null,
                       });
                     }
                   }
@@ -2207,26 +2455,56 @@
                     }
 
                     advanced.styles = [];
+                    var styleUsage = {};
+                    var tableStyleUsage = {};
+                    var usageParagraphs = allParagraphs();
+                    for (var usageParagraphIndex = 0; usageParagraphIndex < usageParagraphs.length; usageParagraphIndex += 1) {
+                      var usageParagraph = usageParagraphs[usageParagraphIndex];
+                      var usageStyle = safeCall(usageParagraph, "GetStyle", [], null);
+                      var usageStyleName = safeCall(usageStyle, "GetName", [], null);
+                      if (usageStyleName !== null && usageStyleName !== undefined) {
+                        var usageKey = String(usageStyleName);
+                        styleUsage[usageKey] = (styleUsage[usageKey] || 0) + 1;
+                        if (safeCall(usageParagraph, "GetParentTable", [], null)) {
+                          tableStyleUsage[usageKey] = (tableStyleUsage[usageKey] || 0) + 1;
+                        }
+                      }
+                    }
                     for (var styleIndex = 0; styleIndex < Math.min(maxAdvancedItems, allStyles.length); styleIndex += 1) {
                       var advancedStyle = allStyles[styleIndex];
                       var basedOn = safeCall(advancedStyle, "GetBasedOn", [], null);
+                      var inspectedStyleName = safeCall(advancedStyle, "GetName", [], null);
                       advanced.styles.push({
                         index: styleIndex + 1,
-                        name: safeCall(advancedStyle, "GetName", [], null),
+                        name: inspectedStyleName,
                         type: safeCall(advancedStyle, "GetType", [], null),
                         basedOn: basedOn ? safeCall(basedOn, "GetName", [], null) : null,
+                        usageCount: inspectedStyleName === null ? 0 : (styleUsage[String(inspectedStyleName)] || 0),
+                        tableParagraphUsageCount: inspectedStyleName === null ? 0 : (tableStyleUsage[String(inspectedStyleName)] || 0),
                       });
                     }
                   }
                   if (args.includeNumbering === true) {
                     var numberedParagraphs = safeCall(doc, "GetAllNumberedParagraphs", [], []) || [];
                     advanced.numbering = [];
+                    var numberingGroups = [];
                     for (var numberedIndex = 0; numberedIndex < Math.min(maxAdvancedItems, numberedParagraphs.length); numberedIndex += 1) {
                       var numberedParagraph = numberedParagraphs[numberedIndex];
+                      var numberedIdentity = paragraphIdentity(numberedParagraph);
+                      var numberedLevel = safeCall(numberedParagraph, "GetNumPr", [], null);
+                      var numberedDefinition = safeCall(numberedLevel, "GetNumbering", [], null);
+                      var numberingGroupIndex = numberingGroups.indexOf(numberedDefinition);
+                      if (numberingGroupIndex < 0) {
+                        numberingGroups.push(numberedDefinition);
+                        numberingGroupIndex = numberingGroups.length - 1;
+                      }
                       advanced.numbering.push({
                         paragraphIndex: allParagraphs().indexOf(numberedParagraph) + 1,
+                        paragraphId: numberedIdentity.paragraphId,
+                        internalId: numberedIdentity.internalId,
                         text: paragraphText(numberedParagraph).slice(0, 500),
-                        level: safeCall(numberedParagraph, "GetNumPr", [], null),
+                        level: safeCall(numberedLevel, "GetLevelIndex", [], safeCall(numberedLevel, "GetLvl", [], null)),
+                        listGroup: numberingGroupIndex + 1,
                       });
                     }
                   }
@@ -2267,6 +2545,8 @@
                         text: safeCall(comment, "GetText", [], ""),
                         author: safeCall(comment, "GetAuthorName", [], ""),
                         solved: safeCall(comment, "IsSolved", [], false),
+                        quoteText: String(safeCall(comment, "GetQuoteText", [], "") || ""),
+                        anchored: Boolean(String(safeCall(comment, "GetQuoteText", [], "") || "")),
                       };
                     });
                   }
@@ -2439,13 +2719,22 @@
                   if (!args.text) throw new Error("word_add_comment.text 不能为空");
                   var commentSelection = selectSearchRanges(args);
                   var commentIds = [];
+                  var commentAnchors = [];
                   for (var rangeIndex = 0; rangeIndex < commentSelection.selected.length; rangeIndex += 1) {
                     var addedComment = commentSelection.selected[rangeIndex].AddComment(
                       String(args.text),
                       args.author === undefined ? undefined : String(args.author),
                       args.userId === undefined ? undefined : String(args.userId),
                     );
-                    commentIds.push(addedComment && typeof addedComment.GetId === "function" ? addedComment.GetId() : null);
+                    var addedCommentId = addedComment && typeof addedComment.GetId === "function" ? addedComment.GetId() : null;
+                    var addedQuoteText = addedComment && typeof addedComment.GetQuoteText === "function"
+                      ? String(addedComment.GetQuoteText() || "")
+                      : "";
+                    if (!addedComment || !addedQuoteText) {
+                      throw new Error("ONLYOFFICE 未建立可验证的批注文本锚点");
+                    }
+                    commentIds.push(addedCommentId);
+                    commentAnchors.push({ commentId: addedCommentId, anchored: true, quoteText: addedQuoteText });
                   }
                   changed += commentSelection.selected.length;
                   results.push({
@@ -2453,6 +2742,7 @@
                     search: String(args.search),
                     commentedMatches: commentSelection.selected.length,
                     commentIds: commentIds,
+                    anchors: commentAnchors,
                   });
                   break;
                 }
@@ -2672,10 +2962,58 @@
                 case "word_manage_section": {
                   var sectionAction = String(args.action || "configure");
                   var sectionEntry;
+                  var sectionBoundaryResult = null;
                   if (sectionAction === "create") {
-                    if (args.paragraphIndex === undefined) throw new Error("创建分节时必须提供 paragraphIndex");
                     if (typeof doc.CreateSection !== "function") commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持创建分节");
-                    var sectionParagraph = paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+                    var sectionParagraph;
+                    var boundaryPosition = "after";
+                    if (args.boundary) {
+                      boundaryPosition = String(args.boundary.position || "after");
+                      var boundaryEntries = selectParagraphEntries(args.boundary, false);
+                      if (boundaryEntries.length !== 1) throw new Error("分节边界必须唯一匹配一个段落");
+                      var requestedBoundary = boundaryEntries[0];
+                      if (boundaryPosition === "after") {
+                        sectionParagraph = requestedBoundary;
+                      } else if (boundaryPosition === "before") {
+                        var requestedParentTable = safeCall(requestedBoundary.paragraph, "GetParentTable", [], null);
+                        var previousBoundary = requestedBoundary.index > 0
+                          ? allParagraphs()[requestedBoundary.index - 1]
+                          : null;
+                        var previousParentTable = safeCall(previousBoundary, "GetParentTable", [], null);
+                        if (!requestedParentTable && previousBoundary && !previousParentTable) {
+                          sectionParagraph = { paragraph: previousBoundary, index: requestedBoundary.index - 1 };
+                        } else {
+                          if (requestedParentTable) throw new Error("boundary.position=before 不接受表格内段落；请使用表格前的顶层边界段落");
+                          var insertedBoundary = Api.CreateParagraph();
+                          if (typeof insertedBoundary.SetSpacingAfter === "function") insertedBoundary.SetSpacingAfter(0);
+                          var boundaryTopLevelPosition = topLevelElementPosition(
+                            requestedBoundary.paragraph,
+                            "分节前置边界",
+                            "paragraph",
+                            requestedBoundary.index,
+                          );
+                          if (requireMethod(doc, "AddElement", "插入分节边界段落").call(doc, boundaryTopLevelPosition, insertedBoundary) === false) {
+                            throw new Error("ONLYOFFICE 无法插入分节边界段落");
+                          }
+                          sectionParagraph = { paragraph: insertedBoundary, index: requestedBoundary.index };
+                        }
+                      } else {
+                        throw new Error("boundary.position 必须是 before 或 after");
+                      }
+                      sectionBoundaryResult = {
+                        position: boundaryPosition,
+                        requestedParagraphIndex: requestedBoundary.index + 1,
+                        endParagraphIndex: sectionParagraph.index + 1,
+                      };
+                    } else {
+                      if (args.endParagraphIndex === undefined) throw new Error("创建分节时必须提供 boundary 或 endParagraphIndex");
+                      sectionParagraph = paragraphByIndex(args.endParagraphIndex, "endParagraphIndex");
+                      sectionBoundaryResult = {
+                        position: "after",
+                        requestedParagraphIndex: sectionParagraph.index + 1,
+                        endParagraphIndex: sectionParagraph.index + 1,
+                      };
+                    }
                     var createdSection = doc.CreateSection(sectionParagraph.paragraph);
                     if (!createdSection) throw new Error("ONLYOFFICE 无法在指定段落创建分节");
                     sectionEntry = { section: createdSection, index: documentSections().indexOf(createdSection) };
@@ -2723,6 +3061,7 @@
                     action: sectionAction,
                     sectionIndex: sectionEntry.index >= 0 ? sectionEntry.index + 1 : null,
                     sections: documentSections().length,
+                    boundary: sectionBoundaryResult,
                   });
                   break;
                 }
@@ -2738,6 +3077,13 @@
                     managedStyle = doc.CreateStyle(String(args.name), styleType);
                   }
                   if (!managedStyle) throw new Error("ONLYOFFICE 无法创建或取得样式：" + args.name);
+                  var existingStyleType = safeCall(managedStyle, "GetType", [], null);
+                  if (existingStyleType === "character") existingStyleType = "run";
+                  if (existingStyleType && String(existingStyleType) !== styleType) {
+                    throw new Error(
+                      "样式类型不匹配：" + args.name + " 的真实类型为 " + existingStyleType + "，请求类型为 " + styleType,
+                    );
+                  }
                   if (args.basedOn !== undefined) {
                     var baseStyle = typeof doc.GetStyle === "function" ? doc.GetStyle(String(args.basedOn)) : null;
                     if (!baseStyle) throw new Error("Word 中不存在父样式：" + args.basedOn);
@@ -2784,9 +3130,38 @@
                 }
 
                 case "word_set_numbering": {
-                  var numberingEntries = selectParagraphEntries(args, true);
                   var numberingKind = String(args.kind || "numbered");
-                  var customNumbering = doc.CreateNumbering(numberingKind === "bullet" ? "bullet" : "numbered");
+                  var numberingAssignments = [];
+                  if (Array.isArray(args.assignments) && args.assignments.length) {
+                    for (var assignmentIndex = 0; assignmentIndex < args.assignments.length; assignmentIndex += 1) {
+                      var assignment = args.assignments[assignmentIndex] || {};
+                      var assignmentEntries = selectParagraphEntries(assignment, false);
+                      if (assignmentEntries.length !== 1) throw new Error("assignments 中的段落目标必须唯一");
+                      numberingAssignments.push({
+                        entry: assignmentEntries[0],
+                        level: Math.min(8, Math.max(0, Math.floor(finiteNumber(assignment.level, "assignments.level")))),
+                      });
+                    }
+                  } else {
+                    var numberingEntries = selectParagraphEntries(args, true);
+                    var legacyLevel = Math.min(8, Math.max(0, Math.floor(Number(args.level) || 0)));
+                    for (var legacyEntryIndex = 0; legacyEntryIndex < numberingEntries.length; legacyEntryIndex += 1) {
+                      numberingAssignments.push({ entry: numberingEntries[legacyEntryIndex], level: legacyLevel });
+                    }
+                  }
+                  var customNumbering = null;
+                  var continuedFrom = null;
+                  if (args.continueFrom) {
+                    var continueEntries = selectParagraphEntries(args.continueFrom, false);
+                    if (continueEntries.length !== 1) throw new Error("continueFrom 必须唯一匹配一个已编号段落");
+                    var continueNumPr = safeCall(continueEntries[0].paragraph, "GetNumPr", [], null);
+                    customNumbering = safeCall(continueNumPr, "GetNumbering", [], null);
+                    if (!customNumbering) throw new Error("continueFrom 指向的段落没有可复用的编号定义");
+                    continuedFrom = continueEntries[0].index < 0 ? null : continueEntries[0].index + 1;
+                  } else {
+                    customNumbering = doc.CreateNumbering(numberingKind === "bullet" ? "bullet" : "numbered");
+                  }
+                  if (!customNumbering) throw new Error("ONLYOFFICE 无法创建或复用编号定义");
                   var configuredLevels = Array.isArray(args.levels) ? args.levels : [];
                   for (var configuredLevelIndex = 0; configuredLevelIndex < configuredLevels.length; configuredLevelIndex += 1) {
                     var configuredLevel = configuredLevels[configuredLevelIndex] || {};
@@ -2811,21 +3186,34 @@
                       levelObject.SetRestart(Math.floor(finiteNumber(configuredLevel.restart, "levels.restart")));
                     }
                   }
-                  var selectedLevel = Math.min(8, Math.max(0, Math.floor(Number(args.level) || 0)));
-                  var selectedNumberingLevel = customNumbering.GetLevel(selectedLevel);
-                  if (args.restartAt !== undefined && typeof selectedNumberingLevel.SetStart === "function") {
-                    selectedNumberingLevel.SetStart(Math.floor(finiteNumber(args.restartAt, "restartAt")));
+                  var assignmentResults = [];
+                  for (var numberingParagraphIndex = 0; numberingParagraphIndex < numberingAssignments.length; numberingParagraphIndex += 1) {
+                    var numberingAssignment = numberingAssignments[numberingParagraphIndex];
+                    var selectedNumberingLevel = customNumbering.GetLevel(numberingAssignment.level);
+                    if (args.restartAt !== undefined && numberingParagraphIndex === 0 && typeof selectedNumberingLevel.SetStart === "function") {
+                      selectedNumberingLevel.SetStart(Math.floor(finiteNumber(args.restartAt, "restartAt")));
+                    }
+                    numberingAssignment.entry.paragraph.SetNumbering(selectedNumberingLevel);
+                    var numberingIdentity = paragraphIdentity(numberingAssignment.entry.paragraph);
+                    assignmentResults.push({
+                      paragraphIndex: numberingAssignment.entry.index < 0 ? null : numberingAssignment.entry.index + 1,
+                      paragraphId: numberingIdentity.paragraphId,
+                      internalId: numberingIdentity.internalId,
+                      level: numberingAssignment.level,
+                    });
                   }
-                  for (var numberingParagraphIndex = 0; numberingParagraphIndex < numberingEntries.length; numberingParagraphIndex += 1) {
-                    numberingEntries[numberingParagraphIndex].paragraph.SetNumbering(selectedNumberingLevel);
-                  }
-                  changed += numberingEntries.length;
+                  var listGroupId = safeCall(customNumbering, "GetInternalId", [], safeCall(customNumbering, "GetId", [], null));
+                  if (listGroupId === null || listGroupId === undefined) listGroupId = continuedFrom === null ? "created" : "continued";
+                  changed += numberingAssignments.length;
                   results.push({
                     name: call.name,
                     kind: numberingKind,
-                    level: selectedLevel,
-                    paragraphs: numberingEntries.length,
+                    level: Array.isArray(args.assignments) ? null : numberingAssignments[0].level,
+                    paragraphs: numberingAssignments.length,
                     configuredLevels: configuredLevels.length,
+                    assignments: assignmentResults,
+                    listGroupId: listGroupId,
+                    continuedFromParagraphIndex: continuedFrom,
                   });
                   break;
                 }
@@ -2895,13 +3283,16 @@
                   var hasBreakTarget = (
                     args.all === true
                     || args.current === true
+                    || args.paragraphIndex !== undefined
+                    || args.paragraphId !== undefined
+                    || args.internalId !== undefined
                     || (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length > 0)
                     || (args.search !== undefined && String(args.search) !== "")
                   );
                   if (!hasBreakTarget) {
                     commandError(
                       "INVALID_ARGUMENTS",
-                      "必须使用 paragraphIndexes、search、all=true 或 current=true 指定段落",
+                      "必须使用 paragraphId、paragraphIndex、paragraphIndexes、search、all=true 或 current=true 指定段落",
                       { partialMutationPossible: false },
                     );
                   }
@@ -2991,7 +3382,7 @@
                       String(args.align),
                     );
                   }
-                  if (args.styleName) table.SetStyle(resolveStyle(args.styleName, "table"));
+                  if (args.tableStyleName) table.SetStyle(resolveStyle(args.tableStyleName, "table"));
                   else {
                     var borderedStyle = typeof doc.GetStyle === "function" ? doc.GetStyle("Bordered") : null;
                     if (borderedStyle) table.SetStyle(borderedStyle);
@@ -3009,8 +3400,11 @@
                   var data = Array.isArray(args.data) ? args.data : [];
                   for (var rowIndex = 0; rowIndex < rows; rowIndex += 1) {
                     for (var colIndex = 0; colIndex < cols; colIndex += 1) {
-                      if (!data[rowIndex] || data[rowIndex][colIndex] === undefined) continue;
                       var cell = table.GetRow(rowIndex).GetCell(colIndex);
+                      if (args.cellParagraphStyleName !== undefined) {
+                        applyCellFormat(cell, { paragraphStyleName: args.cellParagraphStyleName });
+                      }
+                      if (!data[rowIndex] || data[rowIndex][colIndex] === undefined) continue;
                       setTableCellValue(cell, data[rowIndex][colIndex], args);
                     }
                   }
@@ -3086,7 +3480,7 @@
                 }
 
                 case "word_set_table_cell": {
-                  if (!hasDefined(args, paragraphFormatKeys.concat(["text", "backgroundColor", "verticalAlign", "widthPercent"]))) {
+                  if (!hasDefined(args, paragraphFormatKeys.concat(["text", "backgroundColor", "verticalAlign", "widthPercent", "paragraphStyleName"]))) {
                     throw new Error("word_set_table_cell 至少需要 text 或一个格式属性");
                   }
                   var tableEntry = getTable(args.tableIndex);
@@ -3109,7 +3503,7 @@
 
                 case "word_format_table": {
                   if (!hasDefined(args, [
-                    "widthPercent", "align", "styleName", "backgroundColor", "title",
+                    "widthPercent", "align", "tableStyleName", "cellParagraphStyleName", "backgroundColor", "title",
                     "description", "firstRow", "lastRow", "firstColumn", "lastColumn",
                     "horizontalBanding", "verticalBanding", "fontSize", "fontFamily",
                     "bold", "italic", "color", "verticalAlign",
@@ -3122,7 +3516,7 @@
                     table.SetWidth("percent", Math.min(100, Math.max(1, finiteNumber(args.widthPercent, "widthPercent"))));
                   }
                   if (args.align && typeof table.SetJc === "function") table.SetJc(String(args.align));
-                  if (args.styleName) table.SetStyle(resolveStyle(args.styleName, "table"));
+                  if (args.tableStyleName) table.SetStyle(resolveStyle(args.tableStyleName, "table"));
                   if (args.backgroundColor && typeof table.SetBackgroundColor === "function") {
                     table.SetBackgroundColor(Api.Color(String(args.backgroundColor)));
                   }
@@ -3144,7 +3538,17 @@
                     );
                   }
                   var cells = typeof table.GetAllCells === "function" ? table.GetAllCells() : [];
-                  for (var cellIndex = 0; cellIndex < cells.length; cellIndex += 1) applyCellFormat(cells[cellIndex], args);
+                  var tableCellFormat = args;
+                  if (args.cellParagraphStyleName !== undefined) {
+                    tableCellFormat = {};
+                    for (var tableFormatKey in args) {
+                      if (Object.prototype.hasOwnProperty.call(args, tableFormatKey)) {
+                        tableCellFormat[tableFormatKey] = args[tableFormatKey];
+                      }
+                    }
+                    tableCellFormat.paragraphStyleName = args.cellParagraphStyleName;
+                  }
+                  for (var cellIndex = 0; cellIndex < cells.length; cellIndex += 1) applyCellFormat(cells[cellIndex], tableCellFormat);
                   changed += Math.max(1, cells.length);
                   results.push({ name: call.name, tableIndex: tableEntry.index + 1, formattedCells: cells.length });
                   break;
@@ -3370,13 +3774,16 @@
                       String(args.align),
                     );
                   }
-                  if (args.styleName) nestedTable.SetStyle(resolveStyle(args.styleName, "table"));
+                  if (args.tableStyleName) nestedTable.SetStyle(resolveStyle(args.tableStyleName, "table"));
                   var nestedData = Array.isArray(args.data) ? args.data : [];
                   for (var nestedRowIndex = 0; nestedRowIndex < nestedRows; nestedRowIndex += 1) {
                     for (var nestedColumnIndex = 0; nestedColumnIndex < nestedCols; nestedColumnIndex += 1) {
-                      if (!nestedData[nestedRowIndex] || nestedData[nestedRowIndex][nestedColumnIndex] === undefined) continue;
                       var nestedCell = nestedTable.GetRow(nestedRowIndex).GetCell(nestedColumnIndex);
-                      setTableCellValue(nestedCell, nestedData[nestedRowIndex][nestedColumnIndex], args);
+                      if (nestedData[nestedRowIndex] && nestedData[nestedRowIndex][nestedColumnIndex] !== undefined) {
+                        setTableCellValue(nestedCell, nestedData[nestedRowIndex][nestedColumnIndex], args);
+                      } else if (args.cellParagraphStyleName !== undefined) {
+                        applyCellFormat(nestedCell, { paragraphStyleName: args.cellParagraphStyleName });
+                      }
                     }
                   }
                   var parentContent = parentCellEntry.cell.GetContent();
@@ -3615,11 +4022,46 @@
 
                 case "word_manage_long_document": {
                   var longAction = String(args.action || "");
-                  if (args.paragraphIndex !== undefined) {
-                    var longTarget = paragraphByIndex(args.paragraphIndex, "paragraphIndex");
+                  var hasLongParagraphTarget = args.paragraphIndex !== undefined
+                    || args.paragraphId !== undefined
+                    || args.internalId !== undefined
+                    || args.search !== undefined;
+                  if (hasLongParagraphTarget) {
+                    var longTargets = selectParagraphEntries(args, false);
+                    if (longTargets.length !== 1) throw new Error("长文档段落目标必须唯一匹配");
+                    var longTarget = longTargets[0];
                     if (typeof longTarget.paragraph.Select === "function") longTarget.paragraph.Select();
                   }
                   if (longAction === "addToc") {
+                    var tocInsertAt = String(args.insertAt || "replaceEmpty");
+                    var tocTargetIndex = null;
+                    if (hasLongParagraphTarget) {
+                      var tocTargetEntries = selectParagraphEntries(args, false);
+                      if (tocTargetEntries.length !== 1) throw new Error("目录段落目标必须唯一匹配");
+                      var tocTargetEntry = tocTargetEntries[0];
+                      tocTargetIndex = tocTargetEntry.index + 1;
+                      if (tocInsertAt === "replaceEmpty") {
+                        if (paragraphText(tocTargetEntry.paragraph).trim()) {
+                          throw new Error("addToc 默认只允许替换空段落");
+                        }
+                        if (typeof tocTargetEntry.paragraph.Select === "function") tocTargetEntry.paragraph.Select();
+                      } else if (tocInsertAt === "before" || tocInsertAt === "after") {
+                        var tocBoundaryParagraph = Api.CreateParagraph();
+                        var tocTargetPosition = topLevelElementPosition(
+                          tocTargetEntry.paragraph,
+                          "目录插入目标",
+                          "paragraph",
+                          tocTargetEntry.index,
+                        );
+                        var tocBoundaryPosition = tocInsertAt === "before" ? tocTargetPosition : tocTargetPosition + 1;
+                        if (requireMethod(doc, "AddElement", "插入目录边界段落").call(doc, tocBoundaryPosition, tocBoundaryParagraph) === false) {
+                          throw new Error("ONLYOFFICE 无法插入目录边界段落");
+                        }
+                        if (typeof tocBoundaryParagraph.Select === "function") tocBoundaryParagraph.Select();
+                      } else {
+                        throw new Error("addToc.insertAt 必须是 before、after 或 replaceEmpty");
+                      }
+                    }
                     var tocProperties = {
                       ShowPageNums: args.showPageNumbers !== false,
                       RightAlgn: args.rightAlignPageNumbers !== false,
@@ -3632,7 +4074,13 @@
                       throw new Error("ONLYOFFICE 无法插入自动目录");
                     }
                     changed += 1;
-                    results.push({ name: call.name, action: longAction, properties: tocProperties });
+                    results.push({
+                      name: call.name,
+                      action: longAction,
+                      properties: tocProperties,
+                      insertAt: tocInsertAt,
+                      targetParagraphIndex: tocTargetIndex,
+                    });
                   } else if (longAction === "updateToc") {
                     if (requireMethod(doc, "UpdateAllTOC", "更新自动目录").call(doc) === false) {
                       throw new Error("ONLYOFFICE 无法更新自动目录");
@@ -3640,23 +4088,71 @@
                     changed += 1;
                     results.push({ name: call.name, action: longAction, updated: true });
                   } else if (longAction === "addCaption") {
-                    if (args.paragraphIndex === undefined) throw new Error("addCaption 必须提供 paragraphIndex");
                     if (!args.label) throw new Error("addCaption.label 不能为空");
-                    var captionTarget = paragraphByIndex(args.paragraphIndex, "paragraphIndex").paragraph;
-                    if (requireMethod(captionTarget, "AddCaption", "插入题注").call(
-                      captionTarget,
-                      String(args.text || ""),
-                      String(args.label),
-                      Boolean(args.excludeLabel),
-                      String(args.numberFormat || "Arabic"),
-                      Boolean(args.before),
-                      args.headingLevel === undefined ? undefined : Math.floor(finiteNumber(args.headingLevel, "headingLevel")),
-                      String(args.separator || "hyphen"),
-                    ) === false) {
-                      throw new Error("ONLYOFFICE 无法插入题注");
+                    var captionAnchor;
+                    var captionCollectionKind;
+                    var captionCollectionIndex;
+                    if (args.tableIndex !== undefined) {
+                      var captionTableEntry = getTable(args.tableIndex);
+                      captionAnchor = captionTableEntry.table;
+                      captionCollectionKind = "table";
+                      captionCollectionIndex = captionTableEntry.index;
+                    } else {
+                      var captionParagraphEntry = resolveInsertionParagraph(args);
+                      captionAnchor = captionParagraphEntry.paragraph;
+                      captionCollectionKind = "paragraph";
+                      captionCollectionIndex = captionParagraphEntry.index;
+                    }
+                    var captionAnchorPosition = topLevelElementPosition(
+                      captionAnchor,
+                      "题注目标",
+                      captionCollectionKind,
+                      captionCollectionIndex,
+                    );
+                    var captionBefore = args.insertAt !== undefined
+                      ? String(args.insertAt) === "before"
+                      : Boolean(args.before);
+                    var captionParagraph = Api.CreateParagraph();
+                    if (args.styleName !== undefined) {
+                      applyParagraphFormat(captionParagraph, { styleName: String(args.styleName) });
+                    }
+                    if (args.excludeLabel !== true) captionParagraph.AddText(String(args.label) + " ");
+                    var captionPlaceholder = requireMethod(captionParagraph, "AddText", "创建题注字段占位范围").call(
+                      captionParagraph,
+                      "\u200B",
+                    );
+                    var captionFieldRange = requireMethod(captionPlaceholder, "GetRange", "取得题注字段范围").call(captionPlaceholder);
+                    var captionLabel = String(args.label).replace(/["\\]/g, "");
+                    var captionInstruction = "SEQ \"" + captionLabel + "\" \\* " + String(args.numberFormat || "ARABIC");
+                    if (requireMethod(captionFieldRange, "AddField", "插入动态题注字段").call(captionFieldRange, captionInstruction) === false) {
+                      throw new Error("ONLYOFFICE 无法插入动态题注字段");
+                    }
+                    if (args.text) captionParagraph.AddText(" " + String(args.text));
+                    var captionInsertionPosition = captionBefore ? captionAnchorPosition : captionAnchorPosition + 1;
+                    if (requireMethod(doc, "AddElement", "插入题注段落").call(doc, captionInsertionPosition, captionParagraph) === false) {
+                      throw new Error("ONLYOFFICE 无法插入题注段落");
+                    }
+                    if (args.bookmarkName) {
+                      var captionBookmarkRange = safeCall(captionParagraph, "GetRange", [], null);
+                      if (!captionBookmarkRange || requireMethod(captionBookmarkRange, "AddBookmark", "为题注添加书签").call(
+                        captionBookmarkRange,
+                        String(args.bookmarkName),
+                      ) === false) {
+                        throw new Error("ONLYOFFICE 无法为题注添加书签");
+                      }
                     }
                     changed += 1;
-                    results.push({ name: call.name, action: longAction, label: String(args.label) });
+                    results.push({
+                      name: call.name,
+                      action: longAction,
+                      label: String(args.label),
+                      instruction: captionInstruction,
+                      dynamic: true,
+                      styleName: args.styleName === undefined ? null : String(args.styleName),
+                      bookmarkName: args.bookmarkName === undefined ? null : String(args.bookmarkName),
+                      target: captionCollectionKind,
+                      insertAt: captionBefore ? "before" : "after",
+                    });
                   } else if (longAction === "addTableOfFigures") {
                     if (!args.label) throw new Error("addTableOfFigures.label 不能为空");
                     var figureProperties = {
@@ -3681,6 +4177,35 @@
                     results.push({ name: call.name, action: longAction, updated: true });
                   } else if (longAction === "addCrossReference") {
                     var referenceKind = String(args.referenceKind || "caption");
+                    if (referenceKind === "bookmark" && args.replaceSearch !== undefined) {
+                      if (!args.bookmarkName) throw new Error("书签交叉引用的 bookmarkName 不能为空");
+                      var referenceRanges = selectSearchRanges({
+                        search: args.replaceSearch,
+                        occurrence: args.occurrence,
+                        matchCase: args.matchCase,
+                      });
+                      if (!referenceRanges.selected.length) throw new Error("未找到交叉引用占位范围");
+                      var refInstruction = "REF \"" + String(args.bookmarkName).replace(/["\\]/g, "") + "\"";
+                      if (args.hyperlink !== false) refInstruction += " \\h";
+                      for (var referenceRangeIndex = 0; referenceRangeIndex < referenceRanges.selected.length; referenceRangeIndex += 1) {
+                        if (requireMethod(referenceRanges.selected[referenceRangeIndex], "AddField", "替换交叉引用占位范围").call(
+                          referenceRanges.selected[referenceRangeIndex],
+                          refInstruction,
+                        ) === false) {
+                          throw new Error("ONLYOFFICE 无法替换交叉引用占位范围");
+                        }
+                      }
+                      changed += referenceRanges.selected.length;
+                      results.push({
+                        name: call.name,
+                        action: longAction,
+                        referenceKind: referenceKind,
+                        bookmarkName: String(args.bookmarkName),
+                        instruction: refInstruction,
+                        replacedRanges: referenceRanges.selected.length,
+                      });
+                      break;
+                    }
                     var referenceTarget = resolveInsertionParagraph(args).paragraph;
                     var referenceSucceeded = false;
                     var referencedIndex = null;
@@ -3713,8 +4238,7 @@
                         String(args.numberSeparator || ""),
                       );
                     } else {
-                      if (args.targetIndex === undefined) throw new Error(referenceKind + " 交叉引用的 targetIndex 不能为空");
-                      referencedIndex = Math.floor(finiteNumber(args.targetIndex, "targetIndex")) - 1;
+                      referencedIndex = args.targetIndex === undefined ? -1 : Math.floor(finiteNumber(args.targetIndex, "targetIndex")) - 1;
                       var referenceParagraphs;
                       var referenceMethod;
                       var defaultReferenceType;
@@ -3736,6 +4260,16 @@
                         defaultReferenceType = "formEndnoteNum";
                       } else {
                         throw new Error("referenceKind 不受支持");
+                      }
+                      if (args.targetParagraphId !== undefined || args.targetInternalId !== undefined) {
+                        var stableReferenceTarget = selectParagraphEntries({
+                          paragraphId: args.targetParagraphId,
+                          internalId: args.targetInternalId,
+                        }, false)[0].paragraph;
+                        referencedIndex = referenceParagraphs.indexOf(stableReferenceTarget);
+                      }
+                      if (referencedIndex < 0 && args.targetIndex === undefined) {
+                        throw new Error(referenceKind + " 交叉引用必须提供 targetParagraphId、targetInternalId 或 targetIndex");
                       }
                       if (referencedIndex < 0 || referencedIndex >= referenceParagraphs.length) {
                         throw new Error("targetIndex 超出 " + referenceKind + " 目标范围");
@@ -4236,8 +4770,6 @@
                       content.Push(paragraph);
                     }
                     if (args.replace === false && args.text !== undefined) paragraph.AddText(String(args.text));
-                    if (args.pageNumber === true) paragraph.AddPageNumber();
-                    if (args.pagesCount === true) paragraph.AddPagesCount();
                     var headerFooterFields = Array.isArray(args.fields) ? args.fields : [];
                     for (var headerFooterFieldIndex = 0; headerFooterFieldIndex < headerFooterFields.length; headerFooterFieldIndex += 1) {
                       var headerFooterInstruction = String(headerFooterFields[headerFooterFieldIndex] || "");
@@ -4259,6 +4791,11 @@
                         throw new Error("ONLYOFFICE 无法插入页眉页脚字段：" + headerFooterInstruction);
                       }
                     }
+                    if (!headerFooterFields.length && args.pageNumber === true) paragraph.AddPageNumber();
+                    if (!headerFooterFields.length && args.pageNumber === true && args.pagesCount === true) {
+                      paragraph.AddText(" / ");
+                    }
+                    if (!headerFooterFields.length && args.pagesCount === true) paragraph.AddPagesCount();
                     applyParagraphFormat(paragraph, args);
                   }
                   changed += selectedSections.length;

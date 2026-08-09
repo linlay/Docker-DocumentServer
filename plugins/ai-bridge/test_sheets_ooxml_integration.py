@@ -31,7 +31,11 @@ from xml.etree import ElementTree as ET
 BASE_URL = os.environ.get("AI_BRIDGE_LIVE_BASE_URL", "http://127.0.0.1:8088").rstrip("/")
 FILE_NAME = os.environ.get("AI_BRIDGE_LIVE_FILE", "").strip()
 CONTAINER = os.environ.get("AI_BRIDGE_LIVE_CONTAINER", "onlyoffice-documentserver").strip()
-NS = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+NS = {
+    "x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "x14": "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main",
+    "xm": "http://schemas.microsoft.com/office/excel/2006/main",
+}
 
 
 def post_json(
@@ -99,6 +103,24 @@ def normalized_a1(value: object) -> str:
     return str(value or "").rsplit("!", 1)[-1].replace("$", "")
 
 
+def data_validation_rules(root: ET.Element) -> list[ET.Element]:
+    return (
+        root.findall(".//x:dataValidations/x:dataValidation", NS)
+        + root.findall(".//x14:dataValidations/x14:dataValidation", NS)
+    )
+
+
+def validation_sqref(rule: ET.Element) -> str:
+    return rule.get("sqref") or rule.findtext("xm:sqref", default="", namespaces=NS)
+
+
+def validation_formula1(rule: ET.Element) -> str:
+    return (
+        rule.findtext("x:formula1", default="", namespaces=NS)
+        or rule.findtext("x14:formula1/xm:f", default="", namespaces=NS)
+    ).strip('"')
+
+
 class SheetsOoxmlIntegrationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -132,6 +154,24 @@ class SheetsOoxmlIntegrationTest(unittest.TestCase):
                 "arguments": {
                     "range": "D2:D4",
                     "formula": [["=B2-C2"], ["=B3-C3"], ["=B4-C4"]],
+                },
+            },
+            {
+                "name": "sheets_set_values",
+                "arguments": {
+                    "range": "F1:H3",
+                    "values": [
+                        ["空值探针", "辅助值", "非空计数"],
+                        [1, None, None],
+                        [None, 2, None],
+                    ],
+                },
+            },
+            {
+                "name": "sheets_set_formula",
+                "arguments": {
+                    "range": "H2:H3",
+                    "formula": [["=COUNTA(F2:G2)"], ["=COUNTA(F3:G3)"]],
                 },
             },
             {
@@ -226,7 +266,7 @@ class SheetsOoxmlIntegrationTest(unittest.TestCase):
         )
         execution = executed.get("result") or {}
         self.assertTrue(execution.get("persisted"), executed)
-        self.assertEqual(execution.get("changed"), 8)
+        self.assertEqual(execution.get("changed"), 10)
         freeze_result = next(
             result
             for result in execution.get("results", [])
@@ -288,20 +328,37 @@ class SheetsOoxmlIntegrationTest(unittest.TestCase):
         }
         self.assertEqual(
             formulas,
-            {"D2": "B2-C2", "D3": "B3-C3", "D4": "B4-C4"},
+            {
+                "D2": "B2-C2",
+                "D3": "B3-C3",
+                "D4": "B4-C4",
+                "H2": "COUNTA(F2:G2)",
+                "H3": "COUNTA(F3:G3)",
+            },
         )
         errors = [
             cell.findtext("x:v", default="", namespaces=NS)
             for cell in sheet.findall(".//x:c[@t='e']", NS)
         ]
         self.assertNotIn("#N/A", errors)
+        self.assertEqual(errors, [], "null writes must not create OOXML error cells")
 
-        validations = sheet.findall(".//x:dataValidations/x:dataValidation", NS)
+        cells = {cell.get("r"): cell for cell in sheet.findall(".//x:c", NS)}
+        for address in ("G2", "F3"):
+            cell = cells.get(address)
+            self.assertTrue(
+                cell is None or cell.find("x:v", NS) is None,
+                f"{address} must remain a truly empty cell",
+            )
+        self.assertEqual(cells["H2"].findtext("x:v", default="", namespaces=NS), "1")
+        self.assertEqual(cells["H3"].findtext("x:v", default="", namespaces=NS), "1")
+
+        validations = data_validation_rules(sheet)
         self.assertEqual(len(validations), 1)
         self.assertEqual(validations[0].get("type"), "list")
-        self.assertEqual(validations[0].get("sqref"), "E2:E4")
+        self.assertEqual(validation_sqref(validations[0]), "E2:E4")
         self.assertEqual(
-            validations[0].findtext("x:formula1", default="", namespaces=NS),
+            validation_formula1(validations[0]),
             "一月,二月,三月",
         )
 

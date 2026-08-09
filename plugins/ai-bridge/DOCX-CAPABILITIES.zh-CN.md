@@ -8,6 +8,8 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 
 - **已实现**：`ai-bridge` 已有可调用工具或宿主控制接口。
 - **有限实现**：公开 API 只能完成该功能的一部分，Bridge 已覆盖可可靠实现的部分。
+- **待导出验收**：Bridge 路径和单元回归已接通，但尚未由真实 DocumentServer
+  导出的 OOXML/逐页渲染样本证明，不按“已实现”对外承诺。
 - **宿主负责**：属于编辑器实例或文件生命周期，不是在已打开文档中执行的插件命令。
 - **公开 API 不支持**：ONLYOFFICE 编辑器界面可能具备该功能，但 9.4 的公开插件/Office API
   没有可靠的创建或修改方法，因此 Bridge 不伪造支持。
@@ -21,7 +23,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | D03 | 页面尺寸与方向 | 已实现 | `word_set_page_layout`；支持 A4、Letter、Legal、自定义宽高及横竖向。 |
 | D04 | 页边距 | 已实现 | `word_set_page_layout`；支持上下左右页边距及页眉、页脚距离。 |
 | D05 | 分页 | 已实现 | `word_insert_page_break`、段落 `pageBreakBefore`，以及页导航和页数检查。 |
-| D06 | 分节 | 已实现 | `word_manage_section` 创建或配置分节，支持 continuous、nextPage、evenPage、oddPage。 |
+| D06 | 分节 | 已实现 | `word_manage_section` 创建或配置分节，支持 continuous、nextPage、evenPage、oddPage；`CreateSection` 的目标是旧节结束段落，Bridge 通过 `boundary.position=before/after` 显式解析边界。 |
 | D07 | 分栏（高级） | 已实现 | `word_manage_section.columns`；支持等宽和自定义非等宽分栏。公开 API 不提供分隔线参数。 |
 | D08 | 不同节使用不同页面设置（高级） | 已实现 | `word_set_page_layout.sectionIndex` 与 `word_manage_section.sectionIndex`。 |
 
@@ -37,7 +39,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | D14 | 上标、下标 | 已实现 | `vertAlign` 支持 baseline、superscript、subscript。 |
 | D15 | 段落对齐 | 已实现 | left、center、right、both。 |
 | D16 | 缩进、行距、段前段后距 | 已实现 | 首行、左右缩进，自动/固定/最小行距，段前段后距。 |
-| D17 | 字符样式和段落样式 | 已实现 | `word_manage_style` 创建 paragraph/character 样式；`styleName` 应用段落样式，`characterStyleName` 应用字符样式。Bridge 会把对外的 character 正确映射为 ONLYOFFICE 的 run 样式。 |
+| D17 | 字符样式和段落样式 | 已实现 | `word_manage_style` 创建 paragraph/character 样式；正文用 `styleName`，表格单元格段落用 `cellParagraphStyleName` / `paragraphStyleName`，字符用 `characterStyleName`。Bridge 校验真实样式类型，不能再把 paragraph 样式交给 `table.SetStyle()`。 |
 | D18 | 自定义样式及样式继承（高级） | 已实现 | `word_manage_style.basedOn`；支持创建和更新公开 API 可编辑的样式属性。 |
 | D19 | 制表位（高级） | 已实现 | `word_set_tabs`；支持位置及 left、center、right、decimal、bar、clear 对齐。公开 API 不提供前导符设置。 |
 | D20 | 首字下沉（高级） | 公开 API 不支持 | ONLYOFFICE 9.4 的公开文档 API 没有可靠的 drop-cap 创建/修改方法。 |
@@ -48,7 +50,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 |---|---|---|---|
 | D21 | 项目符号列表 | 已实现 | `word_set_list`、`word_set_numbering`。 |
 | D22 | 编号列表 | 已实现 | `word_set_list`、`word_set_numbering`。 |
-| D23 | 多级列表（高级） | 已实现 | `word_set_numbering.levels` 支持 0–8 级。 |
+| D23 | 多级列表（高级） | 待导出验收 | `word_set_numbering.levels` 支持 0–8 级；一次调用的 `assignments[]` 共用同一编号实例，`continueFrom` 复用已有定义。旧 `paragraphIndexes + level` 每次调用仍是独立列表，不可用于跨层级连续编号。最终以导出 OOXML 的共享 `numId` 为准。 |
 | D24 | 自定义编号规则（高级） | 已实现 | 支持每级编号格式、格式文本、起始值、对齐、重启规则。 |
 
 ## 表格
@@ -60,7 +62,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | D27 | 合并、拆分单元格 | 已实现 | `word_edit_table` 的 mergeCells、splitCell。 |
 | D28 | 行高、列宽 | 已实现 | `word_format_table_advanced`；行高规则支持公开 API 的 auto、atLeast。 |
 | D29 | 单元格边框、底色、对齐 | 已实现 | `word_set_table_cell` 和 `word_format_table_advanced`；指定 row/column 时边距和外边框只作用于目标单元格。 |
-| D30 | 表格整体样式 | 已实现 | `word_format_table`；支持样式、表格外观、宽度、对齐、底色、标题和说明。 |
+| D30 | 表格整体样式 | 已实现 | `word_format_table.tableStyleName` 仅接受 table 样式；`word_add_table.cellParagraphStyleName` 可把 paragraph 样式应用到全部单元格段落，单元格的 `paragraphStyleName` 可覆盖。 |
 | D31 | 表头跨页重复（高级） | 已实现 | `word_format_table_advanced.repeatHeader`。 |
 | D32 | 表格跨页控制（高级） | 公开 API 不支持 | 公开 `ApiTableRow` 没有“允许跨页断行”开关；可用段落 keepLines/keepNext 做有限的内容级控制，但不等价。 |
 | D33 | 嵌套表格（高级） | 已实现 | `word_add_nested_table`。 |
@@ -91,7 +93,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | D48 | 奇偶页不同 | 已实现 | `word_manage_section.evenAndOddHeaders`，配合 type=`even`。 |
 | D49 | 分节独立页眉页脚（高级） | 已实现 | `word_set_header_footer.sectionIndex` 为指定节创建、替换或删除 default/first/even 内容。 |
 | D50 | 页码格式及指定起始页码 | 有限实现 | `word_manage_section.startPageNumber` 支持指定起始页码；公开 `ApiSection` 不提供页码数字格式设置。 |
-| D51 | 页眉页脚中的动态字段（高级） | 已实现 | `fields` 接受字段指令代码；PAGE/PAGES 另有快捷参数。 |
+| D51 | 页眉页脚中的动态字段（高级） | 已实现 | `fields[]` 是标准方式并保持显式顺序；PAGE/PAGES 布尔快捷参数仅兼容使用，Bridge 会插入分隔文本，避免字段粘连成“第 210”。 |
 
 ## 长文档功能
 
@@ -100,9 +102,9 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | D52 | 超链接 | 已实现 | `word_add_hyperlink`，支持外部 URL 和书签目标。 |
 | D53 | 书签（高级） | 已实现 | `word_add_bookmark`、`word_inspect_advanced`、`word_manage_long_document.deleteBookmark`。 |
 | D54 | 自动目录（高级） | 已实现 | `word_manage_long_document` 的 addToc、updateToc。 |
-| D55 | 题注（高级） | 已实现 | addCaption。 |
+| D55 | 题注（高级） | 待导出验收 | addCaption 直接插入真实 `SEQ` 域，支持样式、书签和表格/段落目标；只有导出 OOXML 中存在 `SEQ` 且 `ai/qa` 通过后才算能力通过。 |
 | D56 | 图表目录（高级） | 已实现 | addTableOfFigures、updateTableOfFigures。 |
-| D57 | 交叉引用（高级） | 已实现 | 支持 caption、bookmark、heading、numbered、footnote、endnote 六类目标。 |
+| D57 | 交叉引用（高级） | 待导出验收 | 书签引用可插入真实 `REF` 域并替换占位文本；其他引用仍覆盖 caption、heading、numbered、footnote、endnote 目标。只有导出 OOXML 的 `REF`/目标关系通过 QA 后才对外承诺。 |
 | D58 | 脚注、尾注（高级） | 已实现 | addFootnote、addEndnote，并可检查已有注释文本。 |
 | D59 | 引文和参考文献（高级） | 有限实现 | 可用 `word_manage_fields` 写入 CITATION/BIBLIOGRAPHY 等字段指令并更新字段；公开 API 不提供结构化文献源库的增删改查。 |
 | D60 | 域代码及动态字段（高级） | 已实现 | `word_manage_fields` 支持按文本范围或段落插入字段、更新全部字段；页眉页脚也支持任意字段指令。 |
@@ -111,7 +113,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 
 | 编号 | 功能 | 状态 | ai-bridge 实现与边界 |
 |---|---|---|---|
-| D61 | 批注（高级） | 已实现 | 添加、检查、回复、编辑、删除、全部删除、解决和重新打开。 |
+| D61 | 批注（高级） | 待导出验收 | 添加后即时检查 `GetQuoteText()` 并返回 `anchored/quoteText`；管理操作支持回复、编辑、删除、全部删除、解决和重新打开。最终还需导出 OOXML 同时存在 range start/end/reference。 |
 | D62 | 修订记录（高级） | 已实现 | 开启/停止 AI 修订跟踪，并通过 `word_inspect_advanced` 读取 review report。 |
 | D63 | 接受、拒绝修订（高级） | 有限实现 | 支持接受全部或拒绝全部；公开 API 没有按单条 revision ID 接受/拒绝的方法。 |
 | D64 | 文档保护（高级） | 有限实现 | `word_set_protection` 支持 readOnly、comments、forms 和解除限制；公开插件方法不支持设置密码。 |
@@ -129,7 +131,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 
 ## 对外 Word 工具
 
-0.1.0 的 Word 公共工具共 50 个：
+0.2.1 的 Bridge 内部 Word 工具共 50 个（Skill/HTTPX 公共 action 使用无前缀名称）：
 
 ```text
 word_inspect                    word_replace_text

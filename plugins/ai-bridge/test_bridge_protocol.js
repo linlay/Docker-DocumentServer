@@ -74,6 +74,7 @@ function createHarness(options = {}) {
   const executedToolCalls = [];
   const initializationCommands = [];
   const servicePaths = [];
+  const serviceRequests = [];
   const hostRelayPaths = [];
   let reloadCount = 0;
   const documentElement = { dataset: {} };
@@ -135,8 +136,9 @@ function createHarness(options = {}) {
     clearTimeout,
     setInterval: options.pluginSetInterval || setInterval,
     clearInterval: options.pluginClearInterval || clearInterval,
-    fetch: async path => {
+    fetch: async (path, requestOptions) => {
       servicePaths.push(path);
+      serviceRequests.push({ path, requestOptions });
       const configured = typeof options.serviceResponse === "function"
         ? options.serviceResponse(path)
         : options.serviceResponse;
@@ -295,6 +297,7 @@ function createHarness(options = {}) {
     executedToolCalls,
     initializationCommands,
     servicePaths,
+    serviceRequests,
     hostRelayPaths,
     documentElement,
     sessionValues,
@@ -364,6 +367,7 @@ function createWordBridgeHarness(options = {}) {
   let documentText = String(options.text || "");
   let documentParagraphs = [];
   let documentElements = [];
+  let nextParagraphId = 1;
   let currentPage = Number(options.currentPage) || 0;
   const createdImages = [];
   const createdTables = [];
@@ -378,6 +382,7 @@ function createWordBridgeHarness(options = {}) {
   const rangeActions = [];
   const createdStyles = [];
   const createdCharts = [];
+  const createdSectionParagraphs = [];
   const appliedStyles = [];
   const fieldInstructions = [];
   const scope = {};
@@ -500,6 +505,7 @@ function createWordBridgeHarness(options = {}) {
   }
 
   function createParagraph(text = "") {
+    const paragraphId = nextParagraphId++;
     const paragraph = {
       text: String(text),
       drawings: [],
@@ -508,7 +514,11 @@ function createWordBridgeHarness(options = {}) {
       parentTable: null,
       parentContentControl: null,
       GetClassType() { return "paragraph"; },
+      GetParaId() { return `para-${paragraphId}`; },
+      GetInternalId() { return `internal-${paragraphId}`; },
       GetText() { return this.text; },
+      GetStyle() { return this.style || null; },
+      GetNumPr() { return this.numbering || null; },
       GetParentTable() { return this.parentTable; },
       GetParentContentControl() { return this.parentContentControl; },
       AddText(value) {
@@ -759,6 +769,10 @@ function createWordBridgeHarness(options = {}) {
       const sections = Array.isArray(options.sections) ? options.sections : [];
       return sections.length ? sections[sections.length - 1] : null;
     },
+    CreateSection(paragraph) {
+      createdSectionParagraphs.push(paragraph);
+      return typeof options.createSection === "function" ? options.createSection(paragraph) : {};
+    },
     RemoveAllElements() {
       if (options.removeAllElementsAccepted === false) return false;
       documentElements = [createParagraph()];
@@ -813,7 +827,10 @@ function createWordBridgeHarness(options = {}) {
           },
           AddComment(text, author, userId) {
             rangeActions.push({ action: "comment", start: format.start, text, author, userId });
-            return { GetId() { return `comment-${format.start}`; } };
+            return {
+              GetId() { return `comment-${format.start}`; },
+              GetQuoteText() { return documentText.slice(format.start, format.end); },
+            };
           },
           AddBookmark(name) {
             rangeActions.push({ action: "bookmark", start: format.start, name });
@@ -950,6 +967,7 @@ function createWordBridgeHarness(options = {}) {
     createdTables,
     createdContentControls,
     createdCharts,
+    createdSectionParagraphs,
     createdStyles,
     appliedStyles,
     fieldInstructions,
@@ -1199,6 +1217,11 @@ test("local Relay reports private startup timings and preserves editor event cal
   await waitFor(() => registerState !== null);
   await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
 
+  assert.equal(registerState.documentReady, true);
+  assert.equal(registerState.capabilityProbeComplete, true);
+  assert.equal(Number.isFinite(registerState.capabilityProbedAt), true);
+  assert.equal(registerState.saveReady, true);
+  assert.equal(registerState.saveStatus, "idle");
   assert.deepEqual(callbackCalls, [
     ["app", appContext, appEvent],
     ["document", documentContext, documentEvent],
@@ -1448,7 +1471,8 @@ test("plugin aggregates generated schema and bridge semantic errors before check
         [
           [0, "arguments.internalNote", "additionalProperties"],
           [0, "arguments.text", "type"],
-          [1, "arguments.paragraphIndex", "required"],
+          [1, "arguments", "anyOf"],
+          [1, "arguments.paragraphIndex", "semantic"],
           [2, "arguments.target", "semantic"],
         ],
       );
@@ -2305,6 +2329,11 @@ test("force-save persists without reloading the live editor", async () => {
   assert.equal(result.persistence.status, "saved");
   assert.equal(result.persistence.editorSaved, true);
   assert.equal(result.persistence.forceSave.commandError, 0);
+  const forceSaveRequest = harness.serviceRequests.find(item => item.path === "/copilot-api/forcesave");
+  assert.ok(forceSaveRequest);
+  const forceSavePayload = JSON.parse(forceSaveRequest.requestOptions.body);
+  assert.equal(Number.isFinite(forceSavePayload.editorSaveConfirmedAt), true);
+  assert.ok(forceSavePayload.editorSaveConfirmedAt > 0);
   assert.equal(harness.reloadCount, 0);
   await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal(harness.reloadCount, 0);
@@ -2814,18 +2843,24 @@ test("word advanced inspection includes styles omitted by ONLYOFFICE 9.4 GetAllS
       name: "正文_仿宋",
       type: "paragraph",
       basedOn: null,
+      usageCount: 0,
+      tableParagraphUsageCount: 0,
     },
     {
       index: 2,
       name: "BodyFangsong",
       type: "paragraph",
       basedOn: null,
+      usageCount: 0,
+      tableParagraphUsageCount: 0,
     },
     {
       index: 3,
       name: "术语强调",
       type: "run",
       basedOn: null,
+      usageCount: 0,
+      tableParagraphUsageCount: 0,
     },
   ]);
 });
@@ -2853,6 +2888,8 @@ test("word advanced inspection de-duplicates styles returned by public and inter
       name: "SharedStyle",
       type: "paragraph",
       basedOn: null,
+      usageCount: 0,
+      tableParagraphUsageCount: 0,
     }],
   );
 });
@@ -3100,7 +3137,7 @@ test("word bridge aggregates all static semantic failures before creating histor
           item.path,
         ])),
         JSON.stringify([
-          [0, "word_manage_section", "arguments.paragraphIndex"],
+          [0, "word_manage_section", "arguments.boundary"],
           [1, "word_manage_fields", "arguments.instruction"],
           [2, "word_insert_page_break", "arguments.target"],
         ]),
@@ -3174,6 +3211,169 @@ test("word bridge uses ONLYOFFICE zero-based placeholders for multilevel numberi
   assert.equal(result.changed, 2);
   assert.deepEqual(customTypes.map(entry => entry.text), ["%0.", "%0.%1."]);
   assert.ok(harness.paragraphObjects.every(paragraph => paragraph.numbering === levels[1]));
+});
+
+test("word bridge applies multilevel assignments through one shared numbering instance and can continue it", async () => {
+  let createCalls = 0;
+  let numbering;
+  const levels = Array.from({ length: 9 }, (_, index) => ({
+    index,
+    GetLevelIndex() { return index; },
+    GetNumbering() { return numbering; },
+    SetCustomType() { return true; },
+    SetStart() { return true; },
+    SetRestart() { return true; },
+  }));
+  numbering = {
+    GetInternalId() { return "list-shared"; },
+    GetLevel(index) { return levels[index]; },
+  };
+  const harness = createWordBridgeHarness({
+    paragraphs: ["一级一", "二级一", "一级二", "二级二", "续项"],
+    createNumbering() { createCalls += 1; return numbering; },
+  });
+
+  const created = await harness.bridge.execute([{
+    name: "word_set_numbering",
+    arguments: {
+      kind: "multilevel",
+      assignments: [
+        { paragraphIndex: 1, level: 0 },
+        { paragraphIndex: 2, level: 1 },
+        { paragraphIndex: 3, level: 0 },
+        { paragraphIndex: 4, level: 1 },
+      ],
+    },
+  }]);
+  const continued = await harness.bridge.execute([{
+    name: "word_set_numbering",
+    arguments: {
+      continueFrom: { paragraphId: "para-4" },
+      assignments: [{ paragraphIndex: 5, level: 0 }],
+    },
+  }]);
+
+  assert.equal(createCalls, 1);
+  assert.deepEqual(harness.paragraphObjects.slice(0, 5).map(paragraph => paragraph.numbering.index), [0, 1, 0, 1, 0]);
+  assert.equal(created.results[0].listGroupId, "list-shared");
+  assert.equal(continued.results[0].listGroupId, "list-shared");
+  assert.equal(continued.results[0].continuedFromParagraphIndex, 4);
+});
+
+test("word bridge applies cell paragraph styles to every table cell and rejects table-style type mixing", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["表格锚点"] });
+  await harness.bridge.execute([{
+    name: "word_manage_style",
+    arguments: { action: "create", name: "Table Text", type: "paragraph" },
+  }]);
+  const historyBeforeInvalid = harness.historyPoints;
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_add_table",
+      arguments: { rows: 1, cols: 1, tableStyleName: "Table Text" },
+    }]),
+    error => /样式/.test(error.message) && error.details.partialMutationPossible === false,
+  );
+  assert.equal(harness.historyPoints, historyBeforeInvalid);
+
+  const result = await harness.bridge.execute([{
+    name: "word_add_table",
+    arguments: {
+      rows: 2,
+      cols: 2,
+      data: [["甲"]],
+      cellParagraphStyleName: "Table Text",
+    },
+  }]);
+  const table = harness.createdTables.at(-1);
+  const cellStyles = [];
+  for (let row = 0; row < 2; row += 1) {
+    for (let column = 0; column < 2; column += 1) {
+      cellStyles.push(table.GetRow(row).GetCell(column).GetContent().GetAllParagraphs()[0].style.GetName());
+    }
+  }
+  assert.equal(result.changed, 4);
+  assert.deepEqual(cellStyles, ["Table Text", "Table Text", "Table Text", "Table Text"]);
+});
+
+test("word editor preflight tracks same-batch style types and rejects invalid merges before history", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["锚点"] });
+  const historyBefore = harness.historyPoints;
+  await assert.rejects(
+    harness.bridge.execute([
+      { name: "word_manage_style", arguments: { action: "create", name: "Wrong Table Style", type: "paragraph" } },
+      { name: "word_add_table", arguments: { rows: 1, cols: 1, tableStyleName: "Wrong Table Style" } },
+    ]),
+    error => /样式/.test(error.message)
+      && error.details.completedToolCalls === 0
+      && error.details.partialMutationPossible === false,
+  );
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_edit_table",
+      arguments: { action: "mergeCells", tableIndex: 1, rowStart: 1, rowEnd: 2, columnStart: 1, columnEnd: 1 },
+    }]),
+    error => /表格范围/.test(error.message)
+      && error.details.completedToolCalls === 0
+      && error.details.partialMutationPossible === false,
+  );
+  assert.equal(harness.historyPoints, historyBefore);
+});
+
+test("word advanced inspection reports stable paragraph ids and actual style usage", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["三级标题", "正文"] });
+  await harness.bridge.execute([
+    { name: "word_manage_style", arguments: { action: "create", name: "Heading 3", type: "paragraph" } },
+    { name: "word_format_paragraphs", arguments: { paragraphId: "para-1", styleName: "Heading 3" } },
+  ]);
+  const inspected = await harness.bridge.execute([
+    { name: "word_inspect", arguments: { includeStructure: true } },
+    { name: "word_inspect_advanced", arguments: { includeStyles: true } },
+  ]);
+
+  assert.equal(inspected.results[0].paragraphDetails[0].paragraphId, "para-1");
+  assert.equal(inspected.results[0].paragraphDetails[0].internalId, "internal-1");
+  const headingStyle = inspected.results[1].styles.find(style => style.name === "Heading 3");
+  assert.equal(headingStyle.usageCount, 1);
+  assert.equal(headingStyle.tableParagraphUsageCount, 0);
+});
+
+test("word bridge resolves before and after section boundaries without moving the heading into the old section", async () => {
+  const afterHarness = createWordBridgeHarness({ paragraphs: ["旧节", "新节标题"] });
+  const after = await afterHarness.bridge.execute([{
+    name: "word_manage_section",
+    arguments: { action: "create", boundary: { position: "after", paragraphId: "para-1" } },
+  }]);
+  assert.equal(afterHarness.createdSectionParagraphs[0], afterHarness.paragraphObjects[0]);
+  assert.equal(after.results[0].boundary.endParagraphIndex, 1);
+
+  const beforeHarness = createWordBridgeHarness({ paragraphs: ["旧节", "新节标题"] });
+  const before = await beforeHarness.bridge.execute([{
+    name: "word_manage_section",
+    arguments: { action: "create", boundary: { position: "before", paragraphId: "para-2" } },
+  }]);
+  assert.equal(beforeHarness.createdSectionParagraphs[0], beforeHarness.paragraphObjects[0]);
+  assert.equal(before.results[0].boundary.endParagraphIndex, 1);
+});
+
+test("word bridge emits a real SEQ field for captions and protects non-empty TOC targets", async () => {
+  const captionHarness = createWordBridgeHarness({ paragraphs: ["图形对象"] });
+  const caption = await captionHarness.bridge.execute([{
+    name: "word_manage_long_document",
+    arguments: { action: "addCaption", paragraphIndex: 1, label: "图", text: "系统架构", insertAt: "after" },
+  }]);
+  assert.match(captionHarness.fieldInstructions[0], /^SEQ /);
+  assert.equal(caption.results[0].dynamic, true);
+
+  const tocHarness = createWordBridgeHarness({ paragraphs: ["这里不是空段落"] });
+  await assert.rejects(
+    tocHarness.bridge.execute([{
+      name: "word_manage_long_document",
+      arguments: { action: "addToc", paragraphIndex: 1 },
+    }]),
+    error => /只允许替换空段落/.test(error.message) && error.details.partialMutationPossible === false,
+  );
+  assert.equal(tocHarness.historyPoints, 0);
 });
 
 test("word bridge supplies the required chart number formats", async () => {

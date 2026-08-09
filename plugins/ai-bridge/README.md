@@ -17,7 +17,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.2.0`
+- Version: `0.2.1`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -67,7 +67,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev1",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.1-rev1",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -127,7 +127,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.1-rev1"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -153,7 +153,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.1-rev1"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -477,8 +477,9 @@ Production v1 exposes these document-scoped endpoints from `document-hub`:
 - `GET /api/v1/documents/{documentId}/ai/session`
 - `POST /api/v1/documents/{documentId}/ai/validate`
 - `POST /api/v1/documents/{documentId}/ai/execute`
+- `POST /api/v1/documents/{documentId}/ai/commit`
 
-Authentication is owned by `document-hub`. In normal mode all three use
+Authentication is owned by `document-hub`. In normal mode all endpoints use
 `Authorization: Bearer <user-jwt>`. When `ANONYMOUS_ACCESS_ENABLED=true`, the
 same endpoints require no caller credential and every request runs as the fixed
 `Platform` principal. There is no public attach or binding endpoint. The
@@ -494,14 +495,16 @@ variants are converted to the contract value. Responses may include
 implicit string-to-number/boolean coercion, suspicious twips-as-points values,
 and targetless destructive or pagination operations remain errors.
 
-The real document-hub editor page must remain open with its Relay ready. For
-every request, the caller sends the document ID in the URL. In normal mode,
-`document-hub` selects the JWT user's most recent live editor page. In anonymous
-mode, it selects the fixed `Platform` principal's page. Stable `requestId`
-values deduplicate retries. Closing the selected page, revoking the applicable
-ACL, disabling the normal-mode user, or losing the heartbeat makes subsequent
-Agent calls fail until an authorized page is opened again. No public Relay
-credential is returned to HTTPX.
+The real document-hub editor page must remain open with its Relay fully ready.
+`GET ai/session` returns a short-lived signed `sessionLease` only after document
+ready, plugin capability probing, and save readiness are confirmed. Callers put
+that value in `X-AI-Session-Lease` for validate, execute, and commit. Those
+requests are pinned to the exact editor and Relay session; they never select a
+newer page. Page reload, Relay reconnect, contract change, or document-hub
+restart makes the lease stale before mutation. Stable `requestId` values
+deduplicate retries. A persistence failure after a possible mutation returns a
+`mutationReceipt`; commit retries only force-save and never replays the tool
+call.
 
 `host-bridge.js` enables this HTTP Relay by default only on loopback hosts.
 A non-loopback editor must set `window.aiBridgeOptions.httpRelay = true` before

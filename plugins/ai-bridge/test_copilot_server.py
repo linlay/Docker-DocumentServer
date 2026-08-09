@@ -155,10 +155,10 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        editor_revision = "0.2.0-rev1"
-        word_bridge_revision = "0.2.0-rev2"
-        plugin_config_revision = "0.2.0-rev4"
-        stale_revision = "0.2.0-rev0"
+        editor_revision = "0.2.1-rev1"
+        word_bridge_revision = "0.2.1-rev2"
+        plugin_config_revision = "0.2.1-rev4"
+        stale_revision = "0.2.1-rev0"
         paths = [
             "index.html",
             "README.md",
@@ -2240,6 +2240,13 @@ class HttpRelayTests(unittest.TestCase):
         capabilities = {
             "tools": [
                 "sheets_manage_table",
+                "sheets_manage_range",
+                "sheets_set_array_formula",
+                "sheets_manage_validation",
+                "sheets_manage_comments",
+                "sheets_manage_freeze_panes",
+                "sheets_inspect_charts",
+                "sheets_update_chart",
                 "sheets_add_chart",
                 "sheets_delete_chart",
             ],
@@ -2248,8 +2255,25 @@ class HttpRelayTests(unittest.TestCase):
                     "nativeTables": {"create": False, "inspect": False},
                     "rangeStyleTables": {"create": True},
                     "conditionalFormatting": {"create": True},
+                    "rangeFill": {
+                        "fillDown": False,
+                        "fillUp": False,
+                        "fillLeft": False,
+                        "fillRight": False,
+                    },
+                    "arrayFormula": {"set": False},
+                    "validation": {"manage": False},
+                    "comments": {
+                        "create": False,
+                        "inspect": True,
+                        "update": False,
+                        "delete": False,
+                    },
+                    "freezePanes": {"inspect": True, "manage": False},
                     "charts": {
                         "create": True,
+                        "inspect": False,
+                        "update": False,
                         "addSeriesOnCreate": False,
                         "delete": False,
                     },
@@ -2282,6 +2306,55 @@ class HttpRelayTests(unittest.TestCase):
         self.assertTrue(valid["valid"])
 
         invalid_calls = [
+            (
+                {
+                    "name": "sheets_manage_range",
+                    "arguments": {"action": "fillDown", "range": "A1:A3"},
+                },
+                "sheets.rangeFill.fillDown",
+            ),
+            (
+                {
+                    "name": "sheets_set_array_formula",
+                    "arguments": {"range": "A1:A3", "formula": "=ROW(A1:A3)"},
+                },
+                "sheets.arrayFormula.set",
+            ),
+            (
+                {
+                    "name": "sheets_manage_validation",
+                    "arguments": {"action": "delete", "range": "A1:A3"},
+                },
+                "sheets.validation.manage",
+            ),
+            (
+                {
+                    "name": "sheets_manage_comments",
+                    "arguments": {"action": "add", "range": "A1", "text": "note"},
+                },
+                "sheets.comments.create",
+            ),
+            (
+                {
+                    "name": "sheets_manage_freeze_panes",
+                    "arguments": {"action": "freezeRows", "count": 1},
+                },
+                "sheets.freezePanes.manage",
+            ),
+            (
+                {
+                    "name": "sheets_inspect_charts",
+                    "arguments": {},
+                },
+                "sheets.charts.inspect",
+            ),
+            (
+                {
+                    "name": "sheets_update_chart",
+                    "arguments": {"chartIndex": 0, "title": "Updated"},
+                },
+                "sheets.charts.update",
+            ),
             (
                 {
                     "name": "sheets_manage_table",
@@ -2323,6 +2396,37 @@ class HttpRelayTests(unittest.TestCase):
                 self.assertEqual(raised.exception.details["feature"], feature)
                 self.assertEqual(raised.exception.details["completedToolCalls"], 0)
                 self.assertFalse(raised.exception.details["partialMutationPossible"])
+
+    def test_sheets_batch_rejects_new_sheet_dependency_before_enqueue(self):
+        self.register(file_name="demo.xlsx", file_type="xlsx", editor_type="cell")
+        capabilities = copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"]
+        capabilities["tools"] = ["sheets_add_sheet", "sheets_set_values"]
+        claims = {
+            "fileName": "demo.xlsx",
+            "fileType": "xlsx",
+            "editorType": "cell",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+        commands_before = dict(copilot_server.BRIDGE_COMMANDS)
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_validate(
+                {
+                    "toolCalls": [
+                        {"name": "add_sheet", "arguments": {"name": "NewData"}},
+                        {
+                            "name": "set_values",
+                            "arguments": {"sheet": "NewData", "range": "A1", "values": 1},
+                        },
+                    ],
+                },
+                claims,
+            )
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.code, "BATCH_DEPENDENCY_REQUIRES_SPLIT")
+        self.assertEqual(raised.exception.details["completedToolCalls"], 0)
+        self.assertFalse(raised.exception.details["partialMutationPossible"])
+        self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
 
     def test_word_batch_collects_all_argument_errors_before_enqueue(self):
         self.register()
@@ -2401,7 +2505,7 @@ class HttpRelayTests(unittest.TestCase):
         self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
         encoded = json.dumps(error.details, ensure_ascii=False)
         self.assertNotIn("敏感正文", encoded)
-        self.assertIn("arguments.paragraphIndex", encoded)
+        self.assertIn('"keyword": "anyOf"', encoded)
         self.assertIn("arguments.row", encoded)
         self.assertIn("arguments.instruction", encoded)
         self.assertIn("arguments.target", encoded)

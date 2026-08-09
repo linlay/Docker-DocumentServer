@@ -1,38 +1,52 @@
 --- a/apps/common/main/lib/view/Header.js
 +++ b/apps/common/main/lib/view/Header.js
-@@ -100,6 +100,14 @@
-                                     '<div class="btn-slot" id="slot-hbtn-print-quick"></div>' +
-                                     '<div class="btn-slot" id="slot-hbtn-download"></div>' +
-                                 '</div>' +
+@@ -101,0 +102,12 @@
++                                '</div>' +
 +                                '<% if (compactHeaderQuickAccess) { %>' +
 +                                '<div class="hedset" role="menubar" aria-label="<%= scope.ariaQuickAccessToolbar %>">' +
++                                    '<% if (compactHeaderHttpxIndicator) { %>' +
++                                    '<div class="btn-slot" id="slot-btn-dt-httpx-status" title="HTTPX" aria-label="HTTPX" style="display:none;"><span aria-hidden="true" style="display:block;width:8px;height:8px;margin:16px 7px 0;border-radius:50%;background:#35a56f;"></span></div>' +
++                                    '<% } %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-save" data-layout-name="header-save"></div>' +
++                                    '<% if (compactHeaderQuickAccessPrint) { %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-print"></div>' +
++                                    '<% } %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-undo"></div>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-redo"></div>' +
-+                                '</div>' +
+@@ -102,0 +115 @@
 +                                '<% } %>' +
-                                 '<div class="hedset" data-layout-name="header-editMode">' +
-                                     '<div class="btn-slot" id="slot-btn-edit-mode"></div>' +
-                                 '</div>' +
-@@ -899,7 +907,9 @@
-                 if ( role == 'right' ) {
-                     var $html = $(_.template(templateRightBox)({
-                         tipUsers: this.labelCoUsersDescr,
+@@ -902 +915,5 @@
 -                        textShare: this.textShare
 +                        textShare: this.textShare,
 +                        scope: me,
-+                        compactHeaderQuickAccess: !!(config.compactHeader && config.customization && config.customization.compactHeaderQuickAccess)
-                     }));
- 
-                     if ( !$labelDocName ) {
-@@ -926,7 +936,48 @@
-                     } else {
-                         $html.find('#slot-btn-favorite').hide();
-                     }
++                        compactHeaderQuickAccess: !!(config.compactHeader && config.customization && config.customization.compactHeaderQuickAccess),
++                        compactHeaderHttpxIndicator: !!(config.customization && config.customization.compactHeaderHttpxIndicator),
++                        compactHeaderQuickAccessPrint: !(config.customization && config.customization.compactHeaderQuickAccessPrint === false)
+@@ -903,0 +921,21 @@
 +
++                    var $httpxStatus = $html.find('#slot-btn-dt-httpx-status'),
++                        httpxParentOrigin = config.customization && config.customization.compactHeaderHttpxParentOrigin;
++                    if (me._httpxStatusMessageHandler) {
++                        window.removeEventListener('message', me._httpxStatusMessageHandler);
++                        me._httpxStatusMessageHandler = null;
++                    }
++                    if ($httpxStatus.length && typeof httpxParentOrigin === 'string' && httpxParentOrigin.length) {
++                        me._httpxStatusMessageHandler = function(event) {
++                            var data = event.data;
++                            if (event.source !== window.parent || event.origin !== httpxParentOrigin || !data ||
++                                data.source !== 'document-hub' || data.type !== 'httpx-relay-state')
++                                return;
++                            $httpxStatus.toggle(data.state === 'ready');
++                        };
++                        window.addEventListener('message', me._httpxStatusMessageHandler);
++                        window.parent.postMessage({
++                            source: 'onlyoffice-web-apps',
++                            type: 'httpx-relay-state-request'
++                        }, httpxParentOrigin);
++                    }
+@@ -929,0 +968,41 @@
 +                    if (config.compactHeader && config.customization && config.customization.compactHeaderQuickAccess) {
-+                        if (config.canPrint) {
++                        if (config.canPrint && config.customization.compactHeaderQuickAccessPrint !== false) {
 +                            me.btnPrint = createTitleButton('toolbar__icon icon--inverse btn-print', $html.findById('#slot-btn-dt-print'), true, undefined, undefined, 'P');
 +                            me.shortcutHints.PrintPreviewAndPrint = {
 +                                btn: me.btnPrint,
@@ -41,7 +55,7 @@
 +                        } else {
 +                            $html.find('#slot-btn-dt-print').hide();
 +                        }
- 
++
 +                        if (config.showSaveButton) {
 +                            let save_icon = config.canSaveToFile || config.isDesktopApp && config.isOffline ? 'btn-save' : 'btn-download';
 +                            me.btnSave = createTitleButton('toolbar__icon icon--inverse ' + save_icon, $html.findById('#slot-btn-dt-save'), true, undefined, undefined, 'S');
@@ -72,77 +86,107 @@
 +                        };
 +                    }
 +
-                     if ( !config.twoLevelHeader) {
-                         if ( (config.canDownload || config.canDownloadOrigin) && !config.isOffline  )
-                             this.btnDownload = createTitleButton('toolbar__icon icon--inverse btn-download', $html.findById('#slot-hbtn-download'), undefined, 'bottom', 'big');
 --- a/apps/documenteditor/main/app/controller/Main.js
 +++ b/apps/documenteditor/main/app/controller/Main.js
-@@ -1801,7 +1801,9 @@
-                 this.appOptions.fileKey = this.document.key;
- 
-                 this.appOptions.canBrandingExt = params.asc_getCanBranding() && (typeof this.editorConfig.customization == 'object' || this.editorConfig.plugins);
+@@ -1804 +1804,3 @@
 -                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null, this.appOptions.canBrandingExt, this.api);
 +                this.appOptions.canSourceUiLayout = typeof this.editorConfig.customization == 'object' && this.editorConfig.customization.sourceUiLayout === true;
 +                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null,
 +                                              this.appOptions.canBrandingExt || this.appOptions.canSourceUiLayout, this.api);
-                 this.editorConfig.customization && Common.UI.FeaturesManager.init(this.editorConfig.customization.features, this.appOptions.canBrandingExt);
- 
-                 Common.UI.TabStyler.init(this.editorConfig.customization); // call after Common.UI.FeaturesManager.init() !!!
-@@ -2664,6 +2666,8 @@
-                                 console.log("Obsolete: The 'toolbar' parameter of the 'customization' section is deprecated. Please use 'toolbar' parameter in the 'customization.layout' section instead.");
-                         }
-                         promise = this.getApplication().getController('Common.Controllers.Plugins').applyUICustomization();
+@@ -2666,0 +2669,2 @@
 +                    } else if (this.appOptions.canSourceUiLayout) {
 +                        Common.UI.LayoutManager.applyCustomization();
-                     }
-                 }
-                 Common.NotificationCenter.trigger('layout:changed', 'main');
 --- a/apps/documenteditor/main/app/controller/Toolbar.js
 +++ b/apps/documenteditor/main/app/controller/Toolbar.js
-@@ -3919,7 +3919,9 @@
- 
-             var editmode = config.isEdit || config.isRestrictedEdit && config.canFillForms && config.isFormCreator,
-                 compactview = !editmode;
+@@ -3922 +3922,3 @@
 -            if ( Common.localStorage.itemExists(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar") ) {
 +            if (config.customization && config.customization.forceCompactToolbar) {
 +                compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
 +            } else if ( Common.localStorage.itemExists(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar") ) {
-                 compactview = Common.localStorage.getBool(editmode ? "de-compact-toolbar" : "de-view-compact-toolbar");
-             } else if (config.customization) {
-                 compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
-@@ -3940,7 +3942,7 @@
- 
-                 me.toolbar.btnSave.on('disabled', _.bind(me.onBtnChangeState, me, 'save:disabled'));
- 
+@@ -3943 +3945 @@
 -                if (!config.compactHeader) {
 +                if (!config.compactHeader || config.customization && config.customization.compactHeaderQuickAccess) {
-                     // hide 'print' and 'save' buttons group and next separator
-                     me.toolbar.btnPrint.$el.parents('.group').hide().next().hide();
- 
 --- a/apps/documenteditor/main/app/controller/Viewport.js
 +++ b/apps/documenteditor/main/app/controller/Viewport.js
-@@ -79,7 +79,8 @@
-                     'render:before' : function (toolbar) {
-                         var config = DE.getController('Main').appOptions;
-                         toolbar.setExtra('right', me.header.getPanel('right', config));
+@@ -82 +82,2 @@
 -                        if (!config.twoLevelHeader || config.compactHeader)
 +                        if ((!config.twoLevelHeader || config.compactHeader) &&
 +                            !(config.customization && config.customization.compactHeaderHideLogo))
-                             toolbar.setExtra('left', me.header.getPanel('left', config));
-                         me.toolbar = toolbar;
-                         /*var value = Common.localStorage.getBool("de-settings-quick-print-button", true);
-@@ -181,10 +182,12 @@
-             var _intvars = Common.Utils.InternalSettings;
-             var $filemenu = $('.toolbar-fullview-panel');
-             $filemenu.css('top', Common.UI.LayoutManager.isElementVisible('toolbar') ? _intvars.get('toolbar-height-tabs') : 0);
+@@ -183,0 +185,2 @@
 +            var forceCompactToolbar = config.customization && config.customization.forceCompactToolbar,
 +                compactToolbar = config.customization && config.customization.compactToolbar;
- 
-             if ( !(config.isEdit || config.isRestrictedEdit && config.canFillForms && config.isFormCreator) ||
+@@ -186,2 +189,2 @@
 -                ( !Common.localStorage.itemExists("de-compact-toolbar") &&
 -                config.customization && config.customization.compactToolbar )) {
 +                (forceCompactToolbar && compactToolbar) ||
 +                (!forceCompactToolbar && !Common.localStorage.itemExists("de-compact-toolbar") && compactToolbar)) {
- 
-                 var panel = me.viewport.vlayout.getItem('toolbar');
-                 if ( panel ) panel.height = _intvars.get('toolbar-height-tabs');
+--- a/apps/spreadsheeteditor/main/app/controller/Main.js
++++ b/apps/spreadsheeteditor/main/app/controller/Main.js
+@@ -1469 +1469,3 @@
+-                    Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null, this.appOptions.canBrandingExt, this.api);
++                    this.appOptions.canSourceUiLayout = typeof this.editorConfig.customization == 'object' && this.editorConfig.customization.sourceUiLayout === true;
++                    Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null,
++                                                 this.appOptions.canBrandingExt || this.appOptions.canSourceUiLayout, this.api);
+@@ -2549,0 +2552,2 @@
++                    } else if (this.appOptions.canSourceUiLayout) {
++                        Common.UI.LayoutManager.applyCustomization();
+--- a/apps/spreadsheeteditor/main/app/controller/Toolbar.js
++++ b/apps/spreadsheeteditor/main/app/controller/Toolbar.js
+@@ -4724 +4724,3 @@
+-                if ( Common.localStorage.itemExists(editmode ? "sse-compact-toolbar" : "sse-view-compact-toolbar") ) {
++                if (config.customization && config.customization.forceCompactToolbar) {
++                    compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
++                } else if ( Common.localStorage.itemExists(editmode ? "sse-compact-toolbar" : "sse-view-compact-toolbar") ) {
+@@ -4837 +4839 @@
+-                    if (!config.compactHeader) {
++                    if (!config.compactHeader || config.customization && config.customization.compactHeaderQuickAccess) {
+--- a/apps/spreadsheeteditor/main/app/controller/Viewport.js
++++ b/apps/spreadsheeteditor/main/app/controller/Viewport.js
+@@ -89 +89,2 @@
+-                        if (!config.twoLevelHeader || config.compactHeader)
++                        if ((!config.twoLevelHeader || config.compactHeader) &&
++                            !(config.customization && config.customization.compactHeaderHideLogo))
+@@ -146,0 +148,3 @@
++
++            var forceCompactToolbar = config.customization && config.customization.forceCompactToolbar,
++                compactToolbar = config.customization && config.customization.compactToolbar;
+@@ -149,2 +153,2 @@
+-                    ( !Common.localStorage.itemExists("sse-compact-toolbar") &&
+-                        config.customization && config.customization.compactToolbar ))
++                    (forceCompactToolbar && compactToolbar) ||
++                    (!forceCompactToolbar && !Common.localStorage.itemExists("sse-compact-toolbar") && compactToolbar))
+--- a/apps/presentationeditor/main/app/controller/Main.js
++++ b/apps/presentationeditor/main/app/controller/Main.js
+@@ -1404 +1404,3 @@
+-                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null, this.appOptions.canBrandingExt, this.api);
++                this.appOptions.canSourceUiLayout = typeof this.editorConfig.customization == 'object' && this.editorConfig.customization.sourceUiLayout === true;
++                Common.UI.LayoutManager.init(this.editorConfig.customization ? this.editorConfig.customization.layout : null,
++                                              this.appOptions.canBrandingExt || this.appOptions.canSourceUiLayout, this.api);
+@@ -2089,0 +2092,2 @@
++                    } else if (this.appOptions.canSourceUiLayout) {
++                        Common.UI.LayoutManager.applyCustomization();
+--- a/apps/presentationeditor/main/app/controller/Toolbar.js
++++ b/apps/presentationeditor/main/app/controller/Toolbar.js
+@@ -2805 +2805,3 @@
+-            if ( Common.localStorage.itemExists(editmode ? "pe-compact-toolbar" : "pe-view-compact-toolbar") ) {
++            if (config.customization && config.customization.forceCompactToolbar) {
++                compactview = editmode ? !!config.customization.compactToolbar : config.customization.compactToolbar!==false;
++            } else if ( Common.localStorage.itemExists(editmode ? "pe-compact-toolbar" : "pe-view-compact-toolbar") ) {
+@@ -2872 +2874 @@
+-                if (!config.compactHeader) {
++                if (!config.compactHeader || config.customization && config.customization.compactHeaderQuickAccess) {
+--- a/apps/presentationeditor/main/app/controller/Viewport.js
++++ b/apps/presentationeditor/main/app/controller/Viewport.js
+@@ -83 +83,2 @@
+-                        if (!config.twoLevelHeader || config.compactHeader)
++                        if ((!config.twoLevelHeader || config.compactHeader) &&
++                            !(config.customization && config.customization.compactHeaderHideLogo))
+@@ -186,0 +188,3 @@
++
++            var forceCompactToolbar = config.customization && config.customization.forceCompactToolbar,
++                compactToolbar = config.customization && config.customization.compactToolbar;
+@@ -189,2 +193,2 @@
+-                ( !Common.localStorage.itemExists("pe-compact-toolbar") &&
+-                    config.customization && config.customization.compactToolbar ))
++                (forceCompactToolbar && compactToolbar) ||
++                (!forceCompactToolbar && !Common.localStorage.itemExists("pe-compact-toolbar") && compactToolbar))

@@ -1062,6 +1062,8 @@ class MockRange {
     this.values = values;
     this.formula = null;
     this.format = {};
+    this.setValueCalls = [];
+    this.clearContentsCalls = 0;
   }
   GetAddress() { return this.address; }
   GetValue() { return this.values; }
@@ -1076,7 +1078,8 @@ class MockRange {
       .reduce((value, letter) => (value * 26) + letter.charCodeAt(0) - 64, 0);
     return Math.abs(columnNumber(match[3] || match[1]) - columnNumber(match[1])) + 1;
   }
-  SetValue(values) { this.values = values; return true; }
+  SetValue(values) { this.setValueCalls.push(values); this.values = values; return true; }
+  ClearContents() { this.clearContentsCalls += 1; this.values = []; return true; }
   SetFormula(formula) { this.formula = formula; return true; }
   Replace(search, replacement) {
     let changed = false;
@@ -2739,6 +2742,9 @@ test("Sheets bridge executes every public Sheets tool in one history point", asy
     { name: "sheets_add_sheet", arguments: { name: "Temp" } },
     { name: "sheets_rename_sheet", arguments: { sheet: "Sheet2", newName: "Renamed" } },
     { name: "sheets_add_chart", arguments: { sheet: "Sheet1", range: "A1:B3", type: "bar", title: "Validation" } },
+  ]);
+
+  const deleted = await bridge.execute([
     { name: "sheets_delete_sheet", arguments: { sheet: "Temp" } },
   ]);
 
@@ -2751,11 +2757,11 @@ test("Sheets bridge executes every public Sheets tool in one history point", asy
     "sheets_add_sheet",
     "sheets_rename_sheet",
     "sheets_add_chart",
-    "sheets_delete_sheet",
   ]);
+  assert.equal(deleted.results[0].name, "sheets_delete_sheet");
   assert.equal(result.editorType, "cell");
   assert.equal(result.needsSave, true);
-  assert.equal(workbook.historyPoints, 1);
+  assert.equal(workbook.historyPoints, 2);
   assert.deepEqual(workbook.sheets.map(sheet => sheet.GetName()), ["Sheet1", "Renamed"]);
   assert.equal(sheet1.range.values[0][0], "final");
   assert.equal(sheet1.range.formula, "=SUM(A2:B2)");
@@ -2834,6 +2840,58 @@ test("Sheets bridge supports chart inspect, gradient formatting, update, and del
   assert.equal(updated.results[0].chart.raw.series[0].name, "Actual");
   assert.equal(updated.results[0].chart.raw.series[1].name, "Forecast");
   assert.equal(sheet1.charts.length, 0);
+});
+
+test("Sheets bridge rejects same-batch references to a newly created sheet before history", async () => {
+  const { bridge, workbook } = sheetsHarness();
+  await assert.rejects(
+    bridge.execute([
+      { name: "sheets_add_sheet", arguments: { name: "NewData" } },
+      { name: "sheets_set_values", arguments: { sheet: "NewData", range: "A1", values: 1 } },
+    ]),
+    error => {
+      assert.equal(error.code, "BATCH_DEPENDENCY_REQUIRES_SPLIT");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    },
+  );
+  assert.equal(workbook.historyPoints, 0);
+  assert.deepEqual(workbook.sheets.map(sheet => sheet.GetName()), ["Sheet1", "Sheet2"]);
+});
+
+test("Sheets bridge clears null cells and writes only contiguous non-null segments", async () => {
+  const { bridge, workbook, sheet1 } = sheetsHarness();
+  const target = sheet1.range;
+  await bridge.execute([
+    {
+      name: "sheets_set_values",
+      arguments: {
+        sheet: "Sheet1",
+        range: "A1:C2",
+        values: [["A", null, "B"], [null, "C", "D"]],
+      },
+    },
+  ]);
+  assert.equal(workbook.historyPoints, 1);
+  assert.equal(target.clearContentsCalls, 1);
+  assert.equal(JSON.stringify(target.setValueCalls), JSON.stringify([[["A"]], [["B"]], [["C", "D"]]]));
+  assert.equal(target.setValueCalls.flat(Infinity).includes(null), false);
+});
+
+test("Sheets bridge rejects unsupported fill before creating history", async () => {
+  const { bridge, workbook } = sheetsHarness();
+  await assert.rejects(
+    bridge.execute([
+      { name: "sheets_manage_range", arguments: { sheet: "Sheet1", range: "A1:A3", action: "fillDown" } },
+    ]),
+    error => {
+      assert.equal(error.code, "SHEETS_API_UNSUPPORTED");
+      assert.equal(error.details.feature, "sheets.rangeFill.fillDown");
+      return true;
+    },
+  );
+  assert.equal(workbook.historyPoints, 0);
 });
 
 test("Sheets bridge rejects unsupported chart types before AddChart", async () => {

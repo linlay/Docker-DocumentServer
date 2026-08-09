@@ -38,7 +38,7 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.2.0-rev1"
+EDITOR_ASSET_REVISION = "0.2.1-rev1"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
@@ -1152,8 +1152,8 @@ def validate_word_semantics(
         append_argument_validation_error(errors, f"arguments.{path}", "semantic", message)
 
     if name == "word_manage_section" and arguments.get("action", "configure") == "create":
-        if "paragraphIndex" not in arguments:
-            semantic_error("paragraphIndex", "paragraphIndex is required when action is create")
+        if not any(field in arguments for field in ("boundary", "endParagraphIndex", "paragraphIndex")):
+            semantic_error("boundary", "boundary or endParagraphIndex is required when action is create")
 
     if name == "word_format_table_advanced":
         if "repeatHeader" in arguments and "row" not in arguments:
@@ -1170,6 +1170,9 @@ def validate_word_semantics(
         has_target = (
             arguments.get("all") is True
             or arguments.get("current") is True
+            or "paragraphIndex" in arguments
+            or "paragraphId" in arguments
+            or "internalId" in arguments
             or (
                 isinstance(arguments.get("paragraphIndexes"), list)
                 and bool(arguments["paragraphIndexes"])
@@ -1182,7 +1185,7 @@ def validate_word_semantics(
         if not has_target:
             semantic_error(
                 "target",
-                "paragraphIndexes, search, all=true, or current=true is required",
+                "paragraphId, paragraphIndex, paragraphIndexes, search, all=true, or current=true is required",
             )
 
     if name == "word_edit_table":
@@ -2108,7 +2111,7 @@ def decode_image_source(source: Any) -> tuple[bytes, str | None]:
             validated_url,
             headers={
                 "Accept": "image/png,image/jpeg,image/gif,image/webp,image/svg+xml",
-                "User-Agent": "OnlyOffice-ai-bridge/0.2.0",
+                "User-Agent": "OnlyOffice-ai-bridge/0.2.1",
             },
             method="GET",
         )
@@ -2439,6 +2442,12 @@ def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str,
         "sessionId": session_id,
         "documentId": context.get("documentId"),
         "ready": bool(state.get("ready")),
+        "documentReady": bool(state.get("documentReady")),
+        "capabilityProbeComplete": bool(state.get("capabilityProbeComplete")),
+        "capabilityProbedAt": state.get("capabilityProbedAt"),
+        "saveReady": bool(state.get("saveReady")),
+        "saveStatus": state.get("saveStatus"),
+        "saveStatusAt": state.get("saveStatusAt"),
         "editorType": editor_type,
         "documentKey": context.get("documentKey"),
         "fileName": context.get("fileName"),
@@ -2971,6 +2980,59 @@ def sheet_runtime_feature(
     return value if isinstance(value, bool) else None
 
 
+def require_sheets_batch_dependencies(tool_calls: list[dict[str, Any]]) -> None:
+    created_or_renamed: dict[str, int] = {}
+    direct_sheet_fields = {
+        "sheet",
+        "destinationSheet",
+        "beforeSheet",
+        "sourceSheet",
+    }
+    formula_fields = {"formula", "formula1", "formula2", "categoryRange", "valuesRange", "xValuesRange"}
+
+    def references_name(key: str, value: Any, name: str) -> bool:
+        if isinstance(value, list):
+            return any(references_name(key, item, name) for item in value)
+        if isinstance(value, dict):
+            return any(references_name(str(nested_key), nested, name) for nested_key, nested in value.items())
+        if not isinstance(value, str):
+            return False
+        if key in direct_sheet_fields and value == name:
+            return True
+        if key not in formula_fields:
+            return False
+        escaped = name.replace("'", "''")
+        return f"'{escaped}'!" in value or re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}!", value) is not None
+
+    for index, call in enumerate(tool_calls):
+        arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+        for name, source_index in created_or_renamed.items():
+            if any(references_name(str(key), value, name) for key, value in arguments.items()):
+                raise BridgeError(
+                    409,
+                    "BATCH_DEPENDENCY_REQUIRES_SPLIT",
+                    "同一批次不能引用刚新增或刚重命名的工作表；请先提交工作表结构，再发起下一批调用",
+                    {
+                        "sheet": name,
+                        "sourceToolCallIndex": source_index,
+                        "toolCallIndex": index,
+                        "completedToolCalls": 0,
+                        "partialMutationPossible": False,
+                        "mutationState": "none",
+                    },
+                )
+        name = str(call.get("name") or "")
+        created_name: Any = None
+        if name == "sheets_add_sheet":
+            created_name = arguments.get("name")
+        elif name == "sheets_rename_sheet":
+            created_name = arguments.get("newName")
+        elif name == "sheets_manage_sheet" and arguments.get("action") == "copy":
+            created_name = arguments.get("newName")
+        if isinstance(created_name, str) and created_name:
+            created_or_renamed[created_name] = index
+
+
 def require_sheets_runtime_capabilities(
     tool_calls: list[dict[str, Any]],
     capabilities: dict[str, Any],
@@ -3063,6 +3125,64 @@ def require_sheets_runtime_capabilities(
                     "sheets.conditionalFormatting.create",
                     "当前 ONLYOFFICE 运行时不支持条件格式",
                 )
+        elif name == "sheets_manage_range":
+            action = str(arguments.get("action", ""))
+            fill_feature = {
+                "fillDown": "fillDown",
+                "fillUp": "fillUp",
+                "fillLeft": "fillLeft",
+                "fillRight": "fillRight",
+            }.get(action)
+            if fill_feature and sheet_runtime_feature(
+                capabilities, "sheets", "rangeFill", fill_feature
+            ) is False:
+                reject(
+                    index,
+                    f"sheets.rangeFill.{fill_feature}",
+                    f"当前 ONLYOFFICE 运行时不支持区域操作 {action}",
+                )
+        elif name == "sheets_set_array_formula":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "arrayFormula", "set"
+            ) is False:
+                reject(index, "sheets.arrayFormula.set", "当前 ONLYOFFICE 运行时不支持数组公式")
+        elif name == "sheets_manage_validation":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "validation", "manage"
+            ) is False:
+                reject(index, "sheets.validation.manage", "当前 ONLYOFFICE 运行时不支持数据验证")
+        elif name == "sheets_inspect_comments":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "comments", "inspect"
+            ) is False:
+                reject(index, "sheets.comments.inspect", "当前 ONLYOFFICE 运行时不支持读取批注")
+        elif name == "sheets_manage_comments":
+            action = str(arguments.get("action", ""))
+            feature = "create" if action == "add" else ("delete" if action == "delete" else "update")
+            if sheet_runtime_feature(
+                capabilities, "sheets", "comments", feature
+            ) is False:
+                reject(index, f"sheets.comments.{feature}", f"当前 ONLYOFFICE 运行时不支持批注操作 {action}")
+        elif name == "sheets_inspect_freeze_panes":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "freezePanes", "inspect"
+            ) is False:
+                reject(index, "sheets.freezePanes.inspect", "当前 ONLYOFFICE 运行时不支持读取冻结窗格")
+        elif name == "sheets_manage_freeze_panes":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "freezePanes", "manage"
+            ) is False:
+                reject(index, "sheets.freezePanes.manage", "当前 ONLYOFFICE 运行时不支持管理冻结窗格")
+        elif name == "sheets_inspect_charts":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "charts", "inspect"
+            ) is False:
+                reject(index, "sheets.charts.inspect", "当前 ONLYOFFICE 运行时不支持读取图表")
+        elif name == "sheets_update_chart":
+            if sheet_runtime_feature(
+                capabilities, "sheets", "charts", "update"
+            ) is False:
+                reject(index, "sheets.charts.update", "当前 ONLYOFFICE 运行时不支持更新图表")
         elif name == "sheets_add_chart":
             if sheet_runtime_feature(
                 capabilities, "sheets", "charts", "create"
@@ -3163,6 +3283,7 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         except BridgeError as error:
             raise project_bridge_error(editor_type, error)
         if editor_type == "cell":
+            require_sheets_batch_dependencies(tool_calls)
             require_sheets_runtime_capabilities(
                 tool_calls,
                 (session.get("state") or {}).get("capabilities") or {},
@@ -3227,6 +3348,7 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
         except BridgeError as error:
             raise project_bridge_error(editor_type, error)
         if editor_type == "cell":
+            require_sheets_batch_dependencies(normalized_calls)
             require_sheets_runtime_capabilities(
                 normalized_calls,
                 (session.get("state") or {}).get("capabilities") or {},
@@ -4362,7 +4484,7 @@ def persist_callback_document(
         with document_save_lock(destination):
             request = urllib.request.Request(
                 safe_url,
-                headers={"User-Agent": "OnlyOfficeCopilotStorage/0.2.0"},
+                headers={"User-Agent": "OnlyOfficeCopilotStorage/0.2.1"},
                 method="GET",
             )
             with urllib.request.urlopen(request, timeout=45) as response:

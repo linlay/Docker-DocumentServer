@@ -1,4 +1,4 @@
-# ai-bridge 0.2.0 外部工程接入说明
+# ai-bridge 0.2.1 外部工程接入说明
 
 > **document-hub v1 提示：**下文的 UUID `/copilot-api/*` 示例属于旧本机演示，
 > 在加固部署中已经关闭。v1 只复用浏览器插件和私网 Python Relay；页面注册、保存和
@@ -33,7 +33,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev1"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.1-rev1"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -51,7 +51,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.1-rev1"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -68,7 +68,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.1-rev1"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -132,13 +132,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.1-rev1"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.2.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.2.1-rev1"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -161,28 +161,35 @@ popup 把 `targetWindow` 改成 `window.opener`。Copilot 与编辑器如果是�
 ### document-hub v1：HTTPX 调用当前编辑器
 
 生产 v1 由同级 `document-hub` 负责用户认证、文档 ACL、审计、幂等和 Relay
-选择。HTTPX 只携带外部系统签发的用户 JWT，不处理 editor JWT、配对码、attach、
+lease。HTTPX 携带外部系统签发的用户 JWT，不处理 editor JWT、配对码、attach、
 binding token、`X-AI-Binding`、sessionId 或 documentKey。
 
 1. owner/editor 在 `document-hub` 门户打开文档；`host-bridge.js` 通过门户代理注册
    Relay 并持续发送认证心跳。
 2. HTTPX 每次请求发送 `Authorization: Bearer <user-jwt>` 和 URL 中的文档 ID。
 3. `document-hub` 验证 JWT、本地 `ACTIVE` 用户、文档状态和实时 owner/editor ACL。
-4. 服务自动选择同一用户、同一文档最近 90 秒有心跳的编辑页面，再以私有服务 secret
-   调用 Relay 的 `/bridge/internal/*`。
-5. 页面通过 poll 取得命令，调用 `window.aiBridge`，再把执行结果返回。
+4. `GET ai/session` 只在 `onDocumentReady`、插件能力探测和保存状态均确认后签发短期
+   `sessionLease`；调用者在后续请求中发送 `X-AI-Session-Lease`。
+5. 服务固定调用 lease 指定的 editor/Relay session；页面通过 poll 取得命令，调用
+   `window.aiBridge`，再把执行结果返回。
 
 公开接口只有：
 
 - `GET /api/v1/documents/{documentId}/ai/session`
 - `POST /api/v1/documents/{documentId}/ai/validate`
 - `POST /api/v1/documents/{documentId}/ai/execute`
+- `POST /api/v1/documents/{documentId}/ai/commit`
 
 `execute` 支持 `executeTool`、`executeBatch`、`save`、`history`、`undo`、`redo`、
 `getState`。写操作使用稳定 `requestId`；超时重试必须复用相同 ID 和完全相同的
 请求体。DocumentServer 在宿主机默认只绑定 `127.0.0.1:8091`，Relay 3001 只在
 Docker 私网开放。浏览器页面必须保持打开；无在线页面时门户返回
 `409 editor_not_online`。
+
+页面重载、Relay 重连、契约变化或 document-hub 重启后旧 lease 返回
+`409 session_lease_stale`，且发生在修改前。保存失败且修改可能已进入页面时返回
+`mutationReceipt`；`commit` 只重试 force-save，并对同一 receipt 保持幂等，不重放
+工具调用。
 
 Word、Slides 和 Sheets 批次可先调用只读的文档级 `/ai/validate`。
 它与执行共用参数归一化、schema 和语义校验，但不向编辑器投递命令，也不创建
@@ -397,7 +404,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.2.0 的主要方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.2.1 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -445,7 +452,7 @@ sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
 sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.2.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.2.1`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -685,7 +692,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.2.0",
+    "version": "0.2.1",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -801,6 +808,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.2.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.2.0-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.2.1`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.2.1-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。
