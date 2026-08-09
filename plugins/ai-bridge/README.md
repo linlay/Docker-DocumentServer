@@ -17,7 +17,7 @@ ONLYOFFICE Office JavaScript API.
 Plugin identity:
 
 - Name: `ai-bridge`
-- Version: `0.1.0`
+- Version: `0.2.0`
 - GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
 - Editors: Word, Presentation, Spreadsheet
 
@@ -67,7 +67,7 @@ const editorConfig = {
     },
     plugins: {
       pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev1",
+        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev1",
       ],
       autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
       options: {
@@ -127,7 +127,7 @@ loading the script:
     getEditorConfig: () => editorConfig,
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
 ```
 
 `host-bridge.js` must run in the page that contains the editor. A cross-origin
@@ -153,7 +153,7 @@ config endpoint under the editor host's own origin, and prepare the config
 before constructing `DocsAPI.DocEditor`:
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.0-rev1"></script>
 <script>
   const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
     response => response.json(),
@@ -194,6 +194,11 @@ await window.aiBridge.word.replaceText({
 ```
 
 Execute an agent-produced batch:
+
+The following `window.aiBridge` call is the browser/plugin-internal transport,
+so its raw batch names keep the editor prefixes. Calls through document-hub's
+`/api/v1/documents/{documentId}/ai/*` HTTP API use unprefixed public names such
+as `replace_text` and `append_paragraph`.
 
 ```js
 const result = await window.aiBridge.executeBatch([

@@ -1,9 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
+  "toolNaming": {
+    "scope": "editorType",
+    "publicNames": "unprefixed",
+    "internalPrefixes": {
+      "word": "word_",
+      "slide": "slides_",
+      "cell": "sheets_"
+    }
+  },
   "transport": {
     "direct": "window.aiBridge",
     "relay": {

@@ -38,9 +38,10 @@ EDITOR_CONFIG = {
         "fileType": "docx",
         "prefix": "word_",
         "label": "Word",
-        "sessionAction": "word_session",
+        "sessionAction": "session",
         "unitKey": "word",
         "normalizationKey": "word",
+        "runtimeHelper": False,
     },
     "slide": {
         "skill": "online-pptx",
@@ -49,9 +50,10 @@ EDITOR_CONFIG = {
         "fileType": "pptx",
         "prefix": "slides_",
         "label": "Slides",
-        "sessionAction": "slides_session",
+        "sessionAction": "session",
         "unitKey": "slide",
         "normalizationKey": "slide",
+        "runtimeHelper": True,
     },
     "cell": {
         "skill": "online-xlsx",
@@ -60,9 +62,10 @@ EDITOR_CONFIG = {
         "fileType": "xlsx",
         "prefix": "sheets_",
         "label": "Sheets",
-        "sessionAction": "sheets_session",
+        "sessionAction": "session",
         "unitKey": "sheet",
         "normalizationKey": "sheet",
+        "runtimeHelper": True,
     },
 }
 
@@ -613,13 +616,17 @@ def scoped_contract(
     sha256: str,
 ) -> dict[str, Any]:
     config = EDITOR_CONFIG[editor]
+    tools = {
+        public_tool_name(editor, name): schema
+        for name, schema in contract["tools"][editor].items()
+    }
     return {
         "name": contract.get("name"),
         "version": contract["version"],
         "protocolVersion": contract["protocolVersion"],
         "contractSha256": sha256,
         "editorType": editor,
-        "toolPrefix": config["prefix"],
+        "toolPrefix": "",
         "limits": contract["limits"],
         "unitConventions": (
             contract.get("unitConventions", {}).get(config["unitKey"]) or {}
@@ -633,8 +640,17 @@ def scoped_contract(
         "controls": contract.get("controls") or [],
         "errors": contract.get("errors") or [],
         "$defs": contract.get("$defs") or {},
-        "tools": contract["tools"][editor],
+        "tools": tools,
     }
+
+
+def public_tool_name(editor: str, internal_name: str) -> str:
+    prefix = EDITOR_CONFIG[editor]["prefix"]
+    if not internal_name.startswith(prefix) or internal_name == prefix:
+        raise ValueError(
+            f"{editor} tool {internal_name!r} must start with {prefix!r}"
+        )
+    return internal_name[len(prefix):]
 
 
 def collect_enums(
@@ -869,7 +885,7 @@ def render_toml(
     ]
     lines.extend(
         [
-            f"[actions.new_{file_type}]",
+            "[actions.create]",
             f'description = "以固定 Platform 主体新建 {file_type.upper()} 文档"',
             'method = "POST"',
             'path = "/api/v1/documents"',
@@ -918,7 +934,8 @@ def render_toml(
             "",
         ]
     )
-    for name, schema in contract["tools"][editor].items():
+    for internal_name, schema in contract["tools"][editor].items():
+        name = public_tool_name(editor, internal_name)
         lines.extend(
             [
                 f"[actions.{name}]",
@@ -945,8 +962,8 @@ def render_toml(
                 "",
             ]
         )
-    batch_name = f"execute_{config['prefix'].rstrip('_')}_batch"
-    validate_name = f"validate_{config['prefix'].rstrip('_')}_batch"
+    batch_name = "execute_batch"
+    validate_name = "validate_batch"
     for action_name, document_action, method, kind in (
         (validate_name, "validate", None, "validate"),
         (batch_name, "execute", "executeBatch", "batch"),
@@ -1003,7 +1020,6 @@ def render_toml(
 
 def render_runtime_helper(scoped: dict[str, Any]) -> str:
     editor = scoped["editorType"]
-    prefix = scoped["toolPrefix"]
     limits = scoped["limits"]
     return f'''"""Generated ai-bridge contract loader. Do not edit."""
 
@@ -1020,7 +1036,6 @@ CONTRACT: Dict[str, Any] = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 CONTRACT_VERSION = str(CONTRACT["version"])
 CONTRACT_SHA256 = str(CONTRACT["contractSha256"])
 EDITOR_TYPE = {editor!r}
-TOOL_PREFIX = {prefix!r}
 TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = dict(CONTRACT["tools"])
 TOOL_NAMES = frozenset(TOOL_SCHEMAS)
 READ_ONLY_ACTIONS = frozenset(
@@ -1193,11 +1208,12 @@ def build_artifacts(
             json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
         )
         artifacts[references / "contract.generated.md"] = render_markdown(scoped)
-        artifacts[
-            skill_root
-            / "scripts"
-            / f"_{config['fileType']}_contract_runtime.py"
-        ] = render_runtime_helper(scoped)
+        if config["runtimeHelper"]:
+            artifacts[
+                skill_root
+                / "scripts"
+                / f"_{config['fileType']}_contract_runtime.py"
+            ] = render_runtime_helper(scoped)
         artifacts[
             skill_root / ".config" / "httpx" / config["toml"]
         ] = render_toml(
@@ -1210,17 +1226,35 @@ def build_artifacts(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.1.0":
-        raise ValueError("public-api.json version must be 0.1.0")
+    if contract.get("version") != "0.2.0":
+        raise ValueError("public-api.json version must be 0.2.0")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
+    naming = contract.get("toolNaming") or {}
+    expected_prefixes = {
+        editor: config["prefix"]
+        for editor, config in EDITOR_CONFIG.items()
+    }
+    if (
+        naming.get("scope") != "editorType"
+        or naming.get("publicNames") != "unprefixed"
+        or naming.get("internalPrefixes") != expected_prefixes
+    ):
+        raise ValueError("public-api.json has an invalid toolNaming policy")
     names = []
     for editor in ("word", "slide", "cell"):
         schemas = contract.get("tools", {}).get(editor)
         if not isinstance(schemas, dict) or not schemas:
             raise ValueError(f"missing tools.{editor}")
+        public_names = set()
         for name, schema in schemas.items():
             names.append(name)
+            public_name = public_tool_name(editor, name)
+            if public_name in public_names:
+                raise ValueError(
+                    f"duplicate public tool name for {editor}: {public_name}"
+                )
+            public_names.add(public_name)
             if not isinstance(schema.get("description"), str):
                 raise ValueError(f"{editor}.{name} is missing description")
             if schema.get("x-effects") not in {"read", "write"}:

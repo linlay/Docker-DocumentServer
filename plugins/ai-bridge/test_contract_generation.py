@@ -42,7 +42,19 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 155)
-        self.assertEqual(self.contract["version"], "0.1.0")
+        self.assertEqual(self.contract["version"], "0.2.0")
+        self.assertEqual(
+            self.contract["toolNaming"],
+            {
+                "scope": "editorType",
+                "publicNames": "unprefixed",
+                "internalPrefixes": {
+                    "word": "word_",
+                    "slide": "slides_",
+                    "cell": "sheets_",
+                },
+            },
+        )
         self.assertEqual(self.contract["protocolVersion"], 1)
         for name, schema in tools.items():
             with self.subTest(tool=name):
@@ -215,11 +227,7 @@ class ContractGenerationTests(unittest.TestCase):
     ) -> None:
         base_url = "https://office.example.test/"
         sha256 = sync_contract.contract_sha256(self.contract)
-        expected_session_actions = {
-            "word": "word_session",
-            "slide": "slides_session",
-            "cell": "sheets_session",
-        }
+        expected_session_actions = {editor: "session" for editor in ("word", "slide", "cell")}
         for editor, session_action in expected_session_actions.items():
             with self.subTest(editor=editor):
                 rendered = sync_contract.render_toml(
@@ -233,6 +241,15 @@ class ContractGenerationTests(unittest.TestCase):
                     rendered,
                 )
                 self.assertIn(f"[actions.{session_action}]", rendered)
+                self.assertIn("[actions.create]", rendered)
+                self.assertIn("[actions.validate_batch]", rendered)
+                self.assertIn("[actions.execute_batch]", rendered)
+                self.assertIn('key = "arguments_json"', rendered)
+                self.assertIn('key = "tool_calls_json"', rendered)
+                self.assertIn('argumentsJson = { from = "param"', rendered)
+                self.assertIn('toolCallsJson = { from = "param"', rendered)
+                self.assertNotIn(f"[actions.new_{sync_contract.EDITOR_CONFIG[editor]['fileType']}]", rendered)
+                self.assertNotIn(f"[actions.{sync_contract.EDITOR_CONFIG[editor]['prefix']}", rendered)
                 self.assertNotIn("Authorization", rendered)
                 self.assertNotIn("AP_ACCESS_TOKEN", rendered)
                 self.assertNotIn("X-HTTPX-Direct-Secret", rendered)
@@ -263,11 +280,11 @@ class ContractGenerationTests(unittest.TestCase):
             "---\n\n"
             "# Body\n"
         )
-        expected = source.replace('version: "9.9.9"', 'version: "0.1.0"')
-        rendered = sync_contract.render_skill_version(source, "0.1.0")
+        expected = source.replace('version: "9.9.9"', 'version: "0.2.0"')
+        rendered = sync_contract.render_skill_version(source, "0.2.0")
         self.assertEqual(rendered, expected)
         self.assertEqual(
-            sync_contract.render_skill_version(rendered, "0.1.0"),
+            sync_contract.render_skill_version(rendered, "0.2.0"),
             expected,
         )
 
@@ -279,12 +296,12 @@ class ContractGenerationTests(unittest.TestCase):
             "# Body\n"
         )
         self.assertEqual(
-            sync_contract.render_skill_version(without_metadata, "0.1.0"),
+            sync_contract.render_skill_version(without_metadata, "0.2.0"),
             "---\n"
             "name: online-xlsx\n"
             "description: Example\n"
             "metadata:\n"
-            "  version: \"0.1.0\"\n"
+            "  version: \"0.2.0\"\n"
             "---\n\n"
             "# Body\n",
         )
@@ -328,18 +345,31 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(skill_path, artifacts)
                 self.assertIn(toml_path, artifacts)
                 self.assertIn(
-                    '  version: "0.1.0"',
+                    '  version: "0.2.0"',
                     artifacts[skill_path],
                 )
                 self.assertIn(
                     f'agent-platform-httpx/{config["site"]}',
                     artifacts[toml_path],
                 )
+                runtime_path = (
+                    skill_root
+                    / "scripts"
+                    / f"_{config['fileType']}_contract_runtime.py"
+                )
+                if config["runtimeHelper"]:
+                    self.assertIn(runtime_path, artifacts)
+                else:
+                    scripts_root = skill_root / "scripts"
+                    self.assertFalse(
+                        any(scripts_root in path.parents for path in artifacts),
+                        f"{config['skill']} must not generate scripts artifacts",
+                    )
 
     def test_generated_runtime_preserves_transport_errors_and_classifies_contract_metadata(self) -> None:
         scoped = sync_contract.scoped_contract(
             self.contract,
-            "word",
+            "cell",
             sync_contract.contract_sha256(self.contract),
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -348,7 +378,7 @@ class ContractGenerationTests(unittest.TestCase):
             references = skill_root / "references"
             scripts.mkdir()
             references.mkdir()
-            runtime_path = scripts / "_docx_contract_runtime.py"
+            runtime_path = scripts / "_xlsx_contract_runtime.py"
             runtime_path.write_text(
                 sync_contract.render_runtime_helper(scoped),
                 encoding="utf-8",
@@ -358,12 +388,15 @@ class ContractGenerationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             spec = importlib.util.spec_from_file_location(
-                "generated_docx_contract_runtime",
+                "generated_xlsx_contract_runtime",
                 runtime_path,
             )
             assert spec is not None and spec.loader is not None
             runtime = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(runtime)
+
+            self.assertIn("inspect", runtime.TOOL_NAMES)
+            self.assertNotIn("sheets_inspect", runtime.TOOL_NAMES)
 
             offline = {
                 "ok": False,
@@ -421,14 +454,14 @@ class ContractGenerationTests(unittest.TestCase):
     def test_check_logic_detects_a_manual_generated_file_edit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             projection = Path(directory) / "contract.generated.json"
-            expected = '{"version":"0.1.0"}\n'
+            expected = '{"version":"0.2.0"}\n'
             projection.write_text(expected, encoding="utf-8")
             self.assertEqual(
                 sync_contract.drifted_paths({projection: expected}),
                 [],
             )
             projection.write_text(
-                expected.replace("0.1.0", "manual-edit"),
+                expected.replace("0.2.0", "manual-edit"),
                 encoding="utf-8",
             )
             self.assertEqual(
@@ -483,6 +516,10 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn("inputNormalization", scoped)
                 self.assertIn("controls", scoped)
                 self.assertIn("errors", scoped)
+                self.assertEqual(scoped["toolPrefix"], "")
+                prefix = sync_contract.EDITOR_CONFIG[editor]["prefix"]
+                self.assertTrue(scoped["tools"])
+                self.assertFalse(any(name.startswith(prefix) for name in scoped["tools"]))
                 assert_refs_resolve(scoped["tools"], scoped["$defs"])
 
     def test_unknown_semantic_validator_is_a_startup_error(self) -> None:

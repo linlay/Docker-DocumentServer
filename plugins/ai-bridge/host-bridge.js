@@ -1,9 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.1.0";
+  const VERSION = "0.2.0";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "c2e0226a6ae46493f2af42aca79c259054fb6191321f3752e9a9a8d90437e155";
+  const CONTRACT_SHA256 = "e3467b75206952228df12e986d6d9d2bfdefbd99f2941c4bf747c6f26199d2f7";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;

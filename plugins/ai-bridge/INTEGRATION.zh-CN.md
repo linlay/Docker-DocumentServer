@@ -1,4 +1,4 @@
-# ai-bridge 0.1.0 外部工程接入说明
+# ai-bridge 0.2.0 外部工程接入说明
 
 > **document-hub v1 提示：**下文的 UUID `/copilot-api/*` 示例属于旧本机演示，
 > 在加固部署中已经关闭。v1 只复用浏览器插件和私网 Python Relay；页面注册、保存和
@@ -33,7 +33,7 @@
       },
       plugins: {
         pluginsData: [
-          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.1.0-rev1"
+          "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=0.2.0-rev1"
         ],
         autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
         options: {
@@ -51,7 +51,7 @@
   };
   new DocsAPI.DocEditor("editor", editorConfig);
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
 ```
 
 `plugins.options` 必须在创建 `DocsAPI.DocEditor` 前写入。同一个配置对象会把准确的
@@ -68,7 +68,7 @@ sandbox 不支持。缺少 options 时只保留原生顶层页签的旧握手方
 `localStorage["onlyoffice.localGuestId.v1"]`，显示名固定为 `访客`：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=0.2.0-rev1"></script>
 <script>
   // editorConfig 必须已经包含业务后端签发的短期 HS256 token。
   await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
@@ -132,13 +132,13 @@ await window.aiBridge.word.replaceText(
     clientOrigins: ["https://copilot.example.com"],
   };
 </script>
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=0.2.0-rev1"></script>
 ```
 
 Copilot iframe 页面加载 SDK，并把父窗口和父窗口的准确源交给客户端：
 
 ```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.1.0-rev1"></script>
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=0.2.0-rev1"></script>
 <script>
   const office = new AiBridgeClient({
     targetWindow: window.parent,
@@ -397,7 +397,7 @@ on("ready" | "reload" | "error", listener)
 off(eventName, listener)
 ```
 
-快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.1.0 的主要方法：
+快捷方法以 `public-api.d.ts` 和 `public-api.json` 为准，以下列出 0.2.0 的主要方法：
 
 ```text
 word.inspect                 word.replaceText          word.appendParagraph
@@ -445,7 +445,7 @@ sheets.manageProtectedRanges sheets.inspectPageLayout  sheets.managePageLayout
 sheets.inspectMacros         sheets.setMacros
 ```
 
-完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.1.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
+完整参数类型在 `public-api.d.ts`；机器可读 schema 在 `public-api.json`。另一个 TypeScript 工程可以复制这两个文件，或从 DocumentServer 静态地址下载并固定到版本 `0.2.0`。DOCX D01-D70 的逐项状态与公开 API 边界见 `DOCX-CAPABILITIES.zh-CN.md`；PPTX P01-P77 见 `PPTX-CAPABILITIES.zh-CN.md`；XLSX X01-X78 见 `XLSX-CAPABILITIES.zh-CN.md`。
 
 ### Word 完整操作边界
 
@@ -659,6 +659,11 @@ ONLYOFFICE Docs 版本/许可中属于付费能力；方法不可用时 Bridge �
 
 建议优先使用 `client-sdk.js`。如果另一个工程要自己实现客户端，Relay 的公开消息包如下。所有 `postMessage` 都必须使用准确的 `targetOrigin`。
 
+本节描述浏览器页面、host bridge 与插件之间的底层协议，因此 raw tool name 继续使用
+`word_`、`slides_`、`sheets_` 前缀。document-hub 的
+`/api/v1/documents/{documentId}/ai/*` HTTP 接口是另一层公开边界，只接受按当前
+`editorType` 解析的无前缀短名称。
+
 连接：
 
 ```js
@@ -680,7 +685,7 @@ parent.postMessage({
   "clientId": "client:550e8400-e29b-41d4-a716-446655440000",
   "type": "connected",
   "state": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "ready": true,
     "editorType": "word",
     "context": { "documentKey": "document-42:v18", "fileName": "合同.docx" },
@@ -796,6 +801,6 @@ await office.redo(); // 回到下一 checkpoint，页面会 reload
 
 ## 版本兼容
 
-当前插件版本为 `0.1.0`，消息协议版本为 `1`，本次构建缓存键为
-`?v=0.1.0-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
+当前插件版本为 `0.2.0`，消息协议版本为 `1`，本次构建缓存键为
+`?v=0.2.0-rev1`。生产页面应固定到实际发布的不可变缓存键，升级前先比较
 `public-api.json`。协议版本不一致时 Client 和 Relay 不建立连接。

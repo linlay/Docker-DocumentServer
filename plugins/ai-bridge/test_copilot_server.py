@@ -155,10 +155,10 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        editor_revision = "0.1.0-rev1"
-        word_bridge_revision = "0.1.0-rev2"
-        plugin_config_revision = "0.1.0-rev4"
-        stale_revision = "0.1.0-rev0"
+        editor_revision = "0.2.0-rev1"
+        word_bridge_revision = "0.2.0-rev2"
+        plugin_config_revision = "0.2.0-rev4"
+        stale_revision = "0.2.0-rev0"
         paths = [
             "index.html",
             "README.md",
@@ -1316,6 +1316,15 @@ class HttpRelayTests(unittest.TestCase):
             stream.write(b"test")
         return file_name
 
+    def public_calls(self, editor, calls):
+        return [
+            {
+                **call,
+                "name": copilot_server.public_tool_name(editor, call["name"]),
+            }
+            for call in calls
+        ]
+
     def editor_failure(self, code, message="editor failed", details=None, request_id="failure"):
         if "http-session:test" not in copilot_server.BRIDGE_SESSIONS:
             registration = self.register()
@@ -1331,7 +1340,7 @@ class HttpRelayTests(unittest.TestCase):
                 copilot_server.bridge_execute(
                     {
                         "method": "executeTool",
-                        "name": "word_inspect",
+                        "name": "inspect",
                         "arguments": {"maxChars": 1000},
                         "requestId": request_id,
                         "timeoutMs": 2000,
@@ -1401,7 +1410,7 @@ class HttpRelayTests(unittest.TestCase):
     def test_editor_failure_uses_status_map_and_preserves_safe_details(self):
         details = {
             "phase": "word-command",
-            "tool": "word_format_table_advanced",
+            "tool": "format_table_advanced",
             "toolCallIndex": 0,
             "completedToolCalls": 0,
             "partialMutationPossible": False,
@@ -1521,6 +1530,7 @@ class HttpRelayTests(unittest.TestCase):
         large_data_url = "data:image/png;base64," + ("A" * 300000)
         session = {
             "state": {
+                "editorType": "word",
                 "capabilities": {
                     "tools": ["word_add_image", "word_replace_text"],
                 },
@@ -1530,7 +1540,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "method": "executeTool",
                 "requestId": "large-image",
-                "name": "word_add_image",
+                "name": "add_image",
                 "arguments": {
                     "source": {"type": "dataUrl", "dataUrl": large_data_url},
                 },
@@ -1544,13 +1554,111 @@ class HttpRelayTests(unittest.TestCase):
                 {
                     "method": "executeTool",
                     "requestId": "large-text",
-                    "name": "word_replace_text",
+                    "name": "replace_text",
                     "arguments": {"search": "a", "replace": "A" * 300000},
                 },
                 session,
             )
 
         self.assertEqual(raised.exception.code, "ARGUMENTS_TOO_LARGE")
+
+    def test_public_inspect_resolves_to_each_editor_internal_tool(self):
+        for editor, internal_name in {
+            "word": "word_inspect",
+            "slide": "slides_inspect",
+            "cell": "sheets_inspect",
+        }.items():
+            with self.subTest(editor=editor):
+                command = copilot_server.bridge_build_command(
+                    {
+                        "method": "executeTool",
+                        "requestId": f"short-inspect-{editor}",
+                        "name": "inspect",
+                        "arguments": {},
+                    },
+                    {
+                        "state": {
+                            "editorType": editor,
+                            "capabilities": {"tools": [internal_name]},
+                        },
+                    },
+                )
+                self.assertEqual(command["params"]["name"], internal_name)
+
+    def test_http_relay_rejects_prefixed_public_tool_names_before_delivery(self):
+        for editor, internal_name in {
+            "word": "word_inspect",
+            "slide": "slides_inspect",
+            "cell": "sheets_inspect",
+        }.items():
+            with self.subTest(editor=editor):
+                with self.assertRaises(copilot_server.BridgeError) as raised:
+                    copilot_server.bridge_build_command(
+                        {
+                            "method": "executeTool",
+                            "requestId": f"legacy-prefixed-name-{editor}",
+                            "name": internal_name,
+                            "arguments": {},
+                        },
+                        {
+                            "state": {
+                                "editorType": editor,
+                                "capabilities": {"tools": [internal_name]},
+                            },
+                        },
+                    )
+
+                self.assertEqual(raised.exception.status, 400)
+                self.assertEqual(raised.exception.code, "TOOL_NOT_ALLOWED")
+
+    def test_public_tool_from_another_editor_is_rejected(self):
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_build_command(
+                {
+                    "method": "executeTool",
+                    "requestId": "wrong-editor-short-name",
+                    "name": "manage_freeze_panes",
+                    "arguments": {"action": "unfreeze"},
+                },
+                {
+                    "state": {
+                        "editorType": "word",
+                        "capabilities": {"tools": ["word_inspect"]},
+                    },
+                },
+            )
+        self.assertEqual(raised.exception.code, "TOOL_NOT_ALLOWED")
+
+    def test_public_session_and_results_only_expose_short_tool_names(self):
+        session = {
+            "state": {
+                "ready": True,
+                "editorType": "word",
+                "capabilities": {
+                    "tools": ["word_inspect", "word_append_paragraph"],
+                    "controls": ["save"],
+                },
+            },
+        }
+
+        public_session = copilot_server.bridge_public_session("session-1", session)
+        self.assertEqual(
+            public_session["capabilities"]["tools"],
+            ["inspect", "append_paragraph"],
+        )
+        projected = copilot_server.project_public_tool_fields(
+            "word",
+            {
+                "results": [{"name": "word_inspect", "tool": "word_inspect"}],
+                "details": {
+                    "tool": "word_append_paragraph",
+                    "validationErrors": [{"tool": "word_inspect"}],
+                },
+            },
+        )
+        self.assertEqual(projected["results"][0], {"name": "inspect", "tool": "inspect"})
+        self.assertEqual(projected["details"]["tool"], "append_paragraph")
+        self.assertEqual(projected["details"]["validationErrors"][0]["tool"], "inspect")
 
     def test_validate_accepts_image_arguments_between_standard_and_image_limits(self):
         self.register()
@@ -1570,7 +1678,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "toolCalls": [
                     {
-                        "name": "word_add_image",
+                        "name": "add_image",
                         "arguments": {
                             "source": {
                                 "type": "dataUrl",
@@ -1589,7 +1697,7 @@ class HttpRelayTests(unittest.TestCase):
                 {
                     "toolCalls": [
                         {
-                            "name": "word_add_image",
+                            "name": "add_image",
                             "arguments": {
                                 "source": {
                                     "type": "dataUrl",
@@ -1685,7 +1793,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "method": "executeBatch",
                 "requestId": "normalize-compatible",
-                "toolCalls": compatibility_calls,
+                "toolCalls": self.public_calls("word", compatibility_calls),
             },
             session,
         )
@@ -1693,7 +1801,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "method": "executeBatch",
                 "requestId": "normalize-canonical",
-                "toolCalls": canonical_calls,
+                "toolCalls": self.public_calls("word", canonical_calls),
             },
             session,
         )
@@ -1761,7 +1869,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "method": "executeBatch",
                 "requestId": "sheets-public-aliases",
-                "toolCalls": tool_calls,
+                "toolCalls": self.public_calls("cell", tool_calls),
             },
             session,
         )
@@ -1816,7 +1924,7 @@ class HttpRelayTests(unittest.TestCase):
                         {
                             "method": "executeTool",
                             "requestId": "sheets-invalid-public-enum",
-                            "name": call["name"],
+                            "name": copilot_server.public_tool_name("cell", call["name"]),
                             "arguments": call["arguments"],
                         },
                         session,
@@ -1891,11 +1999,11 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "toolCalls": [
                     {
-                        "name": "word_set_document_properties",
+                        "name": "set_document_properties",
                         "arguments": {"author": "预检作者"},
                     },
                     {
-                        "name": "word_manage_style",
+                        "name": "manage_style",
                         "arguments": {"name": "正文", "align": "JUSTIFY"},
                     },
                 ],
@@ -1939,11 +2047,11 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "toolCalls": [
                     {
-                        "name": "slides_add_slide",
+                        "name": "add_slide",
                         "arguments": {"masterIndex": 1, "layoutIndex": 2},
                     },
                     {
-                        "name": "slides_add_textbox",
+                        "name": "add_textbox",
                         "arguments": {
                             "slide": 1,
                             "paragraphs": [
@@ -1972,7 +2080,7 @@ class HttpRelayTests(unittest.TestCase):
                 {
                     "toolCalls": [
                         {
-                            "name": "slides_add_textbox",
+                            "name": "add_textbox",
                             "arguments": {
                                 "slide": 1,
                                 "text": "普通文本",
@@ -1980,7 +2088,7 @@ class HttpRelayTests(unittest.TestCase):
                             },
                         },
                         {
-                            "name": "slides_validate_layout",
+                            "name": "validate_layout",
                             "arguments": {"unknownRule": True},
                         },
                     ],
@@ -2028,7 +2136,7 @@ class HttpRelayTests(unittest.TestCase):
             {
                 "toolCalls": [
                     {
-                        "name": "sheets_set_values",
+                        "name": "set_values",
                         "arguments": {
                             "sheet": "Sheet1",
                             "range": "A1:B2",
@@ -2036,7 +2144,7 @@ class HttpRelayTests(unittest.TestCase):
                         },
                     },
                     {
-                        "name": "sheets_set_formula",
+                        "name": "set_formula",
                         "arguments": {
                             "sheet": "Sheet1",
                             "range": "selection",
@@ -2044,7 +2152,7 @@ class HttpRelayTests(unittest.TestCase):
                         },
                     },
                     {
-                        "name": "sheets_manage_freeze_panes",
+                        "name": "manage_freeze_panes",
                         "arguments": {
                             "sheet": "Sheet1",
                             "action": "freezeRows",
@@ -2106,7 +2214,10 @@ class HttpRelayTests(unittest.TestCase):
         for call in invalid_calls:
             with self.subTest(tool=call["name"]):
                 with self.assertRaises(copilot_server.BridgeError) as raised:
-                    copilot_server.bridge_validate({"toolCalls": [call]}, claims)
+                    copilot_server.bridge_validate(
+                        {"toolCalls": self.public_calls("cell", [call])},
+                        claims,
+                    )
                 self.assertEqual(raised.exception.status, 422)
                 self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
                 self.assertEqual(
@@ -2158,7 +2269,7 @@ class HttpRelayTests(unittest.TestCase):
         valid = copilot_server.bridge_validate(
             {
                 "toolCalls": [{
-                    "name": "sheets_manage_table",
+                    "name": "manage_table",
                     "arguments": {
                         "action": "create",
                         "tableMode": "rangeStyle",
@@ -2203,7 +2314,10 @@ class HttpRelayTests(unittest.TestCase):
         for call, feature in invalid_calls:
             with self.subTest(feature=feature):
                 with self.assertRaises(copilot_server.BridgeError) as raised:
-                    copilot_server.bridge_validate({"toolCalls": [call]}, claims)
+                    copilot_server.bridge_validate(
+                        {"toolCalls": self.public_calls("cell", [call])},
+                        claims,
+                    )
                 self.assertEqual(raised.exception.status, 501)
                 self.assertEqual(raised.exception.code, "SHEETS_API_UNSUPPORTED")
                 self.assertEqual(raised.exception.details["feature"], feature)
@@ -2272,7 +2386,7 @@ class HttpRelayTests(unittest.TestCase):
                 {
                     "method": "executeBatch",
                     "requestId": "invalid-word-batch",
-                    "toolCalls": tool_calls,
+                    "toolCalls": self.public_calls("word", tool_calls),
                 },
                 claims,
             )
@@ -2638,7 +2752,7 @@ class HttpRelayTests(unittest.TestCase):
         request = {
             "sessionId": "http-session:first",
             "method": "executeTool",
-            "name": "word_inspect",
+            "name": "inspect",
             "arguments": {"maxChars": 500},
             "requestId": "stale-session-hint-1",
             "timeoutMs": 2000,
@@ -2738,7 +2852,7 @@ class HttpRelayTests(unittest.TestCase):
         holder = {}
         request = {
             "method": "executeTool",
-            "name": "word_inspect",
+            "name": "inspect",
             "arguments": {"maxChars": 500},
             "requestId": "turn-handoff-undelivered-1",
             "timeoutMs": 2000,
@@ -2798,7 +2912,7 @@ class HttpRelayTests(unittest.TestCase):
         claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
         request = {
             "method": "executeTool",
-            "name": "word_inspect",
+            "name": "inspect",
             "arguments": {"maxChars": 500},
             "requestId": "turn-handoff-tool-1",
             "timeoutMs": 2000,
@@ -2840,7 +2954,7 @@ class HttpRelayTests(unittest.TestCase):
         claims = copilot_server.verify_editor_jwt(self.editor_token())
         request = {
             "method": "executeTool",
-            "name": "word_inspect",
+            "name": "inspect",
             "arguments": {"maxChars": 1000},
             "requestId": "turn-1-tool-1",
             "timeoutMs": 2000,

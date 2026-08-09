@@ -38,7 +38,7 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.1.0-rev1"
+EDITOR_ASSET_REVISION = "0.2.0-rev1"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
@@ -258,6 +258,8 @@ PUBLIC_API_CONTRACT_SHA256 = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 PUBLIC_API_LIMITS = PUBLIC_API_CONTRACT.get("limits") or {}
+PUBLIC_TOOL_NAMING = PUBLIC_API_CONTRACT.get("toolNaming") or {}
+PREFIX_BY_EDITOR = dict(PUBLIC_TOOL_NAMING.get("internalPrefixes") or {})
 MAX_TOOL_CALLS = int(PUBLIC_API_LIMITS.get("maxToolCalls") or 0)
 MAX_ARGUMENTS_JSON_CHARS = int(
     PUBLIC_API_LIMITS.get("maxArgumentsJsonChars") or 0
@@ -280,6 +282,13 @@ if not all(
     )
 ):
     raise RuntimeError("public-api.json 缺少必需的版本或限制")
+if (
+    PUBLIC_TOOL_NAMING.get("scope") != "editorType"
+    or PUBLIC_TOOL_NAMING.get("publicNames") != "unprefixed"
+    or set(PREFIX_BY_EDITOR) != {"word", "slide", "cell"}
+    or not all(isinstance(value, str) and value for value in PREFIX_BY_EDITOR.values())
+):
+    raise RuntimeError("public-api.json 缺少有效的无前缀工具命名策略")
 BRIDGE_ID_PATTERN = re.compile(
     rf"^[A-Za-z0-9._:-]{{1,{MAX_REQUEST_ID_CHARS}}}$"
 )
@@ -292,10 +301,100 @@ def contract_identity() -> dict[str, str]:
     }
 
 
-def editor_public_contract(editor: str) -> dict[str, Any]:
+def public_tool_name(editor: str, internal_name: str) -> str:
+    prefix = PREFIX_BY_EDITOR.get(editor, "")
+    if not prefix or not internal_name.startswith(prefix):
+        raise RuntimeError(f"{editor} 内部工具名缺少前缀：{internal_name}")
+    public_name = internal_name[len(prefix):]
+    if not public_name:
+        raise RuntimeError(f"{editor} 内部工具名缺少公开名称：{internal_name}")
+    return public_name
+
+
+def public_tool_schemas(editor: str) -> dict[str, Any]:
     schemas = PUBLIC_API_CONTRACT.get("tools", {}).get(editor)
     if not isinstance(schemas, dict):
         raise BridgeError(404, "EDITOR_MISMATCH", f"不存在编辑器契约：{editor}")
+    projected: dict[str, Any] = {}
+    for internal_name, schema in schemas.items():
+        public_name = public_tool_name(editor, internal_name)
+        if public_name in projected:
+            raise RuntimeError(f"{editor} 公开工具名重复：{public_name}")
+        projected[public_name] = schema
+    return projected
+
+
+def internal_tool_name(editor: str, public_name: str) -> str:
+    prefix = PREFIX_BY_EDITOR.get(editor, "")
+    if not prefix or not public_name or public_name.startswith(prefix):
+        raise BridgeError(
+            400,
+            "TOOL_NOT_ALLOWED",
+            f"当前编辑器不允许公开工具：{public_name or 'unknown'}",
+        )
+    internal_name = prefix + public_name
+    if internal_name not in ALLOWED_BY_EDITOR.get(editor, set()):
+        raise BridgeError(
+            400,
+            "TOOL_NOT_ALLOWED",
+            f"当前编辑器不允许公开工具：{public_name}",
+        )
+    return internal_name
+
+
+def internalize_public_tool_calls(
+    editor: str,
+    tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    internal_calls: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            raise BridgeError(400, "INVALID_TOOL_CALL", "工具调用必须是对象")
+        public_name = str(call.get("name") or "").strip()
+        internal_calls.append({**call, "name": internal_tool_name(editor, public_name)})
+    return internal_calls
+
+
+def project_public_capabilities(editor: str, capabilities: Any) -> Any:
+    if not isinstance(capabilities, dict):
+        return capabilities
+    projected = dict(capabilities)
+    tools = capabilities.get("tools")
+    if isinstance(tools, list):
+        projected["tools"] = [
+            public_tool_name(editor, name)
+            for name in tools
+            if isinstance(name, str) and name.startswith(PREFIX_BY_EDITOR[editor])
+        ]
+    return projected
+
+
+def project_public_tool_fields(editor: str, value: Any) -> Any:
+    if editor not in PREFIX_BY_EDITOR:
+        return value
+    if isinstance(value, list):
+        return [project_public_tool_fields(editor, item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    prefix = PREFIX_BY_EDITOR[editor]
+    for key, item in value.items():
+        if key == "capabilities":
+            projected[key] = project_public_capabilities(editor, item)
+        elif key in {"name", "tool"} and isinstance(item, str) and item.startswith(prefix):
+            projected[key] = public_tool_name(editor, item)
+        else:
+            projected[key] = project_public_tool_fields(editor, item)
+    return projected
+
+
+def project_bridge_error(editor: str, error: "BridgeError") -> "BridgeError":
+    error.details = project_public_tool_fields(editor, error.details)
+    return error
+
+
+def editor_public_contract(editor: str) -> dict[str, Any]:
+    schemas = public_tool_schemas(editor)
     units_key = {"word": "word", "slide": "slide", "cell": "sheet"}[editor]
     normalization_key = {"word": "word", "slide": "slide", "cell": "sheet"}[editor]
     return {
@@ -304,7 +403,7 @@ def editor_public_contract(editor: str) -> dict[str, Any]:
         "protocolVersion": PUBLIC_API_CONTRACT.get("protocolVersion"),
         "contractSha256": PUBLIC_API_CONTRACT_SHA256,
         "editorType": editor,
-        "toolPrefix": {"word": "word_", "slide": "slides_", "cell": "sheets_"}[editor],
+        "toolPrefix": "",
         "limits": PUBLIC_API_LIMITS,
         "unitConventions": (
             (PUBLIC_API_CONTRACT.get("unitConventions") or {}).get(units_key) or {}
@@ -371,11 +470,19 @@ SHEET_TOOLS = load_contract_tools("cell")
 
 
 TOOLS_BY_EDITOR = {"word": WORD_TOOLS, "slide": SLIDE_TOOLS, "cell": SHEET_TOOLS}
-PREFIX_BY_EDITOR = {"word": "word_", "slide": "slides_", "cell": "sheets_"}
 ALLOWED_BY_EDITOR = {
     editor: {entry["function"]["name"] for entry in entries}
     for editor, entries in TOOLS_BY_EDITOR.items()
 }
+PUBLIC_ALLOWED_BY_EDITOR = {
+    editor: {public_tool_name(editor, name) for name in names}
+    for editor, names in ALLOWED_BY_EDITOR.items()
+}
+if any(
+    len(PUBLIC_ALLOWED_BY_EDITOR[editor]) != len(ALLOWED_BY_EDITOR[editor])
+    for editor in ALLOWED_BY_EDITOR
+):
+    raise RuntimeError("同一 editorType 内存在重复的公开工具名")
 ARGUMENT_SCHEMAS_BY_EDITOR = {
     editor: {
         entry["function"]["name"]: entry["function"]["parameters"]
@@ -2001,7 +2108,7 @@ def decode_image_source(source: Any) -> tuple[bytes, str | None]:
             validated_url,
             headers={
                 "Accept": "image/png,image/jpeg,image/gif,image/webp,image/svg+xml",
-                "User-Agent": "OnlyOffice-ai-bridge/0.1.0",
+                "User-Agent": "OnlyOffice-ai-bridge/0.2.0",
             },
             method="GET",
         )
@@ -2327,16 +2434,21 @@ def internal_bridge_drop(session_id: Any) -> dict[str, Any]:
 def bridge_public_session(session_id: str, session: dict[str, Any]) -> dict[str, Any]:
     state = session.get("state") if isinstance(session.get("state"), dict) else {}
     context = state.get("context") if isinstance(state.get("context"), dict) else {}
+    editor_type = str(state.get("editorType") or context.get("editorType") or "")
     return {
         "sessionId": session_id,
         "documentId": context.get("documentId"),
         "ready": bool(state.get("ready")),
-        "editorType": state.get("editorType") or context.get("editorType"),
+        "editorType": editor_type,
         "documentKey": context.get("documentKey"),
         "fileName": context.get("fileName"),
         "fileType": context.get("fileType"),
         "userId": context.get("userId"),
-        "capabilities": state.get("capabilities"),
+        "capabilities": (
+            project_public_capabilities(editor_type, state.get("capabilities"))
+            if editor_type in PREFIX_BY_EDITOR
+            else state.get("capabilities")
+        ),
         "contractVersion": state.get("contractVersion"),
         "contractSha256": state.get("contractSha256"),
         "lastSeen": session.get("lastSeen"),
@@ -3001,24 +3113,29 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
 
     params: dict[str, Any] = {}
     argument_normalizations: list[dict[str, Any]] = []
+    editor_type = str((session.get("state") or {}).get("editorType") or "")
+    if editor_type not in ARGUMENT_SCHEMAS_BY_EDITOR:
+        raise BridgeError(400, "EDITOR_MISMATCH", "当前编辑器类型不支持公开工具调用")
     allowed_tools = set(((session.get("state") or {}).get("capabilities") or {}).get("tools") or [])
     if method == "executeTool":
-        name = str(payload.get("name", "")).strip()
+        public_name = str(payload.get("name", "")).strip()
+        name = internal_tool_name(editor_type, public_name)
         if name not in allowed_tools:
-            raise BridgeError(400, "TOOL_NOT_ALLOWED", f"当前编辑器不允许工具：{name or 'unknown'}")
+            raise BridgeError(400, "TOOL_NOT_ALLOWED", f"当前编辑器不允许公开工具：{public_name or 'unknown'}")
         arguments = bridge_parse_json_parameter(payload, "arguments", "argumentsJson", dict, {})
         require_arguments_within_limit(
             arguments,
             [{"name": name, "arguments": arguments}],
             "arguments",
         )
-        editor_type = (session.get("state") or {}).get("editorType")
-        if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
+        try:
             normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
                 editor_type,
                 [{"name": name, "arguments": arguments}],
             )
             arguments = normalized_calls[0]["arguments"]
+        except BridgeError as error:
+            raise project_bridge_error(editor_type, error)
         if editor_type == "cell":
             require_sheets_runtime_capabilities(
                 [{"name": name, "arguments": arguments}],
@@ -3026,23 +3143,25 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
             )
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
-        tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
-        if not tool_calls or len(tool_calls) > MAX_TOOL_CALLS:
+        public_tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
+        if not public_tool_calls or len(public_tool_calls) > MAX_TOOL_CALLS:
             raise BridgeError(
                 400,
                 "INVALID_TOOL_CALL",
                 f"toolCalls 数量必须为 1 到 {MAX_TOOL_CALLS}",
             )
+        tool_calls = internalize_public_tool_calls(editor_type, public_tool_calls)
         for call in tool_calls:
             if not isinstance(call, dict) or call.get("name") not in allowed_tools:
                 raise BridgeError(400, "TOOL_NOT_ALLOWED", "批量调用包含当前编辑器不允许的工具")
         require_arguments_within_limit(tool_calls, tool_calls, "toolCalls")
-        editor_type = (session.get("state") or {}).get("editorType")
-        if editor_type in ARGUMENT_SCHEMAS_BY_EDITOR:
+        try:
             tool_calls, argument_normalizations = require_valid_editor_tool_calls(
                 editor_type,
                 tool_calls,
             )
+        except BridgeError as error:
+            raise project_bridge_error(editor_type, error)
         if editor_type == "cell":
             require_sheets_runtime_capabilities(
                 tool_calls,
@@ -3075,14 +3194,14 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
                 "EDITOR_MISMATCH",
                 "批量预检只支持当前 Word、PPTX 或 XLSX 编辑器会话",
             )
-        tool_calls = bridge_parse_json_parameter(
+        public_tool_calls = bridge_parse_json_parameter(
             payload,
             "toolCalls",
             "toolCallsJson",
             list,
             [],
         )
-        if not tool_calls or len(tool_calls) > MAX_TOOL_CALLS:
+        if not public_tool_calls or len(public_tool_calls) > MAX_TOOL_CALLS:
             raise BridgeError(
                 400,
                 "INVALID_TOOL_CALL",
@@ -3091,6 +3210,7 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
         allowed_tools = set(
             ((session.get("state") or {}).get("capabilities") or {}).get("tools") or []
         )
+        tool_calls = internalize_public_tool_calls(editor_type, public_tool_calls)
         for call in tool_calls:
             if not isinstance(call, dict) or call.get("name") not in allowed_tools:
                 raise BridgeError(
@@ -3099,10 +3219,13 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
                     "批量调用包含当前编辑器不允许的工具",
                 )
         require_arguments_within_limit(tool_calls, tool_calls, "toolCalls")
-        normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
-            editor_type,
-            tool_calls
-        )
+        try:
+            normalized_calls, argument_normalizations = require_valid_editor_tool_calls(
+                editor_type,
+                tool_calls
+            )
+        except BridgeError as error:
+            raise project_bridge_error(editor_type, error)
         if editor_type == "cell":
             require_sheets_runtime_capabilities(
                 normalized_calls,
@@ -3201,7 +3324,10 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
                 editor_error_http_status(code),
                 code,
                 str(error.get("message") or "当前编辑器执行失败"),
-                error.get("details"),
+                project_public_tool_fields(
+                    str((session.get("state") or {}).get("editorType") or ""),
+                    error.get("details"),
+                ),
             )
         result_session_id = str(command.get("sessionId") or session_id)
         result_session = (
@@ -3229,7 +3355,10 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
             "cached": cached,
             "requestId": command_data["requestId"],
             "session": bridge_public_session(result_session_id, result_session),
-            "result": response.get("result"),
+            "result": project_public_tool_fields(
+                str((result_session.get("state") or {}).get("editorType") or ""),
+                response.get("result"),
+            ),
             "timingsMs": bridge_timings,
             "argumentNormalizations": command.get("argumentNormalizations", []),
             **contract_identity(),
@@ -4233,7 +4362,7 @@ def persist_callback_document(
         with document_save_lock(destination):
             request = urllib.request.Request(
                 safe_url,
-                headers={"User-Agent": "OnlyOfficeCopilotStorage/0.1.0"},
+                headers={"User-Agent": "OnlyOfficeCopilotStorage/0.2.0"},
                 method="GET",
             )
             with urllib.request.urlopen(request, timeout=45) as response:
