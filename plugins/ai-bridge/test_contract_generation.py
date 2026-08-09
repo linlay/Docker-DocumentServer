@@ -259,6 +259,96 @@ class ContractGenerationTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, second.stdout)
 
+    def test_asset_revision_is_content_addressed_and_order_independent(self) -> None:
+        first = sync_contract.compute_asset_revision(
+            "0.2.1",
+            {"b.js": "second\n", "a.js": "first\n"},
+        )
+        reordered = sync_contract.compute_asset_revision(
+            "0.2.1",
+            {"a.js": "first\n", "b.js": "second\n"},
+        )
+        changed = sync_contract.compute_asset_revision(
+            "0.2.1",
+            {"a.js": "first\n", "b.js": "changed\n"},
+        )
+
+        self.assertEqual(first, reordered)
+        self.assertNotEqual(first, changed)
+        self.assertRegex(first, r"^0\.2\.1-[0-9a-f]{64}$")
+
+    def test_runtime_asset_revision_covers_every_browser_bridge(self) -> None:
+        artifacts = sync_contract.build_artifacts(self.contract, None)
+        config = json.loads(artifacts[sync_contract.CONFIG_PATH])
+        revision = config["variations"][0]["url"].split("?v=", 1)[1]
+        index_revisions = re.findall(
+            r"[?&]v=([^&\"'\s<>]+)",
+            artifacts[sync_contract.INDEX_PATH],
+        )
+        copilot_match = re.search(
+            r'^EDITOR_ASSET_REVISION = "([^"]+)"$',
+            artifacts[sync_contract.COPILOT_SERVER_PATH],
+            re.MULTILINE,
+        )
+
+        self.assertEqual(index_revisions, [revision] * 4)
+        self.assertIsNotNone(copilot_match)
+        self.assertEqual(copilot_match.group(1), revision)
+        self.assertRegex(revision, r"^0\.2\.1-[0-9a-f]{64}$")
+
+        normalized_config = sync_contract.replace_asset_revision_queries(
+            artifacts[sync_contract.CONFIG_PATH],
+            sync_contract.ASSET_REVISION_PLACEHOLDER,
+        )
+        normalized_index = sync_contract.replace_asset_revision_queries(
+            artifacts[sync_contract.INDEX_PATH],
+            sync_contract.ASSET_REVISION_PLACEHOLDER,
+        )
+        sources = sync_contract.runtime_asset_sources(
+            self.contract,
+            artifacts,
+            normalized_config,
+            normalized_index,
+        )
+        self.assertEqual(
+            set(sources),
+            {
+                "public-api.json",
+                "plugin.js",
+                "host-bridge.js",
+                "client-sdk.js",
+                "config.json",
+                "index.html",
+                "bridges/word-bridge.js",
+                "bridges/slides-bridge.js",
+                "bridges/sheets-bridge.js",
+                "editor-shell.js",
+                "local-guest.js",
+            },
+        )
+        changed_sources = dict(sources)
+        changed_sources["bridges/sheets-bridge.js"] += "\n// changed"
+        self.assertNotEqual(
+            sync_contract.compute_asset_revision(self.contract["version"], sources),
+            sync_contract.compute_asset_revision(
+                self.contract["version"],
+                changed_sources,
+            ),
+        )
+
+    def test_manual_revision_tokens_are_replaced_atomically(self) -> None:
+        source = (
+            '<script src="plugin.js?v=0.2.1-rev2"></script>\n'
+            '<script src="bridges/sheets-bridge.js?v=stale"></script>\n'
+        )
+        rendered = sync_contract.replace_asset_revision_queries(
+            source,
+            "0.2.1-" + "a" * 64,
+        )
+        self.assertNotIn("rev2", rendered)
+        self.assertNotIn("v=stale", rendered)
+        self.assertEqual(rendered.count("v=0.2.1-" + "a" * 64), 2)
+
     def test_httpx_toml_uses_anonymous_document_hub_transport(
         self,
     ) -> None:
@@ -375,7 +465,9 @@ class ContractGenerationTests(unittest.TestCase):
                     f'name: {config["skill"]}\n'
                     "description: Example\n"
                     "---\n\n"
-                    "# Body\n",
+                    "# Body\n\n"
+                    "`DocumentServerPublicOrigin` 是内部实现细节，不得用 `curl` 探测。\n"
+                    "session 失败时最多重试一次。\n",
                     encoding="utf-8",
                 )
 
@@ -460,6 +552,26 @@ class ContractGenerationTests(unittest.TestCase):
                         "https://office.example.test",
                     )
                 scripts_root.rmdir()
+
+    def test_generation_rejects_missing_internal_service_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            zenmind_root = Path(directory)
+            for config in sync_contract.EDITOR_CONFIG.values():
+                skill_root = zenmind_root / "skills-center" / config["skill"]
+                skill_root.mkdir(parents=True)
+                (skill_root / "SKILL.md").write_text(
+                    "---\nname: example\n---\n\n# Body\n",
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "must keep the internal-service boundary",
+            ):
+                sync_contract.build_artifacts(
+                    self.contract,
+                    zenmind_root,
+                    "https://office.example.test",
+                )
 
     def test_httpx_base_url_rejects_non_origin_values(self) -> None:
         invalid_values = (

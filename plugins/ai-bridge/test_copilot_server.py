@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import re
 import socket
 import struct
 import tempfile
@@ -155,32 +156,25 @@ class ContractAlignmentTests(unittest.TestCase):
 
     def test_static_asset_cache_revision_is_consistent(self):
         base_dir = os.path.dirname(__file__)
-        editor_revision = "0.2.1-rev1"
-        word_bridge_revision = "0.2.1-rev2"
-        plugin_config_revision = "0.2.1-rev4"
-        stale_revision = "0.2.1-rev0"
-        paths = [
-            "index.html",
-            "README.md",
-            "INTEGRATION.zh-CN.md",
-        ]
-        for relative_path in paths:
-            with self.subTest(path=relative_path):
-                with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
-                    contents = stream.read()
-                self.assertIn(editor_revision, contents)
-                self.assertNotIn(stale_revision, contents)
         with open(os.path.join(base_dir, "index.html"), encoding="utf-8") as stream:
             plugin_index = stream.read()
-        self.assertIn(
-            f'bridges/word-bridge.js?v={word_bridge_revision}',
+        revisions = re.findall(
+            r'[?&]v=([^&"\'\s<>]+)',
             plugin_index,
         )
         with open(os.path.join(base_dir, "config.json"), encoding="utf-8") as stream:
-            plugin_config = stream.read()
-        self.assertIn(plugin_config_revision, plugin_config)
-        self.assertNotIn(stale_revision, plugin_config)
-        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, editor_revision)
+            plugin_config = json.load(stream)
+        config_revision = plugin_config["variations"][0]["url"].split("?v=", 1)[1]
+
+        self.assertEqual(revisions, [config_revision] * 4)
+        self.assertRegex(config_revision, r"^0\.2\.1-[0-9a-f]{64}$")
+        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, config_revision)
+        for relative_path in ("README.md", "INTEGRATION.zh-CN.md"):
+            with self.subTest(path=relative_path):
+                with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
+                    contents = stream.read()
+                self.assertIn("?v=<asset-revision>", contents)
+                self.assertNotRegex(contents, r"\?v=[^\s\"']*-rev\d+")
 
     def test_word_model_tools_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")

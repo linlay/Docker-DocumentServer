@@ -26,6 +26,15 @@ HOST_PATH = BRIDGE_ROOT / "host-bridge.js"
 CLIENT_PATH = BRIDGE_ROOT / "client-sdk.js"
 CONFIG_PATH = BRIDGE_ROOT / "config.json"
 INDEX_PATH = BRIDGE_ROOT / "index.html"
+COPILOT_SERVER_PATH = BRIDGE_ROOT / "copilot_server.py"
+STATIC_RUNTIME_PATHS = (
+    BRIDGE_ROOT / "bridges" / "word-bridge.js",
+    BRIDGE_ROOT / "bridges" / "slides-bridge.js",
+    BRIDGE_ROOT / "bridges" / "sheets-bridge.js",
+    BRIDGE_ROOT / "editor-shell.js",
+    BRIDGE_ROOT / "local-guest.js",
+)
+ASSET_REVISION_PLACEHOLDER = "__AI_BRIDGE_ASSET_REVISION__"
 TYPE_START = "// <ai-bridge-generated:tool-arguments>"
 TYPE_END = "// </ai-bridge-generated:tool-arguments>"
 PLUGIN_START = "  // <ai-bridge-generated:contract-runtime>"
@@ -117,6 +126,61 @@ def canonical_json(value: Any) -> str:
 
 def contract_sha256(contract: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(contract).encode("utf-8")).hexdigest()
+
+
+def replace_asset_revision_queries(source: str, revision: str) -> str:
+    """Replace every existing v query parameter with one atomic asset revision."""
+    return re.sub(
+        r"([?&]v=)[^&\"'\s<>]+",
+        lambda match: match.group(1) + revision,
+        source,
+    )
+
+
+def compute_asset_revision(version: str, sources: dict[str, str]) -> str:
+    """Return a deterministic revision for an ordered set of browser assets."""
+    digest = hashlib.sha256()
+    for name in sorted(sources):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(sources[name].encode("utf-8"))
+        digest.update(b"\0")
+    return f"{version}-{digest.hexdigest()}"
+
+
+def runtime_asset_sources(
+    contract: dict[str, Any],
+    generated_artifacts: dict[Path, str],
+    normalized_config: str,
+    normalized_index: str,
+) -> dict[str, str]:
+    sources = {
+        "public-api.json": canonical_json(contract) + "\n",
+        "plugin.js": generated_artifacts[PLUGIN_PATH],
+        "host-bridge.js": generated_artifacts[HOST_PATH],
+        "client-sdk.js": generated_artifacts[CLIENT_PATH],
+        "config.json": normalized_config,
+        "index.html": normalized_index,
+    }
+    sources.update(
+        {
+            str(path.relative_to(BRIDGE_ROOT)): path.read_text(encoding="utf-8")
+            for path in STATIC_RUNTIME_PATHS
+        }
+    )
+    return sources
+
+
+def replace_editor_asset_revision(source: str, revision: str) -> str:
+    rendered, count = re.subn(
+        r'^EDITOR_ASSET_REVISION = "[^"]+"$',
+        f'EDITOR_ASSET_REVISION = "{revision}"',
+        source,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ValueError("copilot_server.py must define one EDITOR_ASSET_REVISION")
+    return rendered
 
 
 def json_literal(value: Any) -> str:
@@ -1099,26 +1163,41 @@ def build_artifacts(
     config["version"] = contract["version"]
     for variation in config.get("variations") or []:
         if isinstance(variation, dict) and isinstance(variation.get("url"), str):
-            variation["url"] = re.sub(
-                r"([?&]v=)[^-&]+(-rev\d+)?",
-                lambda match: (
-                    match.group(1)
-                    + contract["version"]
-                    + (match.group(2) or "-rev1")
-                ),
+            normalized_url = replace_asset_revision_queries(
                 variation["url"],
+                ASSET_REVISION_PLACEHOLDER,
             )
-    artifacts[CONFIG_PATH] = (
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n"
-    )
-    artifacts[INDEX_PATH] = re.sub(
-        r"([?&]v=)[^-\"&]+(-rev\d+)?",
-        lambda match: (
-            match.group(1)
-            + contract["version"]
-            + (match.group(2) or "-rev1")
-        ),
+            if normalized_url == variation["url"]:
+                raise ValueError("every plugin variation URL must include a v query parameter")
+            variation["url"] = normalized_url
+    normalized_config = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+    normalized_index = replace_asset_revision_queries(
         INDEX_PATH.read_text(encoding="utf-8"),
+        ASSET_REVISION_PLACEHOLDER,
+    )
+    if normalized_index.count(f"v={ASSET_REVISION_PLACEHOLDER}") != 4:
+        raise ValueError("index.html must version all four local bridge scripts")
+    revision_sources = runtime_asset_sources(
+        contract,
+        artifacts,
+        normalized_config,
+        normalized_index,
+    )
+    asset_revision = compute_asset_revision(
+        contract["version"],
+        revision_sources,
+    )
+    artifacts[CONFIG_PATH] = normalized_config.replace(
+        ASSET_REVISION_PLACEHOLDER,
+        asset_revision,
+    )
+    artifacts[INDEX_PATH] = normalized_index.replace(
+        ASSET_REVISION_PLACEHOLDER,
+        asset_revision,
+    )
+    artifacts[COPILOT_SERVER_PATH] = replace_editor_asset_revision(
+        COPILOT_SERVER_PATH.read_text(encoding="utf-8"),
+        asset_revision,
     )
     if zenmind_root is None:
         return artifacts
@@ -1164,6 +1243,23 @@ def validate_skill_layout(zenmind_root: Path) -> None:
         paths = ", ".join(str(path) for path in forbidden)
         raise ValueError(
             "generated online skills must not contain scripts directories: "
+            + paths
+        )
+
+    missing_internal_boundary = []
+    for config in EDITOR_CONFIG.values():
+        skill_path = zenmind_root / "skills-center" / config["skill"] / "SKILL.md"
+        body = skill_path.read_text(encoding="utf-8")
+        if (
+            "DocumentServerPublicOrigin" not in body
+            or "不得用 `curl`" not in body
+            or "重试一次" not in body
+        ):
+            missing_internal_boundary.append(skill_path)
+    if missing_internal_boundary:
+        paths = ", ".join(str(path) for path in missing_internal_boundary)
+        raise ValueError(
+            "generated online skills must keep the internal-service boundary and bounded session retry policy: "
             + paths
         )
 

@@ -1288,6 +1288,57 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
   );
 });
 
+test("contract mismatch is terminal and reports one Relay state without registering", async () => {
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    dropPluginHello: true,
+    pluginSetInterval: () => 0,
+    pluginClearInterval: () => {},
+    hostFetch: async () => {
+      throw new Error("contract mismatch must stop before Relay registration");
+    },
+  });
+  const mismatchMessage = {
+    source: "ai-bridge-plugin",
+    pluginGuid: TEST_PLUGIN_GUID,
+    protocolVersion: 1,
+    contractSha256: "0".repeat(64),
+  };
+
+  harness.hostWindow.dispatch("message", {
+    origin: "https://docs.test",
+    source: harness.pluginHandle,
+    data: mismatchMessage,
+  });
+  harness.hostWindow.dispatch("message", {
+    origin: "https://docs.test",
+    source: harness.pluginHandle,
+    data: mismatchMessage,
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "contract-mismatch");
+  await assert.rejects(
+    harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 }),
+    error => error && error.code === "CONTRACT_MISMATCH",
+  );
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  assert.equal(harness.documentElement.dataset.aiBridgeState, "contract-mismatch");
+  assert.deepEqual(harness.hostRelayPaths, []);
+  assert.deepEqual(
+    harness.hostWindow.dispatchedEvents
+      .filter(event => event.type === "ai-bridge-relay-state")
+      .map(event => event.detail.code
+        ? { state: event.detail.state, code: event.detail.code }
+        : { state: event.detail.state }),
+    [
+      { state: "registering" },
+      { state: "contract-mismatch", code: "CONTRACT_MISMATCH" },
+    ],
+  );
+});
+
 test("explicit HTTP opt-in does not start Relay on a public host", async () => {
   const harness = createHarness({
     hostname: "office.test",

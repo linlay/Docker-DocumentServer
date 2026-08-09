@@ -40,6 +40,9 @@
   let capabilityProbedAt = null;
   let saveStatus = "idle";
   let saveStatusAt = Date.now();
+  let bridgeTerminalError = null;
+  let relayStateValue = null;
+  let relayStateCode = null;
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -107,6 +110,19 @@
       try { listener(detail); } catch (error) { window.setTimeout(function () { throw error; }, 0); }
     }
     window.dispatchEvent(new CustomEvent(`ai-bridge-${name}`, { detail }));
+  }
+
+  function setRelayState(value, code) {
+    if (document.documentElement && document.documentElement.dataset) {
+      document.documentElement.dataset.aiBridgeRelayState = value;
+    }
+    const normalizedCode = code || null;
+    if (relayStateValue === value && relayStateCode === normalizedCode) return;
+    relayStateValue = value;
+    relayStateCode = normalizedCode;
+    const detail = { state: value };
+    if (code) detail.code = code;
+    window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", { detail }));
   }
 
   function createRequestId(prefix) {
@@ -292,8 +308,9 @@
 
   function waitUntilReady(timeoutMs) {
     if (ready) return Promise.resolve();
+    if (bridgeTerminalError) return Promise.reject(bridgeTerminalError);
     return new Promise(function (resolve, reject) {
-      const waiter = { resolve, reject };
+      const waiter = {};
       const timeout = window.setTimeout(function () {
         readyWaiters.delete(waiter);
         reject(bridgeError("NOT_READY", "ai-bridge 插件尚未就绪"));
@@ -302,9 +319,32 @@
         window.clearTimeout(timeout);
         resolve();
       };
+      waiter.reject = function (error) {
+        window.clearTimeout(timeout);
+        reject(error);
+      };
       readyWaiters.add(waiter);
       send({ type: "host-ready" });
     });
+  }
+
+  function markContractMismatch(actualSha256) {
+    if (bridgeTerminalError) return;
+    ready = false;
+    bridgeTerminalError = bridgeError(
+      "CONTRACT_MISMATCH",
+      "ai-bridge 插件资源版本与页面不一致，请关闭并重新打开文档",
+      {
+        details: {
+          expectedContractSha256: CONTRACT_SHA256,
+          actualContractSha256: actualSha256 || null,
+        },
+      },
+    );
+    document.documentElement.dataset.aiBridgeState = "contract-mismatch";
+    setRelayState("contract-mismatch", "CONTRACT_MISMATCH");
+    for (const waiter of readyWaiters) waiter.reject(bridgeTerminalError);
+    readyWaiters.clear();
   }
 
   function markReady(message) {
@@ -312,10 +352,10 @@
     bridgeContractVersion = message.contractVersion || message.pluginVersion || VERSION;
     bridgeContractSha256 = message.contractSha256 || CONTRACT_SHA256;
     if (bridgeContractSha256 !== CONTRACT_SHA256) {
-      ready = false;
-      document.documentElement.dataset.aiBridgeState = "contract-mismatch";
+      markContractMismatch(bridgeContractSha256);
       return;
     }
+    if (bridgeTerminalError) return;
     ready = true;
     editorType = message.editorType || editorType;
     bridgeCapabilities = message.capabilities || bridgeCapabilities;
@@ -333,7 +373,7 @@
     if (!message || message.source !== "ai-bridge-plugin") return;
     if (message.pluginGuid !== PLUGIN_GUID || message.protocolVersion !== PROTOCOL_VERSION) return;
     if (message.contractSha256 && message.contractSha256 !== CONTRACT_SHA256) {
-      document.documentElement.dataset.aiBridgeState = "contract-mismatch";
+      markContractMismatch(message.contractSha256);
       return;
     }
     if (pluginHandshake.strict) {
@@ -1086,15 +1126,6 @@
     let stopped = false;
     let retryDelayMs = 1000;
 
-    function setRelayState(value, code) {
-      if (document.documentElement && document.documentElement.dataset) {
-        document.documentElement.dataset.aiBridgeRelayState = value;
-      }
-      const detail = { state: value };
-      if (code) detail.code = code;
-      window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", { detail }));
-    }
-
     function credentialReloadKey() {
       const snapshot = stateSnapshot();
       const context = snapshot && snapshot.context || {};
@@ -1241,6 +1272,10 @@
           }
           if (code === "SESSION_SUPERSEDED") {
             stopRelay("superseded", code);
+            return;
+          }
+          if (code === "CONTRACT_MISMATCH") {
+            stopRelay("contract-mismatch", code);
             return;
           }
           if (
