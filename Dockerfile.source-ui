@@ -8,7 +8,7 @@ USER root
 COPY patches/onlyoffice-web-apps-9.4.0-source-ui.patch /tmp/onlyoffice-web-apps-source-ui.patch
 
 RUN set -eux; \
-    installed_version="$(dpkg-query -W -f='$${Version}' onlyoffice-documentserver)"; \
+    installed_version="$(dpkg-query -W -f='${Version}' onlyoffice-documentserver)"; \
     test "${installed_version}" = "${ONLYOFFICE_PACKAGE_VERSION}"; \
     patch --batch --forward -p1 \
       -d /var/www/onlyoffice/documentserver/web-apps \
