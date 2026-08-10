@@ -13,10 +13,11 @@ the Document, Spreadsheet, and Presentation editors:
   ribbon duplicates.
 - `compactHeaderQuickAccessPrint`: set to `false` to omit Print from the native
   quick-access group while leaving File-menu printing available.
-- `compactHeaderHttpxIndicator`: reserve a small native status slot before Save;
-  it is shown as a green dot only after a trusted `httpx-relay-state` message
-  reports `ready`. `compactHeaderHttpxParentOrigin` restricts that message and
-  the initial status request to the configured document-hub origin.
+- `compactHeaderHttpxIndicator`: reserve a small, vertically centered native
+  status slot after Search; it is shown as a green dot only after a trusted
+  `httpx-relay-state` message reports `ready`.
+  `compactHeaderHttpxParentOrigin` restricts that message and the initial status
+  request to the configured document-hub origin.
 - `compactHeaderHideLogo`: do not mount the ONLYOFFICE logo into the compact
   toolbar row.
 - `forceCompactToolbar`: use the signed `compactToolbar` setting instead of a

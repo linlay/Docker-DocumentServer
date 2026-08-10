@@ -1,20 +1,21 @@
 --- a/apps/common/main/lib/view/Header.js
 +++ b/apps/common/main/lib/view/Header.js
-@@ -101,0 +102,12 @@
+@@ -101,0 +102,9 @@
 +                                '</div>' +
 +                                '<% if (compactHeaderQuickAccess) { %>' +
 +                                '<div class="hedset" role="menubar" aria-label="<%= scope.ariaQuickAccessToolbar %>">' +
-+                                    '<% if (compactHeaderHttpxIndicator) { %>' +
-+                                    '<div class="btn-slot" id="slot-btn-dt-httpx-status" title="HTTPX" aria-label="HTTPX" style="display:none;"><span aria-hidden="true" style="display:block;width:8px;height:8px;margin:16px 7px 0;border-radius:50%;background:#35a56f;"></span></div>' +
-+                                    '<% } %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-save" data-layout-name="header-save"></div>' +
 +                                    '<% if (compactHeaderQuickAccessPrint) { %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-print"></div>' +
 +                                    '<% } %>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-undo"></div>' +
 +                                    '<div class="btn-slot" id="slot-btn-dt-redo"></div>' +
-@@ -102,0 +115 @@
+@@ -102,0 +112 @@
 +                                '<% } %>' +
+@@ -128,0 +139,3 @@
++                                    '<% if (compactHeaderHttpxIndicator) { %>' +
++                                    '<div class="btn-slot" id="slot-btn-dt-httpx-status" title="HTTPX" aria-label="HTTPX" style="display:none;position:relative;width:22px;height:40px;"><span aria-hidden="true" style="position:absolute;top:50%;left:50%;width:8px;height:8px;transform:translate(-50%,-50%);border-radius:50%;background:#35a56f;"></span></div>' +
++                                    '<% } %>' +
 @@ -902 +915,5 @@
 -                        textShare: this.textShare
 +                        textShare: this.textShare,
