@@ -2147,6 +2147,14 @@ export type AiBridgeGeneratedWordAddImageArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   widthMm?: number;
   heightMm?: number;
@@ -2514,6 +2522,14 @@ export type AiBridgeGeneratedWordAddOleObjectArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   data: string;
   applicationId: string;
@@ -2656,6 +2672,14 @@ export type AiBridgeGeneratedWordSetWatermarkArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   opacity?: number;
   diagonal?: boolean;
@@ -3011,6 +3035,11 @@ export type AiBridgeGeneratedSlidesInspectArgs = {
 export type AiBridgeGeneratedSlidesInspectLayoutsArgs = {
   masterIndex?: number;
   includeObjects?: boolean;
+  includeRaw?: boolean;
+};
+export type AiBridgeGeneratedSlidesInspectBackgroundsArgs = {
+  slide?: number;
+  includeTemplates?: boolean;
   includeRaw?: boolean;
 };
 export type AiBridgeGeneratedSlidesInspectThemesArgs = {
@@ -3499,6 +3528,14 @@ export type AiBridgeGeneratedSlidesSetTemplateBackgroundArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   fillMode?: "stretch" | "tile";
 } & ({ mode: "image"; source: ({
@@ -3507,6 +3544,14 @@ export type AiBridgeGeneratedSlidesSetTemplateBackgroundArgs = {
 } | {
   type: "dataUrl";
   dataUrl: string;
+} | {
+  type: "relayAsset";
+  path: string;
+  assetToken: string;
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+  widthPx: number;
+  heightPx: number;
+  assetId: string;
 }); } | { mode?: Exclude<"custom" | "image" | "clear" | "master", "image">; }) & ({ fill: ({
   type: "none";
 } | {
@@ -4480,6 +4525,14 @@ export type AiBridgeGeneratedSlidesAddImageArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   slide: number;
   xMm?: number;
@@ -4499,6 +4552,14 @@ export type AiBridgeGeneratedSlidesAddImageShapeArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   slide: number;
   shapeType?: string;
@@ -4557,6 +4618,14 @@ export type AiBridgeGeneratedSlidesAddOleObjectArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   slide: number;
   data: string;
@@ -4605,6 +4674,14 @@ export type AiBridgeGeneratedSlidesSetBackgroundArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   fillMode?: "stretch" | "tile";
 } & ({ mode: "image"; source: ({
@@ -4613,6 +4690,14 @@ export type AiBridgeGeneratedSlidesSetBackgroundArgs = {
 } | {
   type: "dataUrl";
   dataUrl: string;
+} | {
+  type: "relayAsset";
+  path: string;
+  assetToken: string;
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+  widthPx: number;
+  heightPx: number;
+  assetId: string;
 }); } | { mode?: Exclude<"custom" | "image" | "clear" | "layout" | "master", "image">; }) & ({ fill: ({
   type: "none";
 } | {
@@ -6398,6 +6483,14 @@ export type AiBridgeGeneratedSheetsManageDrawingArgs = {
   } | {
     type: "dataUrl";
     dataUrl: string;
+  } | {
+    type: "relayAsset";
+    path: string;
+    assetToken: string;
+    mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/svg+xml";
+    widthPx: number;
+    heightPx: number;
+    assetId: string;
   });
   shapeType?: string;
   text?: string;
@@ -7961,6 +8054,7 @@ export interface AiBridgeToolArgumentsMap {
   word_set_document_text: AiBridgeGeneratedWordSetDocumentTextArgs;
   slides_inspect: AiBridgeGeneratedSlidesInspectArgs;
   slides_inspect_layouts: AiBridgeGeneratedSlidesInspectLayoutsArgs;
+  slides_inspect_backgrounds: AiBridgeGeneratedSlidesInspectBackgroundsArgs;
   slides_inspect_themes: AiBridgeGeneratedSlidesInspectThemesArgs;
   slides_inspect_builtin_themes: AiBridgeGeneratedSlidesInspectBuiltinThemesArgs;
   slides_inspect_objects: AiBridgeGeneratedSlidesInspectObjectsArgs;

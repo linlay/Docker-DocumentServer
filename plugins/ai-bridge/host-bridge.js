@@ -3,7 +3,7 @@
 
   const VERSION = "0.2.1";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "c27cbdb14e1c89b3f5a0db9f409089a2eed9f1db7c95d81cfa360547b52ea17a";
+  const CONTRACT_SHA256 = "019326dd5dc714c7776a797aa70d9b0c0df839006027284b8daa92b660e4c173";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -463,6 +463,7 @@
     if (!source || typeof source !== "object" || Array.isArray(source)) {
       throw bridgeError("INVALID_IMAGE_SOURCE", "source 必须是图片来源对象");
     }
+    let asset;
     if (source.type === "url") {
       if (typeof source.url !== "string" || !/^https:\/\//i.test(source.url)) {
         throw bridgeError("INVALID_IMAGE_SOURCE", "外部图片只允许 HTTPS URL");
@@ -471,47 +472,63 @@
       if (typeof source.dataUrl !== "string" || !/^data:(?:image\/(?:png|jpeg|gif|webp)|image\/svg\+xml);base64,/i.test(source.dataUrl)) {
         throw bridgeError("INVALID_IMAGE_SOURCE", "Data URL 必须是受支持图片的 Base64 编码");
       }
+    } else if (source.type === "relayAsset") {
+      asset = {
+        path: source.path,
+        assetToken: source.assetToken,
+        assetId: source.assetId,
+        mimeType: source.mimeType,
+        widthPx: source.widthPx,
+        heightPx: source.heightPx,
+      };
     } else {
-      throw bridgeError("INVALID_IMAGE_SOURCE", "source.type 必须是 url 或 dataUrl");
+      throw bridgeError("INVALID_IMAGE_SOURCE", "source.type 必须是 url、dataUrl 或 relayAsset");
     }
-    if (typeof window.fetch !== "function") {
-      throw bridgeError("IMAGE_FETCH_FAILED", "当前宿主页不支持图片导入请求");
+    if (!asset) {
+      if (typeof window.fetch !== "function") {
+        throw bridgeError("IMAGE_FETCH_FAILED", "当前宿主页不支持图片导入请求");
+      }
+      let response;
+      try {
+        response = await window.fetch(`${imageRelayBaseURL()}/import`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            ...httpRelayHeaders(),
+            "Authorization": `Bearer ${token}`,
+          },
+          body: JSON.stringify({ source }),
+        });
+      } catch (error) {
+        throw bridgeError("IMAGE_FETCH_FAILED", "图片导入服务不可用");
+      }
+      let body;
+      try {
+        body = await response.json();
+      } catch (error) {
+        throw bridgeError("IMAGE_FETCH_FAILED", `图片导入服务返回了无效响应：${response.status}`);
+      }
+      if (!response.ok || !body || body.ok === false) {
+        const serviceError = body && body.error;
+        throw bridgeError(
+          serviceError && serviceError.code || "IMAGE_FETCH_FAILED",
+          serviceError && serviceError.message || `图片导入失败：${response.status}`,
+          { details: serviceError && serviceError.details },
+        );
+      }
+      asset = body.asset;
     }
-    let response;
-    try {
-      response = await window.fetch(`${imageRelayBaseURL()}/import`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          ...httpRelayHeaders(),
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({ source }),
-      });
-    } catch (error) {
-      throw bridgeError("IMAGE_FETCH_FAILED", "图片导入服务不可用");
-    }
-    let body;
-    try {
-      body = await response.json();
-    } catch (error) {
-      throw bridgeError("IMAGE_FETCH_FAILED", `图片导入服务返回了无效响应：${response.status}`);
-    }
-    if (!response.ok || !body || body.ok === false) {
-      const serviceError = body && body.error;
-      throw bridgeError(
-        serviceError && serviceError.code || "IMAGE_FETCH_FAILED",
-        serviceError && serviceError.message || `图片导入失败：${response.status}`,
-        { details: serviceError && serviceError.details },
-      );
-    }
-    const asset = body.asset;
     const configuredAssetPrefix = `${imageRelayBaseURL()}/`;
     if (
       !asset
       || typeof asset.path !== "string"
       || !asset.path.startsWith(configuredAssetPrefix)
       || !/\/[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)(?:\?token=|$)/.test(asset.path)
+      || (source.type === "relayAsset" && (typeof asset.assetToken !== "string" || !asset.assetToken))
+      || (source.type === "relayAsset" && (typeof asset.assetId !== "string" || !/^[0-9a-f]{64}\.(?:png|jpg|gif|webp|svg)$/.test(asset.assetId) || !asset.path.endsWith(`/${asset.assetId}`)))
+      || (asset.assetToken !== undefined && (typeof asset.assetToken !== "string" || !asset.assetToken || asset.assetToken.length > 4096))
+      || typeof asset.mimeType !== "string"
+      || !/^(?:image\/(?:png|jpeg|gif|webp)|image\/svg\+xml)$/.test(asset.mimeType)
       || !Number.isFinite(Number(asset.widthPx))
       || !Number.isFinite(Number(asset.heightPx))
       || Number(asset.widthPx) <= 0

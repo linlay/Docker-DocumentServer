@@ -1134,11 +1134,122 @@
               };
             }
 
-            function describeFill(fill) {
+            function describeFill(fill, includeRaw) {
               if (!fill) return null;
+              var description = { type: safeCall(fill, "GetType") };
+              if (includeRaw !== false) description.raw = serialized(fill);
+              return description;
+            }
+
+            function apiFillFromInternal(uniFill) {
+              if (!uniFill) return null;
+              if (typeof uniFill.GetType === "function") return uniFill;
+              var builder = typeof AscBuilder !== "undefined"
+                ? AscBuilder
+                : (typeof window !== "undefined" ? window.AscBuilder : null);
+              if (!builder || typeof builder.ApiFill !== "function") return null;
+              try {
+                return new builder.ApiFill(uniFill);
+              } catch (_) {
+                return null;
+              }
+            }
+
+            function nativeBackgroundModel(container, kind) {
+              if (!container) return null;
+              if (kind === "slide" && container.Slide) return container.Slide;
+              if (kind === "layout" && container.Layout) return container.Layout;
+              if (kind === "master" && container.Master) return container.Master;
+              return null;
+            }
+
+            function directBackground(nativeModel) {
+              var commonSlideData = nativeModel && nativeModel.cSld;
+              var background = commonSlideData && commonSlideData.Bg;
+              var properties = background && background.bgPr;
               return {
-                type: safeCall(fill, "GetType"),
-                raw: serialized(fill),
+                exists: Boolean(background),
+                fill: properties && properties.Fill ? properties.Fill : null,
+                reference: background && background.bgRef ? background.bgRef : null,
+              };
+            }
+
+            function effectiveBackgroundFill(nativeModel) {
+              if (!nativeModel) return null;
+              try {
+                if (
+                  nativeModel.recalcInfo &&
+                  nativeModel.recalcInfo.recalculateBackground &&
+                  typeof nativeModel.recalculateBackground === "function"
+                ) {
+                  nativeModel.recalculateBackground();
+                }
+              } catch (_) {}
+              return nativeModel.backgroundFill || null;
+            }
+
+            function inheritedBackground(nativeModel, kind) {
+              if (!nativeModel) return null;
+              var layout = kind === "slide" ? nativeModel.Layout : (kind === "layout" ? nativeModel : null);
+              if (layout && kind === "slide") {
+                var layoutBackground = directBackground(layout);
+                if (layoutBackground.exists) {
+                  return { source: "layout", background: layoutBackground, model: layout };
+                }
+              }
+              var master = kind === "master"
+                ? null
+                : (layout && layout.Master ? layout.Master : nativeModel.Master);
+              if (master) {
+                var masterBackground = directBackground(master);
+                if (masterBackground.exists) {
+                  return { source: "master", background: masterBackground, model: master };
+                }
+              }
+              return null;
+            }
+
+            function describeBackground(container, includeRaw, kind) {
+              var fill = safeCall(container, "GetBackground");
+              if (!fill) fill = safeCall(container, "GetBackgroundFill");
+              if (fill) {
+                return {
+                  available: true,
+                  source: kind,
+                  inherited: false,
+                  hasDirectBackground: true,
+                  fill: describeFill(fill, includeRaw),
+                  raw: includeRaw ? serialized(container) : undefined,
+                };
+              }
+
+              var nativeModel = nativeBackgroundModel(container, kind);
+              if (!nativeModel) {
+                return {
+                  available: false,
+                  source: null,
+                  inherited: null,
+                  hasDirectBackground: null,
+                  fill: null,
+                  raw: includeRaw ? serialized(container) : undefined,
+                };
+              }
+
+              var direct = directBackground(nativeModel);
+              var selected = direct.exists
+                ? { source: kind, background: direct, model: nativeModel }
+                : inheritedBackground(nativeModel, kind);
+              var internalFill = selected && selected.background.fill;
+              if (!internalFill) internalFill = effectiveBackgroundFill(nativeModel);
+              var apiFill = apiFillFromInternal(internalFill);
+              return {
+                available: true,
+                source: selected ? selected.source : "default",
+                inherited: Boolean(selected && selected.source !== kind),
+                hasDirectBackground: direct.exists,
+                fill: describeFill(apiFill, includeRaw),
+                hasThemeReference: Boolean(direct.reference),
+                raw: includeRaw ? serialized(container) : undefined,
               };
             }
 
@@ -1975,6 +2086,54 @@
                     name: call.name,
                     masterCount: masterCount(),
                     masters: inspectedMasters,
+                  });
+                  break;
+                }
+
+                case "slides_inspect_backgrounds": {
+                  var firstBackgroundSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
+                  var lastBackgroundSlide = hasOwn(args, "slide") ? firstBackgroundSlide + 1 : slideCount();
+                  if (firstBackgroundSlide < 0 || lastBackgroundSlide > slideCount()) {
+                    throw new Error("幻灯片页码超出范围");
+                  }
+                  var backgroundSlides = [];
+                  for (var backgroundSlideIndex = firstBackgroundSlide; backgroundSlideIndex < lastBackgroundSlide; backgroundSlideIndex += 1) {
+                    backgroundSlides.push({
+                      slide: backgroundSlideIndex + 1,
+                      background: describeBackground(
+                        presentation.GetSlideByIndex(backgroundSlideIndex),
+                        Boolean(args.includeRaw),
+                        "slide"
+                      ),
+                    });
+                  }
+                  var backgroundMasters;
+                  if (args.includeTemplates) {
+                    backgroundMasters = [];
+                    for (var backgroundMasterIndex = 0; backgroundMasterIndex < masterCount(); backgroundMasterIndex += 1) {
+                      var backgroundMaster = presentation.GetMaster(backgroundMasterIndex);
+                      var backgroundLayouts = [];
+                      for (var backgroundLayoutIndex = 0; backgroundLayoutIndex < layoutCount(backgroundMaster); backgroundLayoutIndex += 1) {
+                        backgroundLayouts.push({
+                          layoutIndex: backgroundLayoutIndex + 1,
+                          background: describeBackground(
+                            backgroundMaster.GetLayout(backgroundLayoutIndex),
+                            Boolean(args.includeRaw),
+                            "layout"
+                          ),
+                        });
+                      }
+                      backgroundMasters.push({
+                        masterIndex: backgroundMasterIndex + 1,
+                        background: describeBackground(backgroundMaster, Boolean(args.includeRaw), "master"),
+                        layouts: backgroundLayouts,
+                      });
+                    }
+                  }
+                  results.push({
+                    name: call.name,
+                    slides: backgroundSlides,
+                    masters: backgroundMasters,
                   });
                   break;
                 }

@@ -884,7 +884,7 @@ def action_params(kind: str) -> list[str]:
 
 
 def document_path_source(action: str) -> str:
-    if action not in {"session", "validate", "execute", "commit", "qa"}:
+    if action not in {"session", "validate", "execute", "commit", "qa", "images/import"}:
         raise ValueError(f"unsupported document action: {action}")
     command = (
         "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
@@ -894,6 +894,26 @@ def document_path_source(action: str) -> str:
         f"printf \"%s\" \"/api/v1/documents/$document_id/ai/{action}\""
     )
     return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
+
+
+def local_image_data_url_source() -> str:
+    command = (
+        'image_path=$PPTX_IMAGE_PATH; '
+        'case "$image_path" in /*) ;; *) exit 64 ;; esac; '
+        'test -f "$image_path" -a -r "$image_path" || exit 66; '
+        'image_size=$(wc -c < "$image_path"); '
+        'test "$image_size" -gt 0 -a "$image_size" -le 8388608 || exit 65; '
+        'case "$image_path" in '
+        '*.png|*.PNG) image_mime=image/png ;; '
+        '*.jpg|*.JPG|*.jpeg|*.JPEG) image_mime=image/jpeg ;; '
+        '*.gif|*.GIF) image_mime=image/gif ;; '
+        '*.webp|*.WEBP) image_mime=image/webp ;; '
+        '*.svg|*.SVG) image_mime=image/svg+xml ;; '
+        '*) exit 65 ;; esac; '
+        'printf "data:%s;base64," "$image_mime"; '
+        '/usr/bin/base64 < "$image_path" | tr -d "\\n\\r"'
+    )
+    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 15000, trim = true }"
 
 
 def normalize_httpx_base_url(value: str | None) -> str:
@@ -991,6 +1011,27 @@ def render_toml(
             ),
             'save = { "session.lease" = ".body.sessionLease", "session.contract_sha256" = ".body.contractSha256" }',
             "",
+        ]
+    )
+    if editor == "slide":
+        lines.extend(
+            [
+                "[actions.import_local_image]",
+                'description = "把 PPTX_IMAGE_PATH 指向的本地 PNG/JPEG/GIF/WebP/SVG 安全导入当前在线演示文稿，返回可供图片与背景工具复用的 relayAsset source"',
+                'method = "POST"',
+                f"path = {document_path_source('images/import')}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
+                'body = { source = { type = { from = "literal", value = "dataUrl" }, dataUrl = '
+                + local_image_data_url_source()
+                + " } }",
+                "expect_status = 200",
+                'extract_type = "jq"',
+                'extract_expr = \'\'\'.body.asset | {source:{type:"relayAsset",path:.path,assetToken:.assetToken,assetId:.assetId,mimeType:.mimeType,widthPx:.widthPx,heightPx:.heightPx},expiresAt:.expiresAt}\'\'\'',
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "[actions.get_state]",
             f'description = "读取当前 {label} bridge state 和契约身份"',
             'method = "POST"',
@@ -1307,9 +1348,9 @@ def validate_contract(contract: dict[str, Any]) -> None:
                     f"{editor}.{name} has invalid x-semanticValidators"
                 )
             resolve_schema(schema, contract.get("$defs") or {})
-    if len(names) != 155 or len(names) != len(set(names)):
+    if len(names) != 156 or len(names) != len(set(names)):
         raise ValueError(
-            f"expected 155 unique tools, found {len(names)} total/{len(set(names))} unique"
+            f"expected 156 unique tools, found {len(names)} total/{len(set(names))} unique"
         )
 
 

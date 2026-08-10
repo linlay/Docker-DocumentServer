@@ -618,6 +618,7 @@
       "additionalProperties": false
     },
     "imageSource": {
+      "description": "图片来源：HTTPS URL、Base64 Data URL，或由当前文档的 /ai/images/import 返回的短期 relayAsset。",
       "oneOf": [
         {
           "type": "object",
@@ -649,6 +650,54 @@
             "dataUrl": {
               "type": "string",
               "pattern": "^data:(image/(png|jpeg|gif|webp)|image/svg\\+xml);base64,"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path",
+            "assetToken",
+            "assetId",
+            "mimeType",
+            "widthPx",
+            "heightPx"
+          ],
+          "properties": {
+            "type": {
+              "const": "relayAsset"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/api/v1/editor-relay/images/[0-9a-f]{64}\\.(png|jpg|gif|webp|svg)$"
+            },
+            "assetToken": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "mimeType": {
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+                "image/svg+xml"
+              ]
+            },
+            "widthPx": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "heightPx": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            },
+            "assetId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}\\.(png|jpg|gif|webp|svg)$"
             }
           },
           "additionalProperties": false
@@ -5652,6 +5701,26 @@
         },
         "additionalProperties": false,
         "description": "只读检查 PPT 母版和版式",
+        "x-effects": "read",
+        "x-argumentLimitClass": "standard",
+        "x-semanticValidators": []
+      },
+      "slides_inspect_backgrounds": {
+        "type": "object",
+        "properties": {
+          "slide": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "includeTemplates": {
+            "type": "boolean"
+          },
+          "includeRaw": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "description": "只读检查 PPT 页面以及可选母版、版式的原生背景填充；用于核验图片背景是否真正写入",
         "x-effects": "read",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []

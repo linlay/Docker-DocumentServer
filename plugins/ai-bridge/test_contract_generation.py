@@ -41,7 +41,7 @@ class ContractGenerationTests(unittest.TestCase):
             for editor_tools in self.contract["tools"].values()
             for name, schema in editor_tools.items()
         }
-        self.assertEqual(len(tools), 155)
+        self.assertEqual(len(tools), 156)
         self.assertEqual(self.contract["version"], "0.2.1")
         self.assertEqual(
             self.contract["toolNaming"],
@@ -163,6 +163,24 @@ class ContractGenerationTests(unittest.TestCase):
                 "name": "slides_set_background",
                 "arguments": {
                     "slide": 1,
+                    "mode": "image",
+                    "source": {
+                        "type": "relayAsset",
+                        "path": "/api/v1/editor-relay/images/"
+                        + "a" * 64
+                        + ".png",
+                        "assetToken": "leased-token",
+                        "assetId": "a" * 64 + ".png",
+                        "mimeType": "image/png",
+                        "widthPx": 1600,
+                        "heightPx": 900,
+                    },
+                },
+            },
+            {
+                "name": "slides_set_background",
+                "arguments": {
+                    "slide": 1,
                     "fill": {"type": "solid", "color": "#FFFFFF"},
                 },
             },
@@ -193,6 +211,19 @@ class ContractGenerationTests(unittest.TestCase):
                     "url": "https://images.example.test/background.png",
                 },
                 "fill": {"type": "solid", "color": "#FFFFFF"},
+            },
+            {
+                "slide": 1,
+                "mode": "image",
+                "source": {
+                    "type": "relayAsset",
+                    "path": "/api/v1/editor-relay/images/"
+                    + "a" * 64
+                    + ".png",
+                    "mimeType": "image/png",
+                    "widthPx": 1600,
+                    "heightPx": 900,
+                },
             },
             {
                 "slide": 1,
@@ -528,6 +559,11 @@ class ContractGenerationTests(unittest.TestCase):
                 }
                 if editor == "word":
                     expected_actions.add("qa")
+                if editor == "slide":
+                    expected_actions.add("import_local_image")
+                    self.assertIn("PPTX_IMAGE_PATH", artifacts[toml_path])
+                    self.assertIn("/ai/images/import", artifacts[toml_path])
+                    self.assertIn('type:"relayAsset"', artifacts[toml_path])
                 self.assertEqual(action_names, expected_actions)
 
     def test_generation_rejects_scripts_directories_for_every_online_skill(self) -> None:

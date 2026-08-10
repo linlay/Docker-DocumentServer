@@ -112,6 +112,7 @@ function createHarness(options = {}) {
       getEditorConfig: () => editorConfig,
       clientOrigins: options.clientOrigins || [],
       httpRelay: options.httpRelay,
+      imageBaseUrl: options.imageBaseUrl,
       persistenceBaseUrl: options.persistenceBaseUrl,
       editorSessionId: options.editorSessionId,
       documentId: options.optionsDocumentId,
@@ -2075,6 +2076,52 @@ test("host safely imports slide, master, and layout background images before plu
   assert.ok(harness.executedToolCalls.every(call => call.arguments._image.widthPx === 1600));
   assert.equal(harness.executedToolCalls[0].arguments.fillMode, undefined);
   assert.equal(harness.executedToolCalls[1].arguments.fillMode, "tile");
+});
+
+test("host reuses a leased relay image asset without posting the image again", async () => {
+  const assetId = `${"b".repeat(64)}.png`;
+  const assetPath = `/api/v1/editor-relay/images/${assetId}`;
+  const harness = createHarness({
+    editorType: "slide",
+    imageBaseUrl: "/api/v1/editor-relay/images",
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.equal(requestPath, assetPath);
+      assert.equal(requestOptions.method, "GET");
+      assert.equal(requestOptions.headers["X-AI-Asset-Token"], "leased-asset-token");
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: name => name === "Content-Type" ? "image/png" : null },
+        arrayBuffer: async () => Uint8Array.from([137, 80, 78, 71]).buffer,
+      };
+    },
+  });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await harness.hostWindow.aiBridge.slides.setBackground({
+    slide: 1,
+    mode: "image",
+    source: {
+      type: "relayAsset",
+      path: assetPath,
+      assetToken: "leased-asset-token",
+      assetId,
+      mimeType: "image/png",
+      widthPx: 1600,
+      heightPx: 900,
+    },
+  }, {
+    timeoutMs: 1000,
+    requestId: "slide-background-relay-asset",
+  });
+
+  assert.deepEqual(harness.hostRelayPaths, [assetPath]);
+  assert.equal(harness.executedToolCalls.length, 1);
+  const args = harness.executedToolCalls[0].arguments;
+  assert.equal(args.source, undefined);
+  assert.equal(args._image.assetId, assetId);
+  assert.equal(args._image.transport, "dataUrl");
+  assert.match(args._image.url, /^data:image\/png;base64,/);
 });
 
 test("failed background image import prevents checkpoint and plugin execution", async () => {

@@ -373,6 +373,7 @@ class MockLayout {
     return true;
   }
   SetBackground(fill) { this.background = fill; return true; }
+  GetBackground() { return this.background; }
   ClearBackground() { this.background = null; return true; }
   FollowMasterBackground() { this.background = "master"; return true; }
   ToJSON() { return JSON.stringify({ name: this.name, layoutType: this.layoutType }); }
@@ -415,6 +416,7 @@ class MockMaster {
     return true;
   }
   SetBackground(fill) { this.background = fill; return true; }
+  GetBackground() { return this.background; }
   ClearBackground() { this.background = null; return true; }
   ToJSON() { return JSON.stringify({ layouts: this.layouts.map(layout => layout.name) }); }
 }
@@ -835,6 +837,7 @@ class MockSlide {
     return true;
   }
   SetBackground(fill) { this.background = fill; }
+  GetBackground() { return this.background; }
   ClearBackground() { this.background = null; }
   FollowLayoutBackground() { this.background = "layout"; }
   FollowMasterBackground() { this.background = "master"; }
@@ -1463,6 +1466,10 @@ test("Slides bridge sets native stretch and tile image backgrounds without addin
       name: "slides_set_background",
       arguments: { slide: 2, mode: "image", fillMode: "tile", _image: secondAsset },
     },
+    {
+      name: "slides_inspect_backgrounds",
+      arguments: { includeTemplates: true },
+    },
   ]);
 
   assert.equal(result.changed, 2);
@@ -1482,7 +1489,40 @@ test("Slides bridge sets native stretch and tile image backgrounds without addin
   });
   assert.equal(result.results[0].fillMode, "stretch");
   assert.equal(result.results[1].fillMode, "tile");
+  assert.equal(result.results[2].slides[0].background.available, true);
+  assert.equal(result.results[2].slides[0].background.fill.type, "blip");
+  assert.equal(result.results[2].slides[1].background.fill.type, "blip");
+  assert.equal(result.results[2].masters.length, 1);
   assert.equal(JSON.stringify(result.results).includes("token=signed"), false);
+});
+
+test("Slides bridge reads backgrounds through the installed SDK model fallback", async () => {
+  const { bridge, first } = slidesHarness();
+  first.GetBackground = undefined;
+  first.GetBackgroundFill = undefined;
+  first.Slide = {
+    cSld: {
+      Bg: {
+        bgPr: {
+          Fill: mockFill("blip", { url: "data:image/jpeg;base64,not-returned" }),
+        },
+      },
+    },
+  };
+
+  const result = await bridge.execute([{
+    name: "slides_inspect_backgrounds",
+    arguments: { slide: 1, includeRaw: false },
+  }]);
+  const background = result.results[0].slides[0].background;
+
+  assert.equal(background.available, true);
+  assert.equal(background.source, "slide");
+  assert.equal(background.inherited, false);
+  assert.equal(background.hasDirectBackground, true);
+  assert.equal(background.fill.type, "blip");
+  assert.equal(Object.hasOwn(background.fill, "raw"), false);
+  assert.equal(JSON.stringify(background).includes("base64"), false);
 });
 
 test("Slides bridge sets native image backgrounds on masters and layouts", async () => {
