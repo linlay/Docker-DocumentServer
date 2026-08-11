@@ -3,7 +3,7 @@
 
   const VERSION = "0.2.1";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "019326dd5dc714c7776a797aa70d9b0c0df839006027284b8daa92b660e4c173";
+  const CONTRACT_SHA256 = "70ec17d16d9dd617ae25d95c812658641c127fdabc6db9680a8d43db3a7b8373";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -940,6 +940,10 @@
       addShape: function (args, options) { return executeTool("slides_add_shape", args, options); },
       updateShape: function (args, options) { return executeTool("slides_update_shape", args, options); },
       deleteObject: function (args, options) { return executeTool("slides_delete_object", args, options); },
+      inspectSmartArts: function (args, options) { return executeTool("slides_inspect_smartarts", args, options); },
+      addSmartArt: function (args, options) { return executeTool("slides_add_smartart", args, options); },
+      updateSmartArt: function (args, options) { return executeTool("slides_update_smartart", args, options); },
+      deleteSmartArt: function (args, options) { return executeTool("slides_delete_smartart", args, options); },
       inspectCharts: function (args, options) { return executeTool("slides_inspect_charts", args, options); },
       addChart: function (args, options) { return executeTool("slides_add_chart", args, options); },
       updateChart: function (args, options) { return executeTool("slides_update_chart", args, options); },

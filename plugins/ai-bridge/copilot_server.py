@@ -38,7 +38,7 @@ DOCUMENT_INTERNAL_ORIGIN = "http://127.0.0.1"
 DOCUMENT_TEMPLATE_ROOT = (
     "/var/www/onlyoffice/documentserver/document-templates/new/zh-CN"
 )
-EDITOR_ASSET_REVISION = "0.2.1-716173251c4997578ffa8364ec37b6dbf58505a0fe0c511462d6df65787b21a9"
+EDITOR_ASSET_REVISION = "0.2.1-f03d9b4775c660304798b9e38a92af46ca59b563e470f1b18d37aa1db5876952"
 EDITOR_TOKEN_TTL_SECONDS = 12 * 60 * 60
 DOCUMENT_MAX_SAVE_BYTES = 200 * 1024 * 1024
 AI_BRIDGE_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"
@@ -347,11 +347,84 @@ def internalize_public_tool_calls(
     tool_calls: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     internal_calls: list[dict[str, Any]] = []
-    for call in tool_calls:
+    expected_shape = (
+        '{"name":"set_size","arguments":{"preset":"wide"}}'
+        if editor == "slide"
+        else '{"name":"inspect","arguments":{}}'
+    )
+
+    def invalid_call(index: int, path: str, message: str) -> None:
+        raise BridgeError(
+            400,
+            "INVALID_TOOL_CALL",
+            message,
+            {
+                "toolCallIndex": index,
+                "path": path,
+                "expectedShape": expected_shape,
+            },
+        )
+
+    for index, call in enumerate(tool_calls):
         if not isinstance(call, dict):
-            raise BridgeError(400, "INVALID_TOOL_CALL", "工具调用必须是对象")
-        public_name = str(call.get("name") or "").strip()
-        internal_calls.append({**call, "name": internal_tool_name(editor, public_name)})
+            invalid_call(index, f"toolCalls[{index}]", "工具调用必须是对象")
+
+        has_name = "name" in call
+        has_action = "action" in call
+        raw_name = call.get("name")
+        raw_action = call.get("action")
+        if has_name and (not isinstance(raw_name, str) or not raw_name.strip()):
+            invalid_call(
+                index,
+                f"toolCalls[{index}].name",
+                "工具调用 name 必须是非空字符串",
+            )
+        if has_action and (not isinstance(raw_action, str) or not raw_action.strip()):
+            invalid_call(
+                index,
+                f"toolCalls[{index}].action",
+                "工具调用 action 必须是非空字符串",
+            )
+        if not has_name and not has_action:
+            invalid_call(
+                index,
+                f"toolCalls[{index}].name",
+                "工具调用缺少 name；action 仅作为兼容别名",
+            )
+
+        public_name = raw_name.strip() if has_name else raw_action.strip()
+        if has_name and has_action and raw_name.strip() != raw_action.strip():
+            invalid_call(
+                index,
+                f"toolCalls[{index}].action",
+                "工具调用 name 与 action 不一致",
+            )
+        if has_action:
+            print(
+                "[bridge-tool-call-normalization] "
+                + compact_json(
+                    {
+                        "editorType": editor,
+                        "toolCallIndex": index,
+                        "kind": "actionAlias",
+                        "name": public_name,
+                    }
+                ),
+                flush=True,
+            )
+
+        arguments = call.get("arguments", {})
+        if not isinstance(arguments, dict):
+            invalid_call(
+                index,
+                f"toolCalls[{index}].arguments",
+                "工具调用 arguments 必须是对象",
+            )
+
+        normalized = {key: value for key, value in call.items() if key != "action"}
+        normalized["name"] = internal_tool_name(editor, public_name)
+        normalized["arguments"] = arguments
+        internal_calls.append(normalized)
     return internal_calls
 
 
@@ -1628,6 +1701,7 @@ EDITOR_ERROR_HTTP_STATUS = {
     "INVALID_IMAGE_SOURCE": 422,
     "EXECUTION_FAILED": 500,
     "WORD_API_UNSUPPORTED": 501,
+    "SLIDES_API_UNSUPPORTED": 501,
     "SHEETS_API_UNSUPPORTED": 501,
     "SHEETS_RUNTIME_INCOMPATIBLE": 500,
     "SHEETS_CHART_PARTIAL_MUTATION": 500,

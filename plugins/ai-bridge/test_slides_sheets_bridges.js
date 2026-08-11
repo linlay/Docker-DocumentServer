@@ -27,10 +27,13 @@ function loadBridge(source, api) {
       },
     },
   };
+  if (api.__editor) asc.editor = api.__editor;
   const sandbox = {
     window: { Asc: asc },
     Api: api,
     Asc: asc,
+    AscBuilder: api.__ascBuilder || { GetApiDrawing: drawing => drawing },
+    AscCommonWord: api.__ascCommonWord,
     console,
     JSON,
     Number,
@@ -39,11 +42,26 @@ function loadBridge(source, api) {
     Math,
     RegExp,
     Error,
+    Date,
+    Promise,
+    setTimeout,
+    clearTimeout,
     isFinite,
     parseInt,
   };
   vm.runInNewContext(source, sandbox);
   return sandbox.window.AICopilotBridges;
+}
+
+function mockChartTitle(styleLog) {
+  return {
+    getDocContent() {
+      return {
+        SetApplyToAll(value) { styleLog.applyToAll = value; },
+        AddToParagraph(value) { styleLog.push({ ...value }); },
+      };
+    },
+  };
 }
 
 class SlideRun {
@@ -203,6 +221,47 @@ class SlideShape {
   }
 }
 
+class SlideSmartArt extends SlideShape {
+  constructor(type, nodeCount = 5) {
+    super();
+    this.type = type;
+    this.name = "SmartArt";
+    this.nodeShapes = Array.from({ length: nodeCount }, (_, index) => {
+      const shape = new SlideShape(`Text ${index + 1}`);
+      shape.modelId = `smartart-shape-${this.internalId}-${index}`;
+      const point = {
+        modelId: `smartart-node-${this.internalId}-${index}`,
+        text: shape.GetContent().GetText(),
+        getModelId() { return this.modelId; },
+      };
+      shape.getSmartArtPointContent = () => [{ point }];
+      shape.copyTextInfoFromShapeToPoint = () => {
+        point.text = shape.GetContent().GetText();
+        shape.smartArtSyncCount = (shape.smartArtSyncCount || 0) + 1;
+      };
+      shape.checkExtentsByDocContent = () => { shape.extentChecks = (shape.extentChecks || 0) + 1; };
+      shape.setTruthFontSizeInSmartArt = () => { shape.fontFitChecks = (shape.fontFitChecks || 0) + 1; };
+      return shape;
+    });
+    this.Drawing = {
+      recalculations: 0,
+      getDrawing: () => ({ spTree: this.nodeShapes }),
+      getTypeOfSmartArt: () => this.type,
+      recalculate() { this.recalculations += 1; },
+    };
+  }
+  GetClassType() { return "smartArt"; }
+  ToJSON() {
+    return JSON.stringify({
+      kind: "smartArt",
+      id: this.internalId,
+      name: this.name,
+      type: this.type,
+      nodes: this.nodeShapes.map(shape => shape.GetContent().GetText()),
+    });
+  }
+}
+
 class SlideImage extends SlideShape {
   constructor(url, width, height) {
     super();
@@ -262,6 +321,21 @@ class SlideChart {
     this.internalId = `drawing-${++drawingId}`;
     this.options = {};
     this.parent = null;
+    this.internalTitleStyles = { title: [], horizontal: [], vertical: [] };
+    this.doughnutModel = {
+      holeSize: type === "doughnut" ? 75 : null,
+      setHoleSize(value) { this.holeSize = value; },
+    };
+    this.Chart = {
+      chart: {
+        title: mockChartTitle(this.internalTitleStyles.title),
+        plotArea: {
+          charts: [this.doughnutModel],
+          getHorizontalAxis: () => ({ title: mockChartTitle(this.internalTitleStyles.horizontal) }),
+          getVerticalAxis: () => ({ title: mockChartTitle(this.internalTitleStyles.vertical) }),
+        },
+      },
+    };
   }
   GetClassType() { return "chart"; }
   GetInternalId() { return this.internalId; }
@@ -289,7 +363,7 @@ class SlideChart {
   SetRotation(value) { this.rotation = value; }
   GetRotation() { return this.rotation; }
   ApplyChartStyle(value) { this.style = value; }
-  SetTitle(value, fontSize) { this.title = value; this.options.titleFontSize = fontSize; }
+  SetTitle(value, fontSize, bold) { this.title = value; this.options.titleFontSize = fontSize; this.options.titleBold = bold; }
   Fill(value) { this.options.fill = value; }
   SetOutLine(value) { this.options.line = value; }
   SetPlotAreaFill(value) { this.options.plotAreaFill = value; }
@@ -300,8 +374,8 @@ class SlideChart {
   SetLegendFontSize(value) { this.options.legendFontSize = value; }
   SetLegendFill(value) { this.options.legendFill = value; }
   SetLegendOutLine(value) { this.options.legendLine = value; }
-  SetHorAxisTitle(value, size) { this.options.horizontalTitle = [value, size]; }
-  SetVerAxisTitle(value, size) { this.options.verticalTitle = [value, size]; }
+  SetHorAxisTitle(value, size, bold) { this.options.horizontalTitle = [value, size, bold]; }
+  SetVerAxisTitle(value, size, bold) { this.options.verticalTitle = [value, size, bold]; }
   SetHorAxisLabelsFontSize(value) { this.options.horizontalLabelsFontSize = value; }
   SetVertAxisLabelsFontSize(value) { this.options.verticalLabelsFontSize = value; }
   SetHorAxisOrientation(value) { this.options.horizontalNormalOrder = value; }
@@ -329,7 +403,7 @@ class SlideChart {
   SetDataPointOutLine(value, series, point, allSeries) { this.options.pointLine = [series, point, allSeries, value]; }
   SetMarkerFill(value, series, point, allMarkers) { this.options.markerFill = [series, point, allMarkers, value]; }
   SetMarkerOutLine(value, series, point, allMarkers) { this.options.markerLine = [series, point, allMarkers, value]; }
-  SetDataPointNumFormat(value, series, point) { this.options.pointNumberFormat = [series, point, value]; }
+  SetDataPointNumFormat(value, series, point, allSeries) { this.options.pointNumberFormat = [series, point, allSeries, value]; }
   SetShowPointDataLabel(series, point, ...values) { this.options.pointDataLabels = [series, point, ...values]; }
   RemoveSeria(index) { this.values.splice(index, 1); this.seriesNames.splice(index, 1); }
   Delete() {
@@ -733,6 +807,7 @@ class MockSlide {
     this.shapes = texts.map(text => new SlideShape(text));
     this.shapes.forEach(shape => { shape.parent = this; });
     this.charts = [];
+    this.smartArts = [];
     this.images = [];
     this.tables = [];
     this.groups = [];
@@ -745,9 +820,10 @@ class MockSlide {
   }
   GetAllShapes() { return this.shapes; }
   GetAllCharts() { return this.charts; }
+  GetAllSmartArts() { return this.smartArts; }
   GetAllImages() { return this.images; }
   GetAllTables() { return this.tables; }
-  GetAllDrawings() { return [...this.shapes, ...this.charts, ...this.images, ...this.tables, ...this.groups]; }
+  GetAllDrawings() { return [...this.shapes, ...this.charts, ...this.smartArts, ...this.images, ...this.tables, ...this.groups]; }
   GetWidth() { return this.presentation.width; }
   GetHeight() { return this.presentation.height; }
   GetVisible() { return this.visible; }
@@ -816,6 +892,7 @@ class MockSlide {
   AddObject(shape) {
     shape.parent = this;
     if (shape.GetClassType() === "chart") this.charts.push(shape);
+    else if (shape.GetClassType() === "smartArt") this.smartArts.push(shape);
     else if (shape.GetClassType() === "image") this.images.push(shape);
     else if (shape.GetClassType() === "table") this.tables.push(shape);
     else if (shape.GetClassType() === "group") this.groups.push(shape);
@@ -824,6 +901,8 @@ class MockSlide {
   RemoveObject(shape) {
     const collection = shape.GetClassType() === "chart"
       ? this.charts
+      : shape.GetClassType() === "smartArt"
+        ? this.smartArts
       : shape.GetClassType() === "image"
         ? this.images
         : shape.GetClassType() === "table"
@@ -845,6 +924,7 @@ class MockSlide {
     return JSON.stringify({
       shapes: this.shapes.length,
       charts: this.charts.length,
+      smartArts: this.smartArts.length,
       images: this.images.length,
       tables: this.tables.length,
       groups: this.groups.length,
@@ -1056,6 +1136,25 @@ function slidesHarness() {
       callback(values[method]);
     },
   };
+  const editor = {
+    currentPage: 0,
+    getLogicDocument() {
+      return {
+        Set_CurPage: index => { this.currentPage = index; editor.currentPage = index; },
+      };
+    },
+    WordControl: {
+      GoToPage(index) { editor.currentPage = index; },
+    },
+    asc_createSmartArt(type) {
+      const slide = presentation.slides[this.currentPage];
+      if (!slide) throw new Error("invalid SmartArt target slide");
+      slide.AddObject(new SlideSmartArt(type));
+    },
+  };
+  api.__editor = editor;
+  api.__ascBuilder = { GetApiDrawing: drawing => drawing };
+  api.__ascCommonWord = { ParaTextPr: function ParaTextPr(value) { Object.assign(this, value); } };
   return { bridge: loadBridge(slidesSource, api).slide, presentation, first, second, selection, api };
 }
 
@@ -1122,6 +1221,16 @@ class MockSheetChart {
     this.title = "";
     this.options = {};
     this.series = [{ name: "Series 1", valuesRange: source }];
+    this.internalTitleStyles = { title: [], horizontal: [], vertical: [] };
+    this.Chart = {
+      chart: {
+        title: mockChartTitle(this.internalTitleStyles.title),
+        plotArea: {
+          getHorizontalAxis: () => ({ title: mockChartTitle(this.internalTitleStyles.horizontal) }),
+          getVerticalAxis: () => ({ title: mockChartTitle(this.internalTitleStyles.vertical) }),
+        },
+      },
+    };
   }
   GetName() { return this.name; }
   SetName(value) { this.name = value; }
@@ -1147,7 +1256,7 @@ class MockSheetChart {
   SetSize(width, height) { this.size = [width, height]; }
   SetRotation(value) { this.rotation = value; }
   ApplyChartStyle(value) { this.style = value; }
-  SetTitle(value, fontSize) { this.title = value; this.options.titleFontSize = fontSize; }
+  SetTitle(value, fontSize, bold) { this.title = value; this.options.titleFontSize = fontSize; this.options.titleBold = bold; }
   Fill(value) { this.options.fill = value; }
   SetOutLine(value) { this.options.line = value; }
   SetPlotAreaFill(value) { this.options.plotAreaFill = value; }
@@ -1158,8 +1267,8 @@ class MockSheetChart {
   SetLegendFontSize(value) { this.options.legendFontSize = value; }
   SetLegendFill(value) { this.options.legendFill = value; }
   SetLegendOutLine(value) { this.options.legendLine = value; }
-  SetHorAxisTitle(value, size) { this.options.horizontalTitle = [value, size]; }
-  SetVerAxisTitle(value, size) { this.options.verticalTitle = [value, size]; }
+  SetHorAxisTitle(value, size, bold) { this.options.horizontalTitle = [value, size, bold]; }
+  SetVerAxisTitle(value, size, bold) { this.options.verticalTitle = [value, size, bold]; }
   SetHorAxisLabelsFontSize(value) { this.options.horizontalLabelsFontSize = value; }
   SetVertAxisLabelsFontSize(value) { this.options.verticalLabelsFontSize = value; }
   SetHorAxisOrientation(value) { this.options.horizontalNormalOrder = value; }
@@ -1188,7 +1297,7 @@ class MockSheetChart {
   SetDataPointOutLine(value, series, point, allSeries) { this.options.pointLine = [series, point, allSeries, value]; }
   SetMarkerFill(value, series, point, allMarkers) { this.options.markerFill = [series, point, allMarkers, value]; }
   SetMarkerOutLine(value, series, point, allMarkers) { this.options.markerLine = [series, point, allMarkers, value]; }
-  SetDataPointNumFormat(value, series, point) { this.options.pointNumberFormat = [series, point, value]; }
+  SetDataPointNumFormat(value, series, point, allSeries) { this.options.pointNumberFormat = [series, point, allSeries, value]; }
   SetShowPointDataLabel(series, point, ...values) { this.options.pointDataLabels = [series, point, ...values]; }
   RemoveSeria(index) { this.series.splice(index, 1); }
   Delete() {
@@ -1280,6 +1389,7 @@ function sheetsHarness() {
       return null;
     },
   };
+  api.__ascCommonWord = { ParaTextPr: function ParaTextPr(value) { Object.assign(this, value); } };
   return { bridge: loadBridge(sheetsSource, api).cell, workbook, sheet1, sheet2 };
 }
 
@@ -2567,6 +2677,237 @@ test("Slides object and chart inspection is read-only", async () => {
   assert.equal(result.changed, 0);
   assert.equal(result.needsSave, false);
   assert.equal(presentation.historyPoints, 0);
+});
+
+test("Slides bridge creates, inspects, updates, and deletes native SmartArt", async () => {
+  const { bridge, presentation, first } = slidesHarness();
+  const added = await bridge.execute([{
+    name: "slides_add_smartart",
+    arguments: {
+      slide: 1,
+      type: "BasicBlockList",
+      name: "ServiceSystem",
+      xMm: 18,
+      yMm: 32,
+      widthMm: 210,
+      heightMm: 92,
+      nodeFill: { type: "solid", color: "#EAF2FF" },
+      nodes: [
+        { index: 0, text: "咨询规划", bold: true, color: "#123456" },
+        { index: 1, paragraphs: [{ text: "方案实施", align: "center" }] },
+      ],
+      includeTextStyles: true,
+    },
+  }]);
+
+  assert.equal(added.changed, 1);
+  assert.equal(added.needsSave, true);
+  assert.equal(added.results[0].name, "slides_add_smartart");
+  assert.equal(added.results[0].smartArt.kind, "smartArt");
+  assert.equal(added.results[0].smartArt.smartArtType, "BasicBlockList");
+  assert.equal(added.results[0].smartArt.smartArtTypeValue, 77);
+  assert.equal(added.results[0].smartArt.name, "ServiceSystem");
+  assert.equal(added.results[0].smartArt.nodes[0].text, "咨询规划");
+  assert.equal(first.smartArts.length, 1);
+  assert.equal(first.smartArts[0].nodeShapes[0].smartArtSyncCount > 0, true);
+  assert.equal(first.smartArts[0].nodeShapes[0].getSmartArtPointContent()[0].point.text, "咨询规划");
+
+  const smartArtId = added.results[0].smartArt.smartArtId;
+  const updated = await bridge.execute([
+    { name: "slides_inspect_smartarts", arguments: { slide: 1, includeTextStyles: true } },
+    {
+      name: "slides_update_smartart",
+      arguments: {
+        slide: 1,
+        smartArtId,
+        name: "ServiceSystemV2",
+        nodes: [{ nodeId: added.results[0].smartArt.nodes[0].nodeId, text: "持续运营", italic: true }],
+      },
+    },
+  ]);
+
+  assert.equal(updated.results[0].smartArtCount, 1);
+  assert.equal(updated.results[1].smartArt.name, "ServiceSystemV2");
+  assert.equal(updated.results[1].smartArt.nodes[0].text, "持续运营");
+  assert.equal(first.smartArts[0].nodeShapes[0].getSmartArtPointContent()[0].point.text, "持续运营");
+
+  const deleted = await bridge.execute([{
+    name: "slides_delete_smartart",
+    arguments: { slide: 1, smartArtId },
+  }]);
+  assert.equal(deleted.changed, 1);
+  assert.equal(first.smartArts.length, 0);
+  assert.equal(presentation.historyPoints, 3);
+});
+
+test("Slides chart exposes title boldness, axis title boldness, and all-series point number formats", async () => {
+  const { bridge, first } = slidesHarness();
+  await bridge.execute([{
+    name: "slides_add_chart",
+    arguments: {
+      slide: 1,
+      type: "comboBarLineSecondary",
+      series: [[10, 20], [2, 4]],
+      seriesNames: ["Revenue", "Growth"],
+      categories: ["H1", "H2"],
+      title: "Performance",
+      titleBold: true,
+      horizontalAxis: { title: "Period", titleBold: true },
+      seriesUpdates: [{
+        index: 0,
+        points: [{ index: 1, numberFormat: "0.0%", allSeries: true }],
+      }],
+    },
+  }]);
+
+  assert.equal(first.charts[0].options.titleBold, true);
+  assert.deepEqual(first.charts[0].options.horizontalTitle, ["Period", 11, true]);
+  assert.deepEqual(first.charts[0].options.pointNumberFormat, [0, 1, true, "0.0%"]);
+  assert.equal(first.charts[0].internalTitleStyles.title.at(-1).Bold, true);
+  assert.equal(first.charts[0].internalTitleStyles.horizontal.at(-1).Bold, true);
+});
+
+test("Slides doughnut charts create, inspect, and update the native hole size without changing point colors", async () => {
+  const { bridge, first } = slidesHarness();
+  const result = await bridge.execute([
+    {
+      name: "slides_add_chart",
+      arguments: {
+        slide: 1,
+        type: "doughnut",
+        series: [[35, 65]],
+        seriesNames: ["Share"],
+        categories: ["A", "B"],
+        name: "Allocation",
+        holeSizePercent: 40,
+        seriesUpdates: [{
+          index: 0,
+          points: [{ index: 0, fill: { type: "solid", color: "#3366CC" } }],
+        }],
+      },
+    },
+    { name: "slides_inspect_charts", arguments: { slide: 1 } },
+    {
+      name: "slides_update_chart",
+      arguments: { slide: 1, chartIndex: 0, holeSizePercent: 10 },
+    },
+    {
+      name: "slides_update_chart",
+      arguments: { slide: 1, chartIndex: 0, holeSizePercent: 90 },
+    },
+    {
+      name: "slides_update_chart",
+      arguments: { slide: 1, chartIndex: 0, title: "Allocation updated" },
+    },
+  ]);
+
+  assert.equal(result.results[0].chart.holeSizePercent, 40);
+  assert.equal(result.results[1].slides[0].charts[0].holeSizePercent, 40);
+  assert.equal(result.results[2].chart.holeSizePercent, 10);
+  assert.equal(result.results[3].chart.holeSizePercent, 90);
+  assert.equal(result.results[4].chart.holeSizePercent, 90);
+  assert.equal(first.charts[0].doughnutModel.holeSize, 90);
+  assert.deepEqual(first.charts[0].options.pointFill[3].color, { r: 51, g: 102, b: 204 });
+});
+
+test("Slides doughnut hole size rejects invalid values, non-doughnut targets, and unsupported runtimes before style mutation", async () => {
+  const invalidValues = [9, 91, 40.5, "40"];
+  for (const value of invalidValues) {
+    const { bridge } = slidesHarness();
+    assert.throws(
+      () => bridge.execute([{
+        name: "slides_add_chart",
+        arguments: {
+          slide: 1,
+          type: "doughnut",
+          series: [[1]],
+          seriesNames: ["One"],
+          categories: ["A"],
+          holeSizePercent: value,
+        },
+      }]),
+      error => error.code === "INVALID_TOOL_ARGUMENTS"
+    );
+  }
+
+  const nonDoughnut = slidesHarness();
+  await nonDoughnut.bridge.execute([{
+    name: "slides_add_chart",
+    arguments: {
+      slide: 1,
+      type: "bar",
+      series: [[1]],
+      seriesNames: ["One"],
+      categories: ["A"],
+      title: "Original",
+    },
+  }]);
+  await assert.rejects(
+    nonDoughnut.bridge.execute([{
+      name: "slides_update_chart",
+      arguments: { slide: 1, chartIndex: 0, holeSizePercent: 40, title: "Must not apply" },
+    }]),
+    error => error.code === "INVALID_TOOL_ARGUMENTS"
+  );
+  assert.equal(nonDoughnut.first.charts[0].title, "Original");
+
+  const unsupported = slidesHarness();
+  await unsupported.bridge.execute([{
+    name: "slides_add_chart",
+    arguments: {
+      slide: 1,
+      type: "doughnut",
+      series: [[1]],
+      seriesNames: ["One"],
+      categories: ["A"],
+    },
+  }]);
+  unsupported.first.charts[0].doughnutModel.setHoleSize = undefined;
+  await assert.rejects(
+    unsupported.bridge.execute([{
+      name: "slides_update_chart",
+      arguments: { slide: 1, chartIndex: 0, holeSizePercent: 40, title: "Must not apply" },
+    }]),
+    error => error.code === "SLIDES_API_UNSUPPORTED"
+      && error.details.feature === "slides.charts.doughnutHoleSize"
+  );
+  assert.equal(unsupported.first.charts[0].title, "");
+  assert.equal(unsupported.first.charts[0].doughnutModel.holeSize, 75);
+});
+
+test("Slides page-scoped reads return INVALID_TARGET with details for an empty presentation", async () => {
+  const { bridge, presentation } = slidesHarness();
+  presentation.slides.length = 0;
+
+  const broad = await bridge.execute([
+    { name: "slides_inspect", arguments: {} },
+    { name: "slides_inspect_backgrounds", arguments: {} },
+    { name: "slides_inspect_objects", arguments: {} },
+    { name: "slides_inspect_charts", arguments: {} },
+  ]);
+  assert.equal(broad.results[0].slideCount, 0);
+  assert.equal(broad.results[0].currentSlide, null);
+  assert.deepEqual(Array.from(broad.results[1].slides), []);
+  assert.deepEqual(Array.from(broad.results[2].slides), []);
+  assert.deepEqual(Array.from(broad.results[3].slides), []);
+
+  for (const name of [
+    "slides_inspect_backgrounds",
+    "slides_inspect_objects",
+    "slides_validate_layout",
+    "slides_inspect_animations",
+    "slides_inspect_smartarts",
+    "slides_inspect_charts",
+  ]) {
+    await assert.rejects(
+      bridge.execute([{ name, arguments: { slide: 1 } }]),
+      error => error.code === "INVALID_TARGET"
+        && error.details.targetType === "slide"
+        && error.details.requestedSlide === 1
+        && error.details.slideCount === 0
+        && error.details.validRange.max === 0
+    );
+  }
 });
 
 test("Slides bridge replays inspected fill.raw through Api.FromJSON", async () => {

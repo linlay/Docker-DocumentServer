@@ -35,13 +35,13 @@ class ContractGenerationTests(unittest.TestCase):
             (BRIDGE_ROOT / "public-api.json").read_text(encoding="utf-8")
         )
 
-    def test_contract_has_155_complete_tool_metadata_entries(self) -> None:
+    def test_contract_has_160_complete_tool_metadata_entries(self) -> None:
         tools = {
             name: schema
             for editor_tools in self.contract["tools"].values()
             for name, schema in editor_tools.items()
         }
-        self.assertEqual(len(tools), 156)
+        self.assertEqual(len(tools), 160)
         self.assertEqual(self.contract["version"], "0.2.1")
         self.assertEqual(
             self.contract["toolNaming"],
@@ -74,6 +74,173 @@ class ContractGenerationTests(unittest.TestCase):
             ["auto", "placeholder", "textbox"],
         )
         self.assertEqual(title_placement["default"], "auto")
+
+    def test_slides_contract_exposes_native_smartart_crud(self) -> None:
+        slide_tools = self.contract["tools"]["slide"]
+        self.assertEqual(
+            {
+                "slides_inspect_smartarts",
+                "slides_add_smartart",
+                "slides_update_smartart",
+                "slides_delete_smartart",
+            }.issubset(slide_tools),
+            True,
+        )
+        smartart_names = self.contract["$defs"]["smartArtType"]["oneOf"][0]["enum"]
+        self.assertEqual(len(smartart_names), 151)
+        self.assertEqual(smartart_names[77], "BasicBlockList")
+        self.assertEqual(smartart_names[150], "VerticalBracketList")
+        add_schema = slide_tools["slides_add_smartart"]
+        self.assertEqual(add_schema["required"], ["slide", "type"])
+        self.assertEqual(add_schema["x-effects"], "write")
+        node_schema = self.contract["$defs"]["smartArtNodeUpdate"]
+        self.assertIn("nodeId", node_schema["properties"])
+        self.assertIn("paragraphs", node_schema["properties"])
+
+    def test_chart_contract_exposes_all_documented_bold_and_point_format_arguments(self) -> None:
+        chart_axis = self.contract["$defs"]["chartAxis"]["properties"]
+        chart_point = self.contract["$defs"]["chartPointUpdate"]["properties"]
+        self.assertEqual(chart_axis["titleBold"], {"type": "boolean"})
+        self.assertEqual(chart_point["allSeries"], {"type": "boolean"})
+        for editor, tool_names in {
+            "slide": ("slides_add_chart", "slides_update_chart"),
+            "cell": ("sheets_add_chart", "sheets_update_chart"),
+        }.items():
+            for tool_name in tool_names:
+                with self.subTest(tool=tool_name):
+                    self.assertEqual(
+                        self.contract["tools"][editor][tool_name]["properties"]["titleBold"],
+                        {"type": "boolean"},
+                    )
+
+    def test_slides_doughnut_hole_size_contract_is_strict_and_optional(self) -> None:
+        slide_tools = self.contract["tools"]["slide"]
+        expected = {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 90,
+            "description": "环形图圆孔占直径的百分比；数值越小环越粗，仅适用于 doughnut",
+        }
+        self.assertEqual(
+            slide_tools["slides_add_chart"]["properties"]["holeSizePercent"],
+            expected,
+        )
+        self.assertEqual(
+            slide_tools["slides_update_chart"]["properties"]["holeSizePercent"],
+            expected,
+        )
+        self.assertIn("INVALID_TARGET", self.contract["errors"])
+        self.assertIn("SLIDES_API_UNSUPPORTED", self.contract["errors"])
+        self.assertIn(
+            'holeSizePercent: number; type: "doughnut";',
+            sync_contract.render_types_region(self.contract),
+        )
+        generated_types = sync_contract.replace_types_error_codes(
+            'export type AiBridgeErrorCode =\n  | "OLD"\n  | string;',
+            self.contract,
+        )
+        self.assertIn('| "INVALID_TARGET"', generated_types)
+        self.assertIn('| "SLIDES_API_UNSUPPORTED"', generated_types)
+        self.assertNotIn('| "OLD"', generated_types)
+
+        for value in (10, 40, 90):
+            calls, changes = copilot_server.require_valid_editor_tool_calls(
+                "slide",
+                [{
+                    "name": "slides_add_chart",
+                    "arguments": {
+                        "slide": 1,
+                        "type": "doughnut",
+                        "series": [[1]],
+                        "seriesNames": ["One"],
+                        "categories": ["A"],
+                        "holeSizePercent": value,
+                    },
+                }],
+            )
+            self.assertEqual(calls[0]["arguments"]["holeSizePercent"], value)
+            self.assertEqual(changes, [])
+
+        for value in (9, 91, 40.5, "40"):
+            with self.subTest(invalid=value):
+                with self.assertRaises(copilot_server.BridgeError) as caught:
+                    copilot_server.require_valid_editor_tool_calls(
+                        "slide",
+                        [{
+                            "name": "slides_add_chart",
+                            "arguments": {
+                                "slide": 1,
+                                "type": "doughnut",
+                                "series": [[1]],
+                                "seriesNames": ["One"],
+                                "categories": ["A"],
+                                "holeSizePercent": value,
+                            },
+                        }],
+                    )
+                self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+
+        with self.assertRaises(copilot_server.BridgeError) as caught:
+            copilot_server.require_valid_editor_tool_calls(
+                "slide",
+                [{
+                    "name": "slides_add_chart",
+                    "arguments": {
+                        "slide": 1,
+                        "type": "bar",
+                        "series": [[1]],
+                        "seriesNames": ["One"],
+                        "categories": ["A"],
+                        "holeSizePercent": 40,
+                    },
+                }],
+            )
+        self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+
+    def test_batch_envelope_accepts_action_alias_and_rejects_ambiguous_shapes(self) -> None:
+        canonical = copilot_server.internalize_public_tool_calls(
+            "slide",
+            [{"name": "set_size", "arguments": {"preset": "wide"}}],
+        )
+        self.assertEqual(
+            canonical,
+            [{"name": "slides_set_size", "arguments": {"preset": "wide"}}],
+        )
+        alias = copilot_server.internalize_public_tool_calls(
+            "slide",
+            [{"action": "set_size", "arguments": {"preset": "wide"}}],
+        )
+        self.assertEqual(alias, canonical)
+        both = copilot_server.internalize_public_tool_calls(
+            "slide",
+            [{"name": "inspect", "action": "inspect"}],
+        )
+        self.assertEqual(both, [{"name": "slides_inspect", "arguments": {}}])
+
+        invalid_calls = (
+            ({}, "toolCalls[0].name"),
+            ({"name": ""}, "toolCalls[0].name"),
+            ({"action": 42}, "toolCalls[0].action"),
+            ({"name": "inspect", "action": "set_size"}, "toolCalls[0].action"),
+            ({"name": "inspect", "arguments": []}, "toolCalls[0].arguments"),
+        )
+        for call, expected_path in invalid_calls:
+            with self.subTest(call=call):
+                with self.assertRaises(copilot_server.BridgeError) as caught:
+                    copilot_server.internalize_public_tool_calls("slide", [call])
+                self.assertEqual(caught.exception.status, 400)
+                self.assertEqual(caught.exception.code, "INVALID_TOOL_CALL")
+                self.assertEqual(caught.exception.details["toolCallIndex"], 0)
+                self.assertEqual(caught.exception.details["path"], expected_path)
+                self.assertIn('"name":"set_size"', caught.exception.details["expectedShape"])
+
+        with self.assertRaises(copilot_server.BridgeError) as caught:
+            copilot_server.internalize_public_tool_calls(
+                "slide",
+                [{"action": "definitely_unknown"}],
+            )
+        self.assertEqual(caught.exception.code, "TOOL_NOT_ALLOWED")
+        self.assertIn("definitely_unknown", caught.exception.message)
 
     def test_sheets_runtime_capability_contract_is_granular(self) -> None:
         sheets = self.contract["runtimeCapabilities"]["cell"]["features"]["sheets"]
@@ -406,6 +573,39 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn('key = "tool_calls_json"', rendered)
                 self.assertIn('argumentsJson = { from = "param"', rendered)
                 self.assertIn('toolCallsJson = { from = "param"', rendered)
+                inspect_action = rendered.split("[actions.inspect]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                self.assertIn(
+                    'argumentsJson = { from = "param", key = "arguments_json", default = "{}" }',
+                    inspect_action,
+                )
+                self.assertIn(
+                    'name = "arguments_json", type = "json object string", required = false',
+                    inspect_action,
+                )
+                self.assertIn('example = "{}"', inspect_action)
+                self.assertIn('example = "tool-inspect-1"', inspect_action)
+                batch_action = rendered.split("[actions.validate_batch]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                self.assertIn(
+                    'example = "[{\\"name\\":\\"set_size\\",\\"arguments\\":{\\"preset\\":\\"wide\\"}}]"',
+                    batch_action,
+                )
+                write_tool_name = {
+                    "word": "set_document_text",
+                    "slide": "add_chart",
+                    "cell": "manage_range",
+                }[editor]
+                write_action = rendered.split(f"[actions.{write_tool_name}]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                self.assertNotIn('key = "arguments_json", default = "{}"', write_action)
+                self.assertIn(
+                    'name = "arguments_json", type = "json object string", required = true',
+                    write_action,
+                )
                 self.assertNotIn(f"[actions.new_{sync_contract.EDITOR_CONFIG[editor]['fileType']}]", rendered)
                 self.assertNotIn(f"[actions.{sync_contract.EDITOR_CONFIG[editor]['prefix']}", rendered)
                 self.assertNotIn("Authorization", rendered)
@@ -564,6 +764,24 @@ class ContractGenerationTests(unittest.TestCase):
                     self.assertIn("PPTX_IMAGE_PATH", artifacts[toml_path])
                     self.assertIn("/ai/images/import", artifacts[toml_path])
                     self.assertIn('type:"relayAsset"', artifacts[toml_path])
+                    generated_tools: set[str] = set()
+                    for group_name, expected_tools in sync_contract.SLIDE_CONTRACT_GROUPS.items():
+                        json_path = skill_root / "references" / f"contract-{group_name}.generated.json"
+                        markdown_path = skill_root / "references" / f"contract-{group_name}.generated.md"
+                        self.assertIn(json_path, artifacts)
+                        self.assertIn(markdown_path, artifacts)
+                        grouped = json.loads(artifacts[json_path])
+                        self.assertEqual(tuple(grouped["tools"]), expected_tools)
+                        generated_tools.update(grouped["tools"])
+                        self.assertNotIn("<details>", artifacts[markdown_path])
+                    self.assertEqual(generated_tools, set(
+                        sync_contract.public_tool_name(editor, name)
+                        for name in self.contract["tools"][editor]
+                    ))
+                    self.assertNotIn(
+                        skill_root / "references" / "contract.generated.md",
+                        artifacts,
+                    )
                 self.assertEqual(action_names, expected_actions)
 
     def test_generation_rejects_scripts_directories_for_every_online_skill(self) -> None:
@@ -588,6 +806,39 @@ class ContractGenerationTests(unittest.TestCase):
                         "https://office.example.test",
                     )
                 scripts_root.rmdir()
+
+    def test_cross_repo_projection_can_be_limited_to_one_editor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            zenmind_root = Path(directory)
+            for editor, config in sync_contract.EDITOR_CONFIG.items():
+                skill_root = zenmind_root / "skills-center" / config["skill"]
+                skill_root.mkdir(parents=True)
+                body = "# Body\n"
+                if editor == "slide":
+                    body += (
+                        "`DocumentServerPublicOrigin` 是内部实现细节，不得用 `curl` 探测。\n"
+                        "session 失败时最多重试一次。\n"
+                    )
+                (skill_root / "SKILL.md").write_text(
+                    f"---\nname: {config['skill']}\n---\n\n{body}",
+                    encoding="utf-8",
+                )
+
+            artifacts = sync_contract.build_artifacts(
+                self.contract,
+                zenmind_root,
+                "https://office.example.test",
+                ("slide",),
+            )
+            external_paths = [
+                path
+                for path in artifacts
+                if path.is_relative_to(zenmind_root)
+            ]
+            self.assertTrue(external_paths)
+            self.assertTrue(
+                all("online-pptx" in str(path) for path in external_paths)
+            )
 
     def test_generation_rejects_missing_internal_service_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

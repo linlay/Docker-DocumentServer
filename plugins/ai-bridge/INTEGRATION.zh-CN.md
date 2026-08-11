@@ -432,7 +432,9 @@ slides.addSlide              slides.duplicateSlide     slides.deleteSlide
 slides.addTextBox            slides.addImage           slides.setBackground
 slides.addShape
 slides.updateShape           slides.deleteObject       slides.inspectCharts
-slides.addChart              slides.updateChart        slides.deleteChart
+slides.inspectSmartArts      slides.addSmartArt        slides.updateSmartArt
+slides.deleteSmartArt        slides.addChart            slides.updateChart
+slides.deleteChart
 
 sheets.inspect               sheets.setValues          sheets.setFormula
 sheets.inspectRange          sheets.setArrayFormula    sheets.replaceText
@@ -537,16 +539,18 @@ Host 在发送编辑命令前，会把批次中所有 URL/Data URL 一次性预�
 文件 24 小时后清理。图片写入 DOCX/PPTX 后由 ONLYOFFICE 内嵌到文件包，不依赖
 临时 URL。
 
-### PPTX 图形、渐变和图表完整边界
+### PPTX 图形、SmartArt、渐变和图表完整边界
 
-- `slides_inspect_objects` 读取图形、图表、图片、表格、OLE、组合等绘图对象，返回零基 `objectIndex`、内部 ID、名称、类型、位置、尺寸、旋转、翻转；图形还返回几何类型、文本、填充和线条。
+- `slides_inspect_objects` 读取图形、图表、SmartArt、图片、表格、OLE、组合等绘图对象，返回零基 `objectIndex`、内部 ID、名称、类型、位置、尺寸、旋转、翻转；图形还返回几何类型、文本、填充和线条。
 - `slides_add_shape` / `slides_update_shape` 支持任意 ONLYOFFICE 预设 `shapeType`，以及 `text`、`xMm`、`yMm`、`widthMm`、`heightMm`、`rotationDeg`、`flipH`、`flipV`、`name`、字体、对齐、`paddingMm`、`fill` 和 `line`。
 - `slides_delete_object` 可用 `objectId`、零基 `objectIndex` 或 `name` 删除任意绘图对象。
 - `slides_set_background` 支持 `custom`、`image`、`clear`、`layout`、`master`；`image` 通过安全导入的 `source` 创建原生 `stretch`/`tile` 背景，不增加幻灯片绘图对象。
 - `slides_set_template_background` 对母版和版式提供同样的原生图片背景能力。
-- `slides_inspect_charts` / `slides_add_chart` / `slides_update_chart` / `slides_delete_chart` 覆盖图表类型、二维数值系列、系列名、分类、数值格式、标题、样式、位置、尺寸、旋转、图表区/绘图区/标题填充与线条、图例、横纵轴、标签、网格线、系列和数据点格式、系列增删。
+- `slides_inspect_smartarts` / `slides_add_smartart` / `slides_update_smartart` / `slides_delete_smartart` 操作真实的 `ApiSmartArt`，不是由普通 Shape 模拟的辐射图。`type` 支持 ONLYOFFICE 9.4 的 151 种预设名称或数值 `0..150`；检查结果返回稳定的 `smartArtId`、零基 `smartArtIndex`、预设名称/数值及逻辑节点 `nodeId`。
+- SmartArt 节点可按 `nodeId` 或零基 `index` 设置纯文本、富文本段落、字体、对齐、填充和线条。Bridge 会把子形状文本显式同步回 SmartArt 数据点并重新适配字号/布局。创建过程调用 9.4 原生异步 UI 扩展，因此升级 DocumentServer 后必须对 151 种预设重新做兼容性回归。
+- `slides_inspect_charts` / `slides_add_chart` / `slides_update_chart` / `slides_delete_chart` 覆盖图表类型、二维数值系列、系列名、分类、数值格式、标题、标题粗体、样式、位置、尺寸、旋转、图表区/绘图区/标题填充与线条、图例、横纵轴及其标题粗体、标签、网格线、系列和数据点格式、系列增删。
 - `seriesUpdates[].type` 可修改组合图中的单个系列类型；数据点还支持
-  `markerFill`、`markerLine` 和 `allMarkers`。`line`、`lineMarker`、`column`
+  `markerFill`、`markerLine`、`allMarkers`，以及数据点数值格式的 `allSeries`。`line`、`lineMarker`、`column`
   等友好名称会转换为 ONLYOFFICE 的 `lineNormal`、`lineNormalMarker`、`bar`。
 
 填充模型：
@@ -623,7 +627,8 @@ await window.aiBridge.slides.addChart({
 await window.aiBridge.slides.updateChart({
   slide: 1,
   chartIndex: 0,
-  horizontalAxis: { title: "季度" },
+  titleBold: true,
+  horizontalAxis: { title: "季度", titleBold: true },
   verticalAxis: { title: "金额", numberFormat: "#,##0" },
   seriesUpdates: [{
     index: 0,
@@ -631,6 +636,33 @@ await window.aiBridge.slides.updateChart({
     values: [125, 190, 260],
     fill: { type: "solid", color: "#2F80ED" },
   }],
+});
+```
+
+创建和更新原生 SmartArt：
+
+```js
+const created = await window.aiBridge.slides.addSmartArt({
+  slide: 1,
+  type: "BasicBlockList",
+  name: "服务体系",
+  xMm: 20,
+  yMm: 45,
+  widthMm: 210,
+  heightMm: 90,
+  nodeFill: { type: "solid", color: "#EAF2FF" },
+  nodes: [
+    { index: 0, text: "咨询规划", bold: true },
+    { index: 1, text: "方案实施" },
+    { index: 2, text: "持续运营" },
+  ],
+});
+
+const smartArt = created.results[0].smartArt;
+await window.aiBridge.slides.updateSmartArt({
+  slide: 1,
+  smartArtId: smartArt.smartArtId,
+  nodes: [{ nodeId: smartArt.nodes[0].nodeId, text: "战略咨询" }],
 });
 ```
 

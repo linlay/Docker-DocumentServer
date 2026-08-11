@@ -1605,6 +1605,68 @@ class HttpRelayTests(unittest.TestCase):
                 self.assertEqual(raised.exception.status, 400)
                 self.assertEqual(raised.exception.code, "TOOL_NOT_ALLOWED")
 
+    def test_batch_endpoints_accept_action_alias_and_report_envelope_paths(self):
+        session = {
+            "state": {
+                "editorType": "slide",
+                "capabilities": {"tools": ["slides_set_size"]},
+            },
+        }
+        command = copilot_server.bridge_build_command(
+            {
+                "method": "executeBatch",
+                "requestId": "batch-action-alias-1",
+                "toolCalls": [
+                    {"action": "set_size", "arguments": {"preset": "wide"}},
+                ],
+            },
+            session,
+        )
+        self.assertEqual(
+            command["params"]["toolCalls"],
+            [{"name": "slides_set_size", "arguments": {"preset": "wide"}}],
+        )
+
+        self.register(
+            file_name="demo.pptx",
+            file_type="pptx",
+            editor_type="slide",
+        )
+        with copilot_server.BRIDGE_CONDITION:
+            copilot_server.BRIDGE_SESSIONS["http-session:test"]["state"]["capabilities"]["tools"] = [
+                "slides_set_size",
+            ]
+        claims = {
+            "fileName": "demo.pptx",
+            "fileType": "pptx",
+            "editorType": "slide",
+            "userId": "uid-1",
+            "authKind": "binding",
+        }
+        validated = copilot_server.bridge_validate(
+            {
+                "toolCalls": [
+                    {"action": "set_size", "arguments": {"preset": "wide"}},
+                ],
+            },
+            claims,
+        )
+        self.assertTrue(validated["valid"])
+        self.assertEqual(validated["toolCalls"], 1)
+
+        with self.assertRaises(copilot_server.BridgeError) as raised:
+            copilot_server.bridge_validate(
+                {
+                    "toolCalls": [
+                        {"name": "set_size", "action": "inspect"},
+                    ],
+                },
+                claims,
+            )
+        self.assertEqual(raised.exception.code, "INVALID_TOOL_CALL")
+        self.assertEqual(raised.exception.details["toolCallIndex"], 0)
+        self.assertEqual(raised.exception.details["path"], "toolCalls[0].action")
+
     def test_public_tool_from_another_editor_is_rejected(self):
         with self.assertRaises(copilot_server.BridgeError) as raised:
             copilot_server.bridge_build_command(

@@ -3,6 +3,40 @@
 
   window.AICopilotBridges = window.AICopilotBridges || {};
 
+  const SMART_ART_TYPES = Object.freeze([
+    "AccentedPicture", "Balance", "TitledPictureBlocks", "PictureAccentBlocks", "BlockCycle",
+    "StackedVenn", "VerticalEquation", "VerticalBlockList", "VerticalBendingProcess", "VerticalBulletList",
+    "VerticalCurvedList", "VerticalProcess", "VerticalBoxList", "VerticalPictureList", "VerticalCircleList",
+    "VerticalPictureAccentList", "VerticalArrowList", "VerticalChevronList", "VerticalAccentList", "NestedTarget",
+    "Funnel", "UpwardArrow", "IncreasingArrowsProcess", "StepUpProcess", "CircularPictureCallout",
+    "HorizontalHierarchy", "HorizontalLabeledHierarchy", "HorizontalMultiLevelHierarchy", "HorizontalOrganizationChart", "HorizontalBulletList",
+    "HorizontalPictureList", "ClosedChevronProcess", "HierarchyList", "Hierarchy", "CirclePictureHierarchy",
+    "LabeledHierarchy", "InvertedPyramid", "HexagonCluster", "CircleRelationship", "CircleAccentTimeline",
+    "CircularBendingProcess", "ArrowRibbon", "LinearVenn", "PictureLineup", "TitlePictureLineup",
+    "BendingPictureCaptionList", "BendingPictureAccentList", "TitledMatrix", "IncreasingCircleProcess", "BendingPictureBlocks",
+    "BendingPictureCaption", "BendingPictureSemiTransparentText", "NonDirectionalCycle", "ContinuousBlockProcess", "ContinuousPictureList",
+    "ContinuousCycle", "DescendingBlockList", "StepDownProcess", "ReverseList", "OrganizationChart",
+    "NameAndTitleOrganizationChart", "AlternatingFlow", "PyramidList", "PlusAndMinus", "RepeatingBendingProcess",
+    "CaptionedPictures", "DetailedProcess", "PictureStrips", "HalfCircleOrganizationChart", "PhasedProcess",
+    "BasicVenn", "BasicTimeline", "BasicPie", "BasicMatrix", "BasicPyramid",
+    "BasicRadial", "BasicTarget", "BasicBlockList", "BasicBendingProcess", "BasicProcess",
+    "BasicChevronProcess", "BasicCycle", "OpposingIdeas", "OpposingArrows", "RandomToResultProcess",
+    "SubStepProcess", "PieProcess", "AccentProcess", "AscendingPictureAccentProcess", "PictureAccentProcess",
+    "RadialVenn", "RadialCycle", "RadialCluster", "RadialList", "MultiDirectionalCycle",
+    "DivergingRadial", "DivergingArrows", "FramedTextPicture", "GroupedList", "SegmentedPyramid",
+    "SegmentedProcess", "SegmentedCycle", "PictureGrid", "GridMatrix", "SpiralPicture",
+    "StackedList", "PictureCaptionList", "ProcessList", "BubblePictureList", "SquareAccentList",
+    "LinedList", "PictureAccentList", "TitledPictureAccentList", "SnapshotPictureList", "ContinuousArrowProcess",
+    "CircleArrowProcess", "ProcessArrows", "StaggeredProcess", "ConvergingRadial", "ConvergingArrows",
+    "TableHierarchy", "TableList", "TextCycle", "TrapezoidList", "DescendingProcess",
+    "ChevronList", "Equation", "CounterbalanceArrows", "TargetList", "CycleMatrix",
+    "AlternatingPictureBlocks", "AlternatingPictureCircles", "AlternatingHexagonList", "Gear", "ArchitectureLayout",
+    "ChevronAccentProcess", "CircleProcess", "ConvergingText", "HexagonRadial", "InterconnectedBlockProcess",
+    "InterconnectedRings", "PictureFrame", "PictureOrganizationChart", "RadialPictureList", "TabList",
+    "TabbedArc", "ThemePictureAccent", "ThemePictureAlternatingAccent", "ThemePictureGrid", "VaryingWidthList",
+    "VerticalBracketList",
+  ]);
+
   function parseResult(rawResult) {
     const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
     if (!value || !value.ok) {
@@ -12,6 +46,17 @@
       throw error;
     }
     return value;
+  }
+
+  function normalizeSmartArtType(value) {
+    if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value < SMART_ART_TYPES.length) {
+      return value;
+    }
+    const index = SMART_ART_TYPES.indexOf(String(value || ""));
+    if (index < 0) {
+      throw new Error("SmartArt type 必须是受支持的预设名称或 0-150 的整数");
+    }
+    return index;
   }
 
   const SLIDE_TABLE_CELL_FIELD_TYPES = {
@@ -310,10 +355,35 @@
     }
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index] || {};
-      if (String(call.name || "") !== "slides_add_table") continue;
+      const name = String(call.name || "");
       const args = (call && (call.arguments || call.args)) || {};
       if (!args || typeof args !== "object" || Array.isArray(args)) continue;
-      collectSlideTableDataErrors(index, call.name, args.data, add);
+      if (name === "slides_add_table") {
+        collectSlideTableDataErrors(index, call.name, args.data, add);
+      }
+      if ((name === "slides_add_chart" || name === "slides_update_chart")
+        && Object.prototype.hasOwnProperty.call(args, "holeSizePercent")) {
+        if (!Number.isInteger(args.holeSizePercent)
+          || args.holeSizePercent < 10
+          || args.holeSizePercent > 90) {
+          add(
+            index,
+            call.name,
+            "holeSizePercent",
+            "holeSizePercent must be an integer from 10 to 90",
+            "range"
+          );
+        }
+        if (name === "slides_add_chart" && String(args.type || "bar") !== "doughnut") {
+          add(
+            index,
+            call.name,
+            "holeSizePercent",
+            "holeSizePercent is only supported when type is doughnut",
+            "semantic"
+          );
+        }
+      }
     }
     if (!errors.length) return;
     const error = new Error("Slides 工具参数校验失败");
@@ -329,6 +399,7 @@
   function executeOfficeCommands(toolCalls) {
     return new Promise(function (resolve, reject) {
       Asc.scope.copilotSlideCalls = toolCalls;
+      Asc.scope.copilotSmartArtTypes = SMART_ART_TYPES.slice();
       Asc.plugin.info.recalculate = true;
 
       Asc.plugin.callCommand(
@@ -392,6 +463,8 @@
               slides_add_chart: true,
               slides_update_chart: true,
               slides_delete_chart: true,
+              slides_update_smartart: true,
+              slides_delete_smartart: true,
             };
 
             function getArgs(call) {
@@ -411,9 +484,10 @@
               return isFinite(number) ? number : fallback;
             }
 
-            function commandError(code, message) {
+            function commandError(code, message, details) {
               var error = new Error(message);
               error.code = code;
+              if (details !== undefined) error.details = details;
               throw error;
             }
 
@@ -524,6 +598,24 @@
               return presentation.GetAllSlides().length;
             }
 
+            function invalidSlideTarget(requestedSlide) {
+              var count = slideCount();
+              var requested = Number(requestedSlide);
+              var error = new Error(
+                count === 0
+                  ? "演示文稿暂无幻灯片，无法访问第 " + requested + " 页"
+                  : "幻灯片页码超出范围：第 " + requested + " 页，当前共 " + count + " 页"
+              );
+              error.code = "INVALID_TARGET";
+              error.details = {
+                targetType: "slide",
+                requestedSlide: requested,
+                slideCount: count,
+                validRange: { min: 1, max: count },
+              };
+              return error;
+            }
+
             function masterCount() {
               if (typeof presentation.GetMastersCount === "function") return presentation.GetMastersCount();
               if (typeof presentation.GetAllSlideMasters === "function") return presentation.GetAllSlideMasters().length;
@@ -557,7 +649,7 @@
             function getSlide(oneBasedIndex) {
               var index = Number(oneBasedIndex);
               if (!Number.isInteger(index) || index < 1 || index > slideCount()) {
-                throw new Error("幻灯片序号无效：页码超出范围，当前共 " + slideCount() + " 页");
+                throw invalidSlideTarget(oneBasedIndex);
               }
               return presentation.GetSlideByIndex(index - 1);
             }
@@ -568,6 +660,12 @@
 
             function slideCharts(slide) {
               return typeof slide.GetAllCharts === "function" ? slide.GetAllCharts() : [];
+            }
+
+            function slideSmartArts(slide) {
+              return slideDrawings(slide).filter(function (drawing) {
+                return drawingKind(drawing) === "smartArt";
+              });
             }
 
             function slideTables(slide) {
@@ -610,6 +708,133 @@
                 content = null;
               }
               return content && typeof content.GetText === "function" ? String(content.GetText() || "") : "";
+            }
+
+            function smartArtInternal(smartArt) {
+              return smartArt && smartArt.Drawing ? smartArt.Drawing : null;
+            }
+
+            function smartArtApiShape(nativeShape) {
+              var builder = typeof AscBuilder !== "undefined"
+                ? AscBuilder
+                : (typeof window !== "undefined" ? window.AscBuilder : null);
+              if (!builder || typeof builder.GetApiDrawing !== "function") return null;
+              try {
+                return builder.GetApiDrawing(nativeShape);
+              } catch (error) {
+                return null;
+              }
+            }
+
+            function smartArtNodeEntries(smartArt) {
+              var internal = smartArtInternal(smartArt);
+              var drawing = internal && safeCall(internal, "getDrawing");
+              var shapes = drawing && Array.isArray(drawing.spTree) ? drawing.spTree : [];
+              var entries = [];
+              var seenNodeIds = {};
+              for (var shapeIndex = 0; shapeIndex < shapes.length; shapeIndex += 1) {
+                var nativeShape = shapes[shapeIndex];
+                var apiShape = smartArtApiShape(nativeShape);
+                if (!apiShape || drawingKind(apiShape) !== "shape") continue;
+                var contentNodes = safeCall(nativeShape, "getSmartArtPointContent");
+                if (!Array.isArray(contentNodes) || !contentNodes.length) continue;
+                for (var contentIndex = 0; contentIndex < contentNodes.length; contentIndex += 1) {
+                  var contentNode = contentNodes[contentIndex];
+                  var point = contentNode && contentNode.point;
+                  var nodeId = point && typeof point.getModelId === "function"
+                    ? point.getModelId()
+                    : (point && point.modelId);
+                  var stableNodeId = nodeId === null || nodeId === undefined || nodeId === ""
+                    ? "shape-" + shapeIndex + "-content-" + contentIndex
+                    : String(nodeId);
+                  if (seenNodeIds[stableNodeId]) continue;
+                  seenNodeIds[stableNodeId] = true;
+                  entries.push({
+                    nodeId: stableNodeId,
+                    nativeShape: nativeShape,
+                    apiShape: apiShape,
+                    shapeIndex: shapeIndex,
+                    shapeModelId: nativeShape && nativeShape.modelId !== undefined
+                      ? nativeShape.modelId
+                      : null,
+                  });
+                }
+              }
+              return entries;
+            }
+
+            function smartArtTypeInfo(smartArt) {
+              var typeValue = safeCall(smartArtInternal(smartArt), "getTypeOfSmartArt");
+              var types = Asc.scope.copilotSmartArtTypes || [];
+              var typeNumber = Number(typeValue);
+              return {
+                value: Number.isInteger(typeNumber) && typeNumber >= 0 ? typeNumber : null,
+                name: Number.isInteger(typeNumber) && typeNumber >= 0 && typeNumber < types.length
+                  ? types[typeNumber]
+                  : null,
+              };
+            }
+
+            function describeSmartArtNode(entry, index, includeTextStyles) {
+              return {
+                index: index,
+                nodeId: entry.nodeId,
+                shapeIndex: entry.shapeIndex,
+                shapeId: safeCall(entry.apiShape, "GetInternalId"),
+                shapeModelId: entry.shapeModelId,
+                text: drawingText(entry.apiShape),
+                fill: describeFill(safeCall(entry.apiShape, "GetFill"), false),
+                line: describeStroke(safeCall(entry.apiShape, "GetLine")),
+                textStyles: includeTextStyles ? describeTextStyles(entry.apiShape) : undefined,
+              };
+            }
+
+            function resolveSmartArtNode(entries, spec) {
+              var hasIndex = hasOwn(spec, "index");
+              var hasNodeId = hasOwn(spec, "nodeId");
+              for (var index = 0; index < entries.length; index += 1) {
+                if (hasIndex && Number(spec.index) !== index) continue;
+                if (hasNodeId && String(spec.nodeId) !== String(entries[index].nodeId)) continue;
+                if (hasIndex || hasNodeId) return entries[index];
+              }
+              throw new Error("找不到 SmartArt 节点；请提供有效的 nodeId 或从 0 开始的 index");
+            }
+
+            function syncSmartArtNode(entry) {
+              var nativeShape = entry.nativeShape;
+              if (nativeShape && typeof nativeShape.copyTextInfoFromShapeToPoint === "function") {
+                nativeShape.copyTextInfoFromShapeToPoint();
+              }
+              if (nativeShape && typeof nativeShape.checkExtentsByDocContent === "function") {
+                nativeShape.checkExtentsByDocContent(true, true);
+              }
+              if (nativeShape && typeof nativeShape.setTruthFontSizeInSmartArt === "function") {
+                nativeShape.setTruthFontSizeInSmartArt(true);
+              }
+            }
+
+            function applySmartArtOptions(smartArt, args) {
+              applyDrawingFrame(smartArt, args);
+              var entries = smartArtNodeEntries(smartArt);
+              if (hasOwn(args, "nodeFill") || hasOwn(args, "nodeLine")) {
+                for (var globalNodeIndex = 0; globalNodeIndex < entries.length; globalNodeIndex += 1) {
+                  var globalNodeArgs = {};
+                  if (hasOwn(args, "nodeFill")) globalNodeArgs.fill = args.nodeFill;
+                  if (hasOwn(args, "nodeLine")) globalNodeArgs.line = args.nodeLine;
+                  applyShapeOptions(entries[globalNodeIndex].apiShape, globalNodeArgs);
+                  syncSmartArtNode(entries[globalNodeIndex]);
+                }
+              }
+              if (Array.isArray(args.nodes)) {
+                for (var nodeIndex = 0; nodeIndex < args.nodes.length; nodeIndex += 1) {
+                  var nodeSpec = args.nodes[nodeIndex] || {};
+                  var entry = resolveSmartArtNode(entries, nodeSpec);
+                  applyShapeOptions(entry.apiShape, nodeSpec);
+                  syncSmartArtNode(entry);
+                }
+              }
+              var internal = smartArtInternal(smartArt);
+              if (internal && typeof internal.recalculate === "function") internal.recalculate();
             }
 
             function drawingPlaceholderType(drawing) {
@@ -1357,6 +1582,63 @@
               else formatShapeText(shape, args);
             }
 
+            function doughnutChartModel(chart) {
+              if (String(safeCall(chart, "GetChartType") || "") !== "doughnut") return null;
+              var chartSpace = chart && chart.Chart;
+              var plotArea = chartSpace && chartSpace.chart && chartSpace.chart.plotArea;
+              var internalCharts = plotArea && Array.isArray(plotArea.charts) ? plotArea.charts : [];
+              for (var index = 0; index < internalCharts.length; index += 1) {
+                if (internalCharts[index] && typeof internalCharts[index].setHoleSize === "function") {
+                  return internalCharts[index];
+                }
+              }
+              return null;
+            }
+
+            function chartHoleSizePercent(chart) {
+              var model = doughnutChartModel(chart);
+              if (!model) return null;
+              var value = Number(model.holeSize);
+              return Number.isInteger(value) && value >= 10 && value <= 90 ? value : null;
+            }
+
+            function invalidHoleSize(message, received, chartType) {
+              return commandError(
+                "INVALID_TOOL_ARGUMENTS",
+                "Slides 工具参数校验失败",
+                {
+                  validationErrors: [{
+                    path: "arguments.holeSizePercent",
+                    keyword: "semantic",
+                    message: message,
+                    received: received,
+                    chartType: chartType,
+                  }],
+                }
+              );
+            }
+
+            function applyDoughnutHoleSize(chart, args) {
+              if (!hasOwn(args, "holeSizePercent")) return;
+              var value = args.holeSizePercent;
+              if (!Number.isInteger(value) || value < 10 || value > 90) {
+                throw invalidHoleSize("holeSizePercent must be an integer from 10 to 90", value, safeCall(chart, "GetChartType"));
+              }
+              var chartType = String(safeCall(chart, "GetChartType") || "unknown");
+              if (chartType !== "doughnut") {
+                throw invalidHoleSize("holeSizePercent is only supported for doughnut charts", value, chartType);
+              }
+              var model = doughnutChartModel(chart);
+              if (!model) {
+                throw commandError(
+                  "SLIDES_API_UNSUPPORTED",
+                  "当前 ONLYOFFICE 运行时不支持设置环形图孔径",
+                  { feature: "slides.charts.doughnutHoleSize", chartType: chartType }
+                );
+              }
+              model.setHoleSize(value);
+            }
+
             function describeDrawing(drawing, objectIndex, includeRaw, includeTextStyles) {
               var kind = drawingKind(drawing);
               var geometry = kind === "shape" ? safeCall(drawing, "GetGeometry") : null;
@@ -1385,6 +1667,7 @@
               if (kind === "chart") {
                 info.chartIndex = objectIndex;
                 info.chartType = safeCall(drawing, "GetChartType");
+                if (info.chartType === "doughnut") info.holeSizePercent = chartHoleSizePercent(drawing);
                 info.title = safeCall(drawing, "GetTitle");
                 var series = safeCall(drawing, "GetAllSeries");
                 info.series = Array.isArray(series) ? series.map(function (item, index) {
@@ -1394,6 +1677,17 @@
                     raw: includeRaw ? serialized(item) : undefined,
                   };
                 }) : [];
+              }
+              if (kind === "smartArt") {
+                var smartArtType = smartArtTypeInfo(drawing);
+                var smartArtNodes = smartArtNodeEntries(drawing);
+                info.smartArtIndex = objectIndex;
+                info.smartArtId = info.objectId;
+                info.smartArtType = smartArtType.name;
+                info.smartArtTypeValue = smartArtType.value;
+                info.nodes = smartArtNodes.map(function (entry, index) {
+                  return describeSmartArtNode(entry, index, includeTextStyles);
+                });
               }
               if (kind === "table") {
                 var tableInfo = describeTable(drawing);
@@ -1763,19 +2057,24 @@
             }
 
             function drawingMatches(drawing, args, objectIndex) {
-              var requestedId = args.objectId || args.chartId;
+              var requestedId = args.objectId || args.chartId || args.smartArtId;
               if (requestedId && String(safeCall(drawing, "GetInternalId")) !== String(requestedId)) return false;
               if (args.name && String(safeCall(drawing, "GetName")) !== String(args.name)) return false;
               var hasObjectIndex = hasOwn(args, "objectIndex");
               var hasChartIndex = hasOwn(args, "chartIndex");
-              var requestedIndex = hasObjectIndex ? args.objectIndex : args.chartIndex;
-              if ((hasObjectIndex || hasChartIndex) && objectIndex !== Number(requestedIndex)) return false;
-              return Boolean(requestedId || args.name || hasObjectIndex || hasChartIndex);
+              var hasSmartArtIndex = hasOwn(args, "smartArtIndex");
+              var requestedIndex = hasObjectIndex
+                ? args.objectIndex
+                : (hasChartIndex ? args.chartIndex : args.smartArtIndex);
+              if ((hasObjectIndex || hasChartIndex || hasSmartArtIndex) && objectIndex !== Number(requestedIndex)) return false;
+              return Boolean(requestedId || args.name || hasObjectIndex || hasChartIndex || hasSmartArtIndex);
             }
 
             function resolveDrawing(args, expectedKind) {
               var slide = getSlide(args.slide);
-              var drawings = expectedKind === "chart" ? slideCharts(slide) : slideDrawings(slide);
+              var drawings = expectedKind === "chart"
+                ? slideCharts(slide)
+                : (expectedKind === "smartArt" ? slideSmartArts(slide) : slideDrawings(slide));
               for (var index = 0; index < drawings.length; index += 1) {
                 if (!drawingMatches(drawings[index], args, index)) continue;
                 var kind = drawingKind(drawings[index]);
@@ -1784,7 +2083,7 @@
                 }
                 return { slide: slide, drawing: drawings[index], index: index };
               }
-              throw new Error("找不到目标对象；请提供有效的 objectId、name 或对象序号");
+              throw new Error("找不到目标对象；请提供有效的 objectId、chartId、smartArtId、name 或对象序号");
             }
 
             function resolveDrawingTargets(slideNumber, targets) {
@@ -1805,6 +2104,37 @@
               return resolved;
             }
 
+            function reinforceChartTitleText(chart, horizontal, fontSize, bold) {
+              var chartModel = chart && chart.Chart && chart.Chart.chart;
+              if (!chartModel || typeof AscCommonWord === "undefined" || typeof AscCommonWord.ParaTextPr !== "function") {
+                return false;
+              }
+              var title = null;
+              if (horizontal === null) {
+                title = chartModel.title;
+              } else if (chartModel.plotArea) {
+                var axisGetter = horizontal ? "getHorizontalAxis" : "getVerticalAxis";
+                var axisModel = typeof chartModel.plotArea[axisGetter] === "function"
+                  ? chartModel.plotArea[axisGetter]()
+                  : null;
+                title = axisModel && axisModel.title;
+              }
+              var content = title && typeof title.getDocContent === "function" ? title.getDocContent() : null;
+              if (!content || typeof content.SetApplyToAll !== "function" || typeof content.AddToParagraph !== "function") {
+                return false;
+              }
+              content.SetApplyToAll(true);
+              try {
+                content.AddToParagraph(new AscCommonWord.ParaTextPr({
+                  FontSize: asFinite(fontSize, horizontal === null ? 13 : 11),
+                  Bold: Boolean(bold),
+                }), false);
+              } finally {
+                content.SetApplyToAll(false);
+              }
+              return true;
+            }
+
             function applyChartAxis(chart, axis, horizontal) {
               if (!isObject(axis)) return;
               var prefix = horizontal ? "Hor" : "Vert";
@@ -1815,7 +2145,9 @@
               var minorTickMethod = horizontal ? "SetHorAxisMinorTickMark" : "SetVertAxisMinorTickMark";
               var labelPositionMethod = horizontal ? "SetHorAxisTickLabelPosition" : "SetVertAxisTickLabelPosition";
               if (hasOwn(axis, "title") && typeof chart[titleMethod] === "function") {
-                chart[titleMethod](String(axis.title), asFinite(axis.titleFontSize, 11));
+                var axisTitleFontSize = asFinite(axis.titleFontSize, 11);
+                chart[titleMethod](String(axis.title), axisTitleFontSize, Boolean(axis.titleBold));
+                reinforceChartTitleText(chart, horizontal, axisTitleFontSize, axis.titleBold);
               }
               if (hasOwn(axis, "labelsFontSize") && typeof chart[labelsMethod] === "function") {
                 chart[labelsMethod](asFinite(axis.labelsFontSize, 10));
@@ -1891,7 +2223,7 @@
                       chart.SetMarkerOutLine(createStroke(point.markerLine), seriesIndex, targetPoint, Boolean(point.allMarkers));
                     }
                     if (hasOwn(point, "numberFormat") && typeof chart.SetDataPointNumFormat === "function") {
-                      chart.SetDataPointNumFormat(String(point.numberFormat), seriesIndex, targetPoint);
+                      chart.SetDataPointNumFormat(String(point.numberFormat), seriesIndex, targetPoint, Boolean(point.allSeries));
                     }
                     if (isObject(point.dataLabels) && typeof chart.SetShowPointDataLabel === "function") {
                       chart.SetShowPointDataLabel(
@@ -1914,12 +2246,15 @@
             }
 
             function applyChartOptions(chart, args, spreadsheetMode) {
+              applyDoughnutHoleSize(chart, args);
               applyDrawingFrame(chart, args);
               if (hasOwn(args, "style") && typeof chart.ApplyChartStyle === "function") {
                 chart.ApplyChartStyle(clamp(Math.round(asFinite(args.style, 2)), 1, 48));
               }
               if (hasOwn(args, "title") && typeof chart.SetTitle === "function") {
-                chart.SetTitle(String(args.title), asFinite(args.titleFontSize, 13));
+                var chartTitleFontSize = asFinite(args.titleFontSize, 13);
+                chart.SetTitle(String(args.title), chartTitleFontSize, Boolean(args.titleBold));
+                reinforceChartTitleText(chart, null, chartTitleFontSize, args.titleBold);
               }
               if (hasOwn(args, "fill") && typeof chart.Fill === "function") chart.Fill(createFill(args.fill));
               if (hasOwn(args, "line") && typeof chart.SetOutLine === "function") chart.SetOutLine(createStroke(args.line));
@@ -2040,7 +2375,7 @@
                   results.push({
                     name: call.name,
                     slideCount: slideCount(),
-                    currentSlide: presentation.GetCurSlideIndex() + 1,
+                    currentSlide: slideCount() > 0 ? presentation.GetCurSlideIndex() + 1 : null,
                     widthMm: emuToMm(safeCall(presentation, "GetWidth")),
                     heightMm: emuToMm(safeCall(presentation, "GetHeight")),
                     masterCount: masterCount(),
@@ -2094,7 +2429,7 @@
                   var firstBackgroundSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
                   var lastBackgroundSlide = hasOwn(args, "slide") ? firstBackgroundSlide + 1 : slideCount();
                   if (firstBackgroundSlide < 0 || lastBackgroundSlide > slideCount()) {
-                    throw new Error("幻灯片页码超出范围");
+                    throw invalidSlideTarget(args.slide);
                   }
                   var backgroundSlides = [];
                   for (var backgroundSlideIndex = firstBackgroundSlide; backgroundSlideIndex < lastBackgroundSlide; backgroundSlideIndex += 1) {
@@ -2171,7 +2506,7 @@
                 case "slides_inspect_objects": {
                   var firstSlide = args.slide ? Number(args.slide) - 1 : 0;
                   var lastSlide = args.slide ? firstSlide + 1 : slideCount();
-                  if (firstSlide < 0 || lastSlide > slideCount()) throw new Error("幻灯片页码超出范围");
+                  if (firstSlide < 0 || lastSlide > slideCount()) throw invalidSlideTarget(args.slide);
                   var maxObjects = clamp(Math.round(asFinite(args.maxObjects, 200)), 1, 1000);
                   var kinds = Array.isArray(args.kinds) ? args.kinds.map(String) : null;
                   var objectSlides = [];
@@ -2212,7 +2547,7 @@
                   var firstValidationSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
                   var lastValidationSlide = hasOwn(args, "slide") ? firstValidationSlide + 1 : slideCount();
                   if (firstValidationSlide < 0 || lastValidationSlide > slideCount()) {
-                    throw new Error("幻灯片页码超出范围");
+                    throw invalidSlideTarget(args.slide);
                   }
                   var validatedSlides = [];
                   for (
@@ -2239,7 +2574,7 @@
                 case "slides_inspect_animations": {
                   var firstAnimationSlide = hasOwn(args, "slide") ? Number(args.slide) - 1 : 0;
                   var lastAnimationSlide = hasOwn(args, "slide") ? firstAnimationSlide + 1 : slideCount();
-                  if (firstAnimationSlide < 0 || lastAnimationSlide > slideCount()) throw new Error("幻灯片页码超出范围");
+                  if (firstAnimationSlide < 0 || lastAnimationSlide > slideCount()) throw invalidSlideTarget(args.slide);
                   var animationSlides = [];
                   for (var animationSlideIndex = firstAnimationSlide; animationSlideIndex < lastAnimationSlide; animationSlideIndex += 1) {
                     var animationSlide = presentation.GetSlideByIndex(animationSlideIndex);
@@ -2277,7 +2612,7 @@
                   if (!args.search) throw new Error("slides_replace_text.search 不能为空");
                   var replaceStart = args.slide ? Number(args.slide) - 1 : 0;
                   var replaceEnd = args.slide ? replaceStart + 1 : slideCount();
-                  if (replaceStart < 0 || replaceEnd > slideCount()) throw new Error("幻灯片页码超出范围");
+                  if (replaceStart < 0 || replaceEnd > slideCount()) throw invalidSlideTarget(args.slide);
                   var replacedRuns = 0;
                   for (var replaceSlideIndex = replaceStart; replaceSlideIndex < replaceEnd; replaceSlideIndex += 1) {
                     var replaceShapes = slideShapes(presentation.GetSlideByIndex(replaceSlideIndex));
@@ -2304,7 +2639,7 @@
                 case "slides_format_text": {
                   var formatStart = args.slide ? Number(args.slide) - 1 : 0;
                   var formatEnd = args.slide ? formatStart + 1 : slideCount();
-                  if (formatStart < 0 || formatEnd > slideCount()) throw new Error("幻灯片页码超出范围");
+                  if (formatStart < 0 || formatEnd > slideCount()) throw invalidSlideTarget(args.slide);
                   var scale = args.scale === undefined ? null : Number(args.scale);
                   if (call.name === "slides_scale_font" && (!isFinite(scale) || scale <= 0 || scale > 3)) {
                     throw new Error("slides_scale_font.scale 必须大于 0 且不超过 3");
@@ -2846,7 +3181,7 @@
                     } else if (hyperlinkAction === "slide") {
                       var hyperlinkSlide = Number(args.targetSlide);
                       if (!Number.isInteger(hyperlinkSlide) || hyperlinkSlide < 1 || hyperlinkSlide > slideCount()) {
-                        throw new Error("超链接目标幻灯片页码超出范围");
+                        throw invalidSlideTarget(args.targetSlide);
                       }
                       hyperlinkAddress = "ppaction://hlinksldjumpslide" + (hyperlinkSlide - 1);
                     } else {
@@ -3794,10 +4129,85 @@
                   break;
                 }
 
+                case "slides_inspect_smartarts": {
+                  var smartArtStart = args.slide ? Number(args.slide) - 1 : 0;
+                  var smartArtEnd = args.slide ? smartArtStart + 1 : slideCount();
+                  if (smartArtStart < 0 || smartArtEnd > slideCount()) throw invalidSlideTarget(args.slide);
+                  var maxSmartArts = clamp(Math.round(asFinite(args.maxSmartArts, 100)), 1, 500);
+                  var smartArtSlides = [];
+                  var smartArtTotal = 0;
+                  for (
+                    var smartArtSlideIndex = smartArtStart;
+                    smartArtSlideIndex < smartArtEnd && smartArtTotal < maxSmartArts;
+                    smartArtSlideIndex += 1
+                  ) {
+                    var inspectedSmartArtSlide = presentation.GetSlideByIndex(smartArtSlideIndex);
+                    var smartArts = slideSmartArts(inspectedSmartArtSlide);
+                    var describedSmartArts = [];
+                    for (
+                      var smartArtIndex = 0;
+                      smartArtIndex < smartArts.length && smartArtTotal < maxSmartArts;
+                      smartArtIndex += 1
+                    ) {
+                      describedSmartArts.push(describeDrawing(
+                        smartArts[smartArtIndex],
+                        smartArtIndex,
+                        Boolean(args.includeRaw),
+                        args.includeTextStyles !== false
+                      ));
+                      smartArtTotal += 1;
+                    }
+                    smartArtSlides.push({ slide: smartArtSlideIndex + 1, smartArts: describedSmartArts });
+                  }
+                  results.push({
+                    name: call.name,
+                    slides: smartArtSlides,
+                    smartArtCount: smartArtTotal,
+                    truncated: smartArtTotal >= maxSmartArts,
+                  });
+                  break;
+                }
+
+                case "slides_update_smartart": {
+                  var smartArtSelector = { slide: args.slide };
+                  if (hasOwn(args, "smartArtId")) smartArtSelector.smartArtId = args.smartArtId;
+                  else if (hasOwn(args, "smartArtIndex")) smartArtSelector.smartArtIndex = args.smartArtIndex;
+                  else smartArtSelector.name = args.name;
+                  var resolvedSmartArt = resolveDrawing(smartArtSelector, "smartArt");
+                  applySmartArtOptions(resolvedSmartArt.drawing, args);
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    smartArt: describeDrawing(
+                      resolvedSmartArt.drawing,
+                      resolvedSmartArt.index,
+                      Boolean(args.includeRaw),
+                      args.includeTextStyles !== false
+                    ),
+                  });
+                  break;
+                }
+
+                case "slides_delete_smartart": {
+                  var smartArtToDelete = resolveDrawing(args, "smartArt");
+                  var smartArtDeleted = typeof smartArtToDelete.drawing.Delete === "function"
+                    ? smartArtToDelete.drawing.Delete()
+                    : smartArtToDelete.slide.RemoveObject(smartArtToDelete.drawing);
+                  if (smartArtDeleted === false) throw new Error("删除 SmartArt 失败");
+                  changed += 1;
+                  results.push({
+                    name: call.name,
+                    slide: Number(args.slide),
+                    deletedSmartArtIndex: smartArtToDelete.index,
+                  });
+                  break;
+                }
+
                 case "slides_inspect_charts": {
                   var chartStart = args.slide ? Number(args.slide) - 1 : 0;
                   var chartEnd = args.slide ? chartStart + 1 : slideCount();
-                  if (chartStart < 0 || chartEnd > slideCount()) throw new Error("幻灯片页码超出范围");
+                  if (chartStart < 0 || chartEnd > slideCount()) throw invalidSlideTarget(args.slide);
                   var maxCharts = clamp(Math.round(asFinite(args.maxCharts, 100)), 1, 500);
                   var chartSlides = [];
                   var chartTotal = 0;
@@ -3825,6 +4235,7 @@
                   if (!Array.isArray(args.seriesNames) || !args.seriesNames.length) throw new Error("slides_add_chart.seriesNames 不能为空");
                   if (!Array.isArray(args.categories) || !args.categories.length) throw new Error("slides_add_chart.categories 不能为空");
                   var addChartSlide = getSlide(args.slide);
+                  var chartIndexBeforeAdd = slideCharts(addChartSlide).length;
                   var chartWidth = Math.max(20, asFinite(args.widthMm, 160)) * EMU_PER_MM;
                   var chartHeight = Math.max(20, asFinite(args.heightMm, 90)) * EMU_PER_MM;
                   var newChart = Api.CreateChart(
@@ -3840,15 +4251,21 @@
                   if (!newChart) throw new Error("创建 PPT 图表失败");
                   var chartArgs = {};
                   for (var chartArgName in args) chartArgs[chartArgName] = args[chartArgName];
+                  var requestedChartName = hasOwn(chartArgs, "name") ? String(chartArgs.name) : null;
+                  delete chartArgs.name;
                   if (!hasOwn(chartArgs, "xMm")) chartArgs.xMm = 15;
                   if (!hasOwn(chartArgs, "yMm")) chartArgs.yMm = 40;
                   applyChartOptions(newChart, chartArgs, false);
                   addChartSlide.AddObject(newChart);
+                  if (requestedChartName && typeof newChart.SetName === "function") newChart.SetName(requestedChartName);
+                  var addedSlideCharts = slideCharts(addChartSlide);
+                  var addedChartIndex = addedSlideCharts.indexOf(newChart);
+                  if (addedChartIndex < 0) addedChartIndex = chartIndexBeforeAdd;
                   changed += 1;
                   results.push({
                     name: call.name,
                     slide: Number(args.slide),
-                    chart: describeDrawing(newChart, slideCharts(addChartSlide).indexOf(newChart), Boolean(args.includeRaw)),
+                    chart: describeDrawing(newChart, addedChartIndex, Boolean(args.includeRaw)),
                   });
                   break;
                 }
@@ -3897,6 +4314,7 @@
               ok: false,
               code: error && error.code ? error.code : undefined,
               error: error && error.message ? error.message : String(error),
+              details: error && error.details !== undefined ? error.details : undefined,
             });
           }
         },
@@ -4017,8 +4435,167 @@
     );
   }
 
+  function triggerNativeSmartArt(slide, type) {
+    return new Promise(function (resolve, reject) {
+      Asc.scope.copilotSmartArtRequest = { slide: Number(slide), type: Number(type) };
+      Asc.plugin.info.recalculate = true;
+      Asc.plugin.callCommand(
+        function () {
+          try {
+            var request = Asc.scope.copilotSmartArtRequest || {};
+            var editorApi = Asc.editor || (typeof editor !== "undefined" ? editor : null);
+            if (!editorApi || typeof editorApi.asc_createSmartArt !== "function") {
+              throw new Error("当前 ONLYOFFICE 版本不支持原生 SmartArt 创建");
+            }
+            var pageIndex = Number(request.slide) - 1;
+            var logicDocument = typeof editorApi.getLogicDocument === "function"
+              ? editorApi.getLogicDocument()
+              : null;
+            if (logicDocument && typeof logicDocument.Set_CurPage === "function") {
+              logicDocument.Set_CurPage(pageIndex);
+            }
+            if (editorApi.WordControl && typeof editorApi.WordControl.GoToPage === "function") {
+              editorApi.WordControl.GoToPage(pageIndex);
+            }
+            editorApi.asc_createSmartArt(Number(request.type));
+            return JSON.stringify({ ok: true });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              code: error && error.code ? error.code : undefined,
+              error: error && error.message ? error.message : String(error),
+              details: error && error.details !== undefined ? error.details : undefined,
+            });
+          }
+        },
+        false,
+        true,
+        function (rawResult) {
+          try {
+            resolve(parseResult(rawResult));
+          } catch (error) {
+            reject(error);
+          }
+        },
+      );
+    });
+  }
+
+  function inspectedSmartArts(response) {
+    const result = response && Array.isArray(response.results) ? response.results[0] : null;
+    const slide = result && Array.isArray(result.slides) ? result.slides[0] : null;
+    return slide && Array.isArray(slide.smartArts) ? slide.smartArts : [];
+  }
+
+  function executeSmartArtAdd(call) {
+    const args = (call && (call.arguments || call.args)) || {};
+    const type = normalizeSmartArtType(args.type);
+    const inspectCall = {
+      name: "slides_inspect_smartarts",
+      arguments: {
+        slide: Number(args.slide),
+        maxSmartArts: 500,
+        includeRaw: false,
+        includeTextStyles: false,
+      },
+    };
+    let baseline = [];
+    let deadline = 0;
+
+    function pollForCreatedSmartArt() {
+      return executeOfficeCommands([inspectCall]).then(function (inspection) {
+        const current = inspectedSmartArts(inspection);
+        const baselineIds = baseline
+          .map(function (item) { return item.smartArtId || item.objectId; })
+          .filter(function (value) { return value !== null && value !== undefined && value !== ""; })
+          .map(String);
+        let created = current.find(function (item) {
+          const id = item.smartArtId || item.objectId;
+          return id !== null && id !== undefined && id !== "" && baselineIds.indexOf(String(id)) < 0;
+        });
+        if (!created && current.length > baseline.length) created = current[current.length - 1];
+        if (created) return created;
+        if (Date.now() >= deadline) {
+          throw new Error("等待 ONLYOFFICE 创建 SmartArt 超时");
+        }
+        return new Promise(function (resolve) {
+          setTimeout(resolve, 100);
+        }).then(pollForCreatedSmartArt);
+      });
+    }
+
+    return executeOfficeCommands([inspectCall])
+      .then(function (inspection) {
+        baseline = inspectedSmartArts(inspection);
+        deadline = Date.now() + 30000;
+        return triggerNativeSmartArt(args.slide, type);
+      })
+      .then(pollForCreatedSmartArt)
+      .then(function (created) {
+        const updateArguments = {};
+        Object.keys(args).forEach(function (key) {
+          if (key !== "type") updateArguments[key] = args[key];
+        });
+        if (created.smartArtId || created.objectId) {
+          updateArguments.smartArtId = created.smartArtId || created.objectId;
+        } else {
+          updateArguments.smartArtIndex = created.smartArtIndex;
+        }
+        return executeOfficeCommands([{
+          name: "slides_update_smartart",
+          arguments: updateArguments,
+        }]);
+      })
+      .then(function (updated) {
+        const result = updated.results && updated.results[0] ? updated.results[0] : {};
+        result.name = "slides_add_smartart";
+        return {
+          ok: true,
+          editorType: "slide",
+          changed: Math.max(1, Number(updated.changed) || 0),
+          needsSave: true,
+          results: [result],
+        };
+      });
+  }
+
+  function mergeExecutionResult(aggregate, result) {
+    aggregate.changed += Number(result && result.changed) || 0;
+    aggregate.needsSave = aggregate.needsSave || Boolean(result && result.needsSave);
+    if (result && Array.isArray(result.results)) {
+      Array.prototype.push.apply(aggregate.results, result.results);
+    }
+    return aggregate;
+  }
+
+  function executeSmartArtAware(toolCalls) {
+    const aggregate = {
+      ok: true,
+      editorType: "slide",
+      changed: 0,
+      needsSave: false,
+      results: [],
+    };
+    return toolCalls.reduce(function (promise, call) {
+      return promise.then(function () {
+        let operation;
+        if (call && call.name === "slides_add_smartart") operation = executeSmartArtAdd(call);
+        else if (isPluginTool(call)) operation = executePluginTool([call]);
+        else operation = executeOfficeCommands([call]);
+        return operation.then(function (result) {
+          mergeExecutionResult(aggregate, result);
+        });
+      });
+    }, Promise.resolve()).then(function () {
+      return aggregate;
+    });
+  }
+
   function execute(toolCalls) {
     requireStaticValidation(toolCalls);
+    if (toolCalls.some(function (call) { return call && call.name === "slides_add_smartart"; })) {
+      return executeSmartArtAware(toolCalls);
+    }
     if (toolCalls.some(isPluginTool)) return executePluginTool(toolCalls);
     return executeOfficeCommands(toolCalls);
   }

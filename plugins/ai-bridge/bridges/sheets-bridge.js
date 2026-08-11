@@ -2128,6 +2128,37 @@
               throw new Error("找不到目标图表；请提供有效的 chartIndex 或 name");
             }
 
+            function reinforceChartTitleText(chart, horizontal, fontSize, bold) {
+              var chartModel = chart && chart.Chart && chart.Chart.chart;
+              if (!chartModel || typeof AscCommonWord === "undefined" || typeof AscCommonWord.ParaTextPr !== "function") {
+                return false;
+              }
+              var title = null;
+              if (horizontal === null) {
+                title = chartModel.title;
+              } else if (chartModel.plotArea) {
+                var axisGetter = horizontal ? "getHorizontalAxis" : "getVerticalAxis";
+                var axisModel = typeof chartModel.plotArea[axisGetter] === "function"
+                  ? chartModel.plotArea[axisGetter]()
+                  : null;
+                title = axisModel && axisModel.title;
+              }
+              var content = title && typeof title.getDocContent === "function" ? title.getDocContent() : null;
+              if (!content || typeof content.SetApplyToAll !== "function" || typeof content.AddToParagraph !== "function") {
+                return false;
+              }
+              content.SetApplyToAll(true);
+              try {
+                content.AddToParagraph(new AscCommonWord.ParaTextPr({
+                  FontSize: asFinite(fontSize, horizontal === null ? 13 : 11),
+                  Bold: Boolean(bold),
+                }), false);
+              } finally {
+                content.SetApplyToAll(false);
+              }
+              return true;
+            }
+
             function applyChartAxis(chart, axis, horizontal) {
               if (!isObject(axis)) return;
               var titleMethod = horizontal ? "SetHorAxisTitle" : "SetVerAxisTitle";
@@ -2137,7 +2168,9 @@
               var minorTickMethod = horizontal ? "SetHorAxisMinorTickMark" : "SetVertAxisMinorTickMark";
               var labelPositionMethod = horizontal ? "SetHorAxisTickLabelPosition" : "SetVertAxisTickLabelPosition";
               if (hasOwn(axis, "title") && typeof chart[titleMethod] === "function") {
-                chart[titleMethod](String(axis.title), asFinite(axis.titleFontSize, 11));
+                var axisTitleFontSize = asFinite(axis.titleFontSize, 11);
+                chart[titleMethod](String(axis.title), axisTitleFontSize, Boolean(axis.titleBold));
+                reinforceChartTitleText(chart, horizontal, axisTitleFontSize, axis.titleBold);
               }
               if (hasOwn(axis, "labelsFontSize") && typeof chart[labelsMethod] === "function") {
                 chart[labelsMethod](asFinite(axis.labelsFontSize, 10));
@@ -2212,7 +2245,7 @@
                       chart.SetMarkerOutLine(createStroke(point.markerLine), seriesIndex, targetPoint, Boolean(point.allMarkers));
                     }
                     if (hasOwn(point, "numberFormat") && typeof chart.SetDataPointNumFormat === "function") {
-                      chart.SetDataPointNumFormat(String(point.numberFormat), seriesIndex, targetPoint);
+                      chart.SetDataPointNumFormat(String(point.numberFormat), seriesIndex, targetPoint, Boolean(point.allSeries));
                     }
                     if (isObject(point.dataLabels) && typeof chart.SetShowPointDataLabel === "function") {
                       chart.SetShowPointDataLabel(
@@ -2258,7 +2291,9 @@
                 chart.ApplyChartStyle(clamp(Math.round(asFinite(args.style, 2)), 1, 48));
               }
               if (hasOwn(args, "title") && typeof chart.SetTitle === "function") {
-                chart.SetTitle(String(args.title), asFinite(args.titleFontSize, 13));
+                var chartTitleFontSize = asFinite(args.titleFontSize, 13);
+                chart.SetTitle(String(args.title), chartTitleFontSize, Boolean(args.titleBold));
+                reinforceChartTitleText(chart, null, chartTitleFontSize, args.titleBold);
               }
               if (hasOwn(args, "fill") && typeof chart.Fill === "function") chart.Fill(createFill(args.fill));
               if (hasOwn(args, "line") && typeof chart.SetOutLine === "function") chart.SetOutLine(createStroke(args.line));

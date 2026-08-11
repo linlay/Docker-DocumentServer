@@ -75,6 +75,46 @@ EDITOR_CONFIG = {
     },
 }
 
+SLIDE_CONTRACT_GROUPS = {
+    "structure": (
+        "inspect", "inspect_layouts", "inspect_backgrounds", "inspect_themes",
+        "inspect_builtin_themes", "inspect_objects", "validate_layout",
+        "add_slide", "duplicate_slide", "delete_slide", "move_slide",
+        "set_visibility", "set_size", "apply_layout", "set_show_settings",
+    ),
+    "text": (
+        "replace_text", "scale_font", "format_text", "format_selection",
+        "set_text_content", "format_paragraphs", "add_textbox",
+        "add_word_art", "add_math",
+    ),
+    "templates": (
+        "apply_theme", "apply_builtin_theme", "set_theme", "create_layout",
+        "add_template_shape", "manage_template_object",
+        "set_template_background", "set_background",
+    ),
+    "objects": (
+        "update_object", "set_hyperlink", "align_objects", "group_objects",
+        "reorder_object", "add_connector", "add_freeform", "add_image",
+        "add_image_shape", "add_ole_object", "add_shape", "update_shape",
+        "delete_object",
+    ),
+    "tables": (
+        "add_table", "set_table_cell", "edit_table", "format_table",
+    ),
+    "smartart": (
+        "inspect_smartarts", "add_smartart", "update_smartart",
+        "delete_smartart",
+    ),
+    "charts": (
+        "inspect_charts", "add_chart", "update_chart", "delete_chart",
+    ),
+    "collaboration": (
+        "set_notes", "add_comment", "inspect_comments", "manage_comment",
+        "set_transition", "inspect_animations", "manage_animation",
+        "inspect_macros", "set_macros", "control_slideshow",
+    ),
+}
+
 
 def render_skill_version(source: str, version: str) -> str:
     """Update only metadata.version in a SKILL.md YAML frontmatter."""
@@ -348,6 +388,7 @@ def conditional_projection(
     positive_fields = []
     negative_fields = []
     base_properties = base_schema.get("properties") or {}
+    consequence_properties = consequence.get("properties") or {}
 
     for name in condition_required:
         property_condition = condition_properties.get(name) or {}
@@ -362,7 +403,10 @@ def conditional_projection(
             positive_fields.append(f"{ts_property_name(name)}: {property_type};")
             negative_fields.append(f"{ts_property_name(name)}?: never;")
     for name in then_required:
-        property_type = ts_type(base_properties.get(name, {}), definitions)
+        property_type = ts_type(
+            consequence_properties.get(name, base_properties.get(name, {})),
+            definitions,
+        )
         positive_fields.append(f"{ts_property_name(name)}: {property_type};")
     if not positive_fields:
         return "unknown"
@@ -497,6 +541,26 @@ def replace_types_contract_version(
         lambda match: match.group(1) + f'"{contract["version"]}";',
         source,
     )
+
+
+def replace_types_error_codes(source: str, contract: dict[str, Any]) -> str:
+    codes = ["AI_BRIDGE_ERROR"]
+    for code in contract.get("errors") or []:
+        if isinstance(code, str) and code not in codes:
+            codes.append(code)
+    rendered = (
+        "export type AiBridgeErrorCode =\n"
+        + "\n".join(f"  | {json.dumps(code)}" for code in codes)
+        + "\n  | string;"
+    )
+    pattern = re.compile(
+        r"export type AiBridgeErrorCode =\n.*?\n  \| string;",
+        re.DOTALL,
+    )
+    updated, count = pattern.subn(rendered, source, count=1)
+    if count != 1:
+        raise ValueError("public-api.d.ts must define AiBridgeErrorCode")
+    return updated
 
 
 def render_plugin_region(contract: dict[str, Any], sha256: str) -> str:
@@ -708,6 +772,50 @@ def scoped_contract(
     }
 
 
+def referenced_definitions(
+    value: Any,
+    definitions: dict[str, Any],
+) -> dict[str, Any]:
+    names: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                visit(item)
+            return
+        if not isinstance(node, dict):
+            return
+        reference = node.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.removeprefix("#/$defs/")
+            if name not in definitions:
+                raise ValueError(f"unresolved contract reference: {reference}")
+            if name not in names:
+                names.add(name)
+                visit(definitions[name])
+        for child in node.values():
+            visit(child)
+
+    visit(value)
+    return {name: definitions[name] for name in definitions if name in names}
+
+
+def scoped_contract_group(
+    scoped: dict[str, Any],
+    tool_names: tuple[str, ...],
+) -> dict[str, Any]:
+    missing = [name for name in tool_names if name not in scoped["tools"]]
+    if missing:
+        raise ValueError(f"missing grouped tools: {', '.join(missing)}")
+    grouped = copy.deepcopy(scoped)
+    grouped["tools"] = {name: scoped["tools"][name] for name in tool_names}
+    grouped["$defs"] = referenced_definitions(
+        grouped["tools"],
+        scoped["$defs"],
+    )
+    return grouped
+
+
 def public_tool_name(editor: str, internal_name: str) -> str:
     prefix = EDITOR_CONFIG[editor]["prefix"]
     if not internal_name.startswith(prefix) or internal_name == prefix:
@@ -742,7 +850,10 @@ def collect_enums(
     return values
 
 
-def render_markdown(scoped: dict[str, Any]) -> str:
+def render_markdown(
+    scoped: dict[str, Any],
+    include_full_schema: bool = True,
+) -> str:
     lines = [
         f"# {EDITOR_CONFIG[scoped['editorType']]['label']} ai-bridge 生成契约",
         "",
@@ -834,29 +945,42 @@ def render_markdown(scoped: dict[str, Any]) -> str:
                 )
         else:
             lines.append("- 枚举：无")
+        if include_full_schema:
+            lines.extend(
+                [
+                    "",
+                    "<details><summary>完整 JSON Schema</summary>",
+                    "",
+                    "```json",
+                    json.dumps(schema, ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                    "</details>",
+                    "",
+                ]
+            )
+        else:
+            lines.append("")
+    if include_full_schema:
         lines.extend(
             [
-                "",
-                "<details><summary>完整 JSON Schema</summary>",
+                "## `$defs`",
                 "",
                 "```json",
-                json.dumps(schema, ensure_ascii=False, indent=2),
+                json.dumps(scoped["$defs"], ensure_ascii=False, indent=2),
                 "```",
-                "",
-                "</details>",
                 "",
             ]
         )
-    lines.extend(
-        [
-            "## `$defs`",
-            "",
-            "```json",
-            json.dumps(scoped["$defs"], ensure_ascii=False, indent=2),
-            "```",
-            "",
-        ]
-    )
+    else:
+        lines.extend(
+            [
+                "## 精确 Schema",
+                "",
+                "本文件只保留渐进式摘要；同名 `.generated.json` 含本组完整、自包含 JSON Schema。",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -864,21 +988,123 @@ def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def action_params(kind: str) -> list[str]:
+def schema_has_required_business_fields(schema: dict[str, Any]) -> bool:
+    if schema.get("required"):
+        return True
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list) and any(
+            isinstance(branch, dict) and branch.get("required")
+            for branch in branches
+        ):
+            return True
+    return False
+
+
+def minimal_schema_example(schema: Any, definitions: dict[str, Any]) -> Any:
+    if not isinstance(schema, dict):
+        return None
+    if "$ref" in schema:
+        ref = str(schema["$ref"])
+        prefix = "#/$defs/"
+        return minimal_schema_example(definitions.get(ref[len(prefix):], {}), definitions)
+    if "const" in schema:
+        return copy.deepcopy(schema["const"])
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return copy.deepcopy(enum[0])
+
+    selected_branch = None
+    for keyword in ("oneOf", "anyOf"):
+        branches = schema.get(keyword)
+        if isinstance(branches, list) and branches:
+            selected_branch = branches[0]
+            break
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((item for item in schema_type if item != "null"), schema_type[0])
+    if not schema_type and isinstance(selected_branch, dict):
+        branch_example = minimal_schema_example(selected_branch, definitions)
+        if not isinstance(branch_example, dict) or not schema.get("properties"):
+            return branch_example
+        schema_type = "object"
+
+    if schema_type == "object" or "properties" in schema:
+        properties = schema.get("properties") or {}
+        required = list(schema.get("required") or [])
+        if isinstance(selected_branch, dict):
+            for key in selected_branch.get("required") or []:
+                if key not in required:
+                    required.append(key)
+        return {
+            key: minimal_schema_example(properties.get(key, {}), definitions)
+            for key in required
+        }
+    if schema_type == "array":
+        count = max(1, int(schema.get("minItems") or 0))
+        return [minimal_schema_example(schema.get("items") or {}, definitions) for _ in range(count)]
+    if schema_type == "integer":
+        minimum = schema.get("minimum")
+        return int(minimum) if isinstance(minimum, (int, float)) else 1
+    if schema_type == "number":
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)):
+            return minimum + (1 if schema.get("exclusiveMinimum") else 0)
+        return 1
+    if schema_type == "boolean":
+        return False
+    if schema_type == "string":
+        if schema.get("format") in {"uri", "url"}:
+            return "https://example.test/resource"
+        pattern = str(schema.get("pattern") or "")
+        if "0-9A-Fa-f" in pattern and "6" in pattern:
+            return "#000000"
+        return "example"
+    return {}
+
+
+def action_params(
+    kind: str,
+    *,
+    action_name: str = "request",
+    schema: dict[str, Any] | None = None,
+    definitions: dict[str, Any] | None = None,
+) -> list[str]:
+    request_example = f"{kind}-{action_name}-1"
     if kind == "tool":
+        schema = schema or {}
+        definitions = definitions or {}
+        empty_read = (
+            schema.get("x-effects") == "read"
+            and not schema_has_required_business_fields(schema)
+        )
+        arguments_example = canonical_json(minimal_schema_example(schema, definitions))
         return [
-            '  { name = "arguments_json", type = "json object string", required = true, description = "业务参数 JSON；字段与枚举以生成契约为准" },',
-            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID；写操作重试必须复用" },',
+            '  { name = "arguments_json", type = "json object string", required = '
+            + ("false" if empty_read else "true")
+            + ', description = "业务参数 JSON；字段与枚举以生成契约为准", example = '
+            + toml_string(arguments_example)
+            + " },",
+            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID；写操作重试必须复用", example = '
+            + toml_string(request_example)
+            + " },",
             '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
         ]
     if kind in {"batch", "validate"}:
         return [
-            '  { name = "tool_calls_json", type = "json array string", required = true, description = "工具调用数组；业务参数由 /bridge/validate 按生成契约校验" },',
-            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID" },',
+            '  { name = "tool_calls_json", type = "json array string", required = true, description = "工具调用数组；标准字段为 name，action 仅作兼容别名", example = '
+            + toml_string('[{"name":"set_size","arguments":{"preset":"wide"}}]')
+            + " },",
+            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID", example = '
+            + toml_string(request_example)
+            + " },",
             '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
         ]
     return [
-        '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID" },',
+        '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID", example = '
+        + toml_string(request_example)
+        + " },",
         '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
     ]
 
@@ -1040,7 +1266,7 @@ def render_toml(
             'body = { method = "getState", requestId = { from = "param", key = "request_id" }, timeoutMs = { from = "param", key = "timeout_ms", default = 30000 } }',
             "expect_status = 200",
             "params = [",
-            *action_params("control"),
+            *action_params("control", action_name="get_state"),
             "]",
             'extract_type = "jq"',
             'extract_expr = ".body | del(.session)"',
@@ -1049,13 +1275,26 @@ def render_toml(
     )
     for internal_name, schema in contract["tools"][editor].items():
         name = public_tool_name(editor, internal_name)
+        empty_read_arguments = (
+            schema.get("x-effects") == "read"
+            and not schema_has_required_business_fields(schema)
+        )
+        arguments_source = '{ from = "param", key = "arguments_json"'
+        if empty_read_arguments:
+            arguments_source += ', default = "{}"'
+        arguments_source += " }"
+        arguments_note = (
+            "无业务参数时可省略 arguments_json，默认使用空对象"
+            if empty_read_arguments
+            else "业务参数统一通过 arguments_json"
+        )
         lines.extend(
             [
                 f"[actions.{name}]",
                 (
                     "description = "
                     + toml_string(
-                        f"{schema['description']}；业务参数统一通过 arguments_json"
+                        f"{schema['description']}；{arguments_note}"
                     )
                 ),
                 'method = "POST"',
@@ -1063,13 +1302,18 @@ def render_toml(
                 'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
                 (
                     'body = { method = "executeTool", '
-                    f'name = "{name}", argumentsJson = {{ from = "param", key = "arguments_json" }}, '
+                    f'name = "{name}", argumentsJson = {arguments_source}, '
                     'requestId = { from = "param", key = "request_id" }, '
                     'timeoutMs = { from = "param", key = "timeout_ms", default = 90000 } }'
                 ),
                 "expect_status = 200",
                 "params = [",
-                *action_params("tool"),
+                *action_params(
+                    "tool",
+                    action_name=name,
+                    schema=schema,
+                    definitions=contract.get("$defs") or {},
+                ),
                 "]",
                 'extract_type = "jq"',
                 'extract_expr = ".body | del(.session)"',
@@ -1102,7 +1346,7 @@ def render_toml(
                 "body = { " + ", ".join(body_parts) + " }",
                 "expect_status = 200",
                 "params = [",
-                *action_params(kind),
+                *action_params(kind, action_name=action_name),
                 "]",
                 'extract_type = "jq"',
                 'extract_expr = ".body | del(.session)"',
@@ -1159,7 +1403,7 @@ def render_toml(
                 ),
                 "expect_status = 200",
                 "params = [",
-                *action_params("control"),
+                *action_params("control", action_name=control),
                 "]",
                 'extract_type = "jq"',
                 'extract_expr = ".body | del(.session)"',
@@ -1173,13 +1417,17 @@ def build_artifacts(
     contract: dict[str, Any],
     zenmind_root: Path | None,
     httpx_base_url: str | None = None,
+    editors: tuple[str, ...] | None = None,
 ) -> dict[Path, str]:
     sha256 = contract_sha256(contract)
     artifacts = {
-        TYPES_PATH: replace_types_contract_version(
-            replace_types_region(
-                TYPES_PATH.read_text(encoding="utf-8"),
-                render_types_region(contract),
+        TYPES_PATH: replace_types_error_codes(
+            replace_types_contract_version(
+                replace_types_region(
+                    TYPES_PATH.read_text(encoding="utf-8"),
+                    render_types_region(contract),
+                ),
+                contract,
             ),
             contract,
         ),
@@ -1244,9 +1492,14 @@ def build_artifacts(
         return artifacts
     if not zenmind_root.is_dir():
         raise ValueError(f"zenmind root does not exist: {zenmind_root}")
-    validate_skill_layout(zenmind_root)
+    selected_editors = editors or tuple(EDITOR_CONFIG)
+    unknown_editors = sorted(set(selected_editors) - set(EDITOR_CONFIG))
+    if unknown_editors:
+        raise ValueError(f"unknown editors: {unknown_editors}")
+    validate_skill_layout(zenmind_root, selected_editors)
     normalized_httpx_base_url = normalize_httpx_base_url(httpx_base_url)
-    for editor, config in EDITOR_CONFIG.items():
+    for editor in selected_editors:
+        config = EDITOR_CONFIG[editor]
         scoped = scoped_contract(contract, editor, sha256)
         skill_root = (
             zenmind_root
@@ -1259,10 +1512,36 @@ def build_artifacts(
             skill_path.read_text(encoding="utf-8"),
             contract["version"],
         )
-        artifacts[references / "contract.generated.json"] = (
-            json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
-        )
-        artifacts[references / "contract.generated.md"] = render_markdown(scoped)
+        if editor == "slide":
+            grouped_names = [
+                name
+                for names in SLIDE_CONTRACT_GROUPS.values()
+                for name in names
+            ]
+            if len(grouped_names) != len(set(grouped_names)):
+                raise ValueError("slide contract groups contain duplicate tools")
+            if set(grouped_names) != set(scoped["tools"]):
+                missing = sorted(set(scoped["tools"]) - set(grouped_names))
+                extra = sorted(set(grouped_names) - set(scoped["tools"]))
+                raise ValueError(
+                    "slide contract groups must cover every tool exactly once; "
+                    f"missing={missing}, extra={extra}"
+                )
+            for group_name, tool_names in SLIDE_CONTRACT_GROUPS.items():
+                grouped = scoped_contract_group(scoped, tool_names)
+                stem = f"contract-{group_name}.generated"
+                artifacts[references / f"{stem}.json"] = (
+                    json.dumps(grouped, ensure_ascii=False, indent=2) + "\n"
+                )
+                artifacts[references / f"{stem}.md"] = render_markdown(
+                    grouped,
+                    include_full_schema=False,
+                )
+        else:
+            artifacts[references / "contract.generated.json"] = (
+                json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
+            )
+            artifacts[references / "contract.generated.md"] = render_markdown(scoped)
         artifacts[
             skill_root / ".config" / "httpx" / config["toml"]
         ] = render_toml(
@@ -1274,11 +1553,20 @@ def build_artifacts(
     return artifacts
 
 
-def validate_skill_layout(zenmind_root: Path) -> None:
+def validate_skill_layout(
+    zenmind_root: Path,
+    editors: tuple[str, ...] | None = None,
+) -> None:
+    selected_editors = editors or tuple(EDITOR_CONFIG)
     forbidden = [
-        zenmind_root / "skills-center" / config["skill"] / "scripts"
-        for config in EDITOR_CONFIG.values()
-        if (zenmind_root / "skills-center" / config["skill"] / "scripts").exists()
+        zenmind_root / "skills-center" / EDITOR_CONFIG[editor]["skill"] / "scripts"
+        for editor in selected_editors
+        if (
+            zenmind_root
+            / "skills-center"
+            / EDITOR_CONFIG[editor]["skill"]
+            / "scripts"
+        ).exists()
     ]
     if forbidden:
         paths = ", ".join(str(path) for path in forbidden)
@@ -1288,7 +1576,8 @@ def validate_skill_layout(zenmind_root: Path) -> None:
         )
 
     missing_internal_boundary = []
-    for config in EDITOR_CONFIG.values():
+    for editor in selected_editors:
+        config = EDITOR_CONFIG[editor]
         skill_path = zenmind_root / "skills-center" / config["skill"] / "SKILL.md"
         body = skill_path.read_text(encoding="utf-8")
         if (
@@ -1348,9 +1637,9 @@ def validate_contract(contract: dict[str, Any]) -> None:
                     f"{editor}.{name} has invalid x-semanticValidators"
                 )
             resolve_schema(schema, contract.get("$defs") or {})
-    if len(names) != 156 or len(names) != len(set(names)):
+    if len(names) != 160 or len(names) != len(set(names)):
         raise ValueError(
-            f"expected 156 unique tools, found {len(names)} total/{len(set(names))} unique"
+            f"expected 160 unique tools, found {len(names)} total/{len(set(names))} unique"
         )
 
 
@@ -1379,6 +1668,12 @@ def main() -> int:
             "required with --zenmind-root"
         ),
     )
+    parser.add_argument(
+        "--editor",
+        action="append",
+        choices=tuple(EDITOR_CONFIG),
+        help="limit zenmind skill/TOML projection to one editor; repeatable",
+    )
     args = parser.parse_args()
     contract = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     validate_contract(contract)
@@ -1387,6 +1682,7 @@ def main() -> int:
             contract,
             args.zenmind_root,
             args.httpx_base_url,
+            tuple(args.editor) if args.editor else None,
         )
     except ValueError as error:
         parser.error(str(error))

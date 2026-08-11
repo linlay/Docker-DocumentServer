@@ -174,6 +174,7 @@
     "INVALID_TOOL_CALL",
     "INVALID_ARGUMENTS",
     "INVALID_TOOL_ARGUMENTS",
+    "INVALID_TARGET",
     "ARGUMENTS_TOO_LARGE",
     "TOO_MANY_CALLS",
     "TOOL_NOT_ALLOWED",
@@ -191,6 +192,7 @@
     "IMAGE_ASSET_EXPIRED",
     "IMAGE_API_UNSUPPORTED",
     "WORD_API_UNSUPPORTED",
+    "SLIDES_API_UNSUPPORTED",
     "SHEETS_API_UNSUPPORTED",
     "BATCH_DEPENDENCY_REQUIRES_SPLIT",
     "SHEETS_CHART_CREATE_FAILED",
@@ -556,6 +558,134 @@
         },
         "name": {
           "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "smartArtType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "AccentedPicture", "Balance", "TitledPictureBlocks", "PictureAccentBlocks", "BlockCycle",
+            "StackedVenn", "VerticalEquation", "VerticalBlockList", "VerticalBendingProcess", "VerticalBulletList",
+            "VerticalCurvedList", "VerticalProcess", "VerticalBoxList", "VerticalPictureList", "VerticalCircleList",
+            "VerticalPictureAccentList", "VerticalArrowList", "VerticalChevronList", "VerticalAccentList", "NestedTarget",
+            "Funnel", "UpwardArrow", "IncreasingArrowsProcess", "StepUpProcess", "CircularPictureCallout",
+            "HorizontalHierarchy", "HorizontalLabeledHierarchy", "HorizontalMultiLevelHierarchy", "HorizontalOrganizationChart", "HorizontalBulletList",
+            "HorizontalPictureList", "ClosedChevronProcess", "HierarchyList", "Hierarchy", "CirclePictureHierarchy",
+            "LabeledHierarchy", "InvertedPyramid", "HexagonCluster", "CircleRelationship", "CircleAccentTimeline",
+            "CircularBendingProcess", "ArrowRibbon", "LinearVenn", "PictureLineup", "TitlePictureLineup",
+            "BendingPictureCaptionList", "BendingPictureAccentList", "TitledMatrix", "IncreasingCircleProcess", "BendingPictureBlocks",
+            "BendingPictureCaption", "BendingPictureSemiTransparentText", "NonDirectionalCycle", "ContinuousBlockProcess", "ContinuousPictureList",
+            "ContinuousCycle", "DescendingBlockList", "StepDownProcess", "ReverseList", "OrganizationChart",
+            "NameAndTitleOrganizationChart", "AlternatingFlow", "PyramidList", "PlusAndMinus", "RepeatingBendingProcess",
+            "CaptionedPictures", "DetailedProcess", "PictureStrips", "HalfCircleOrganizationChart", "PhasedProcess",
+            "BasicVenn", "BasicTimeline", "BasicPie", "BasicMatrix", "BasicPyramid",
+            "BasicRadial", "BasicTarget", "BasicBlockList", "BasicBendingProcess", "BasicProcess",
+            "BasicChevronProcess", "BasicCycle", "OpposingIdeas", "OpposingArrows", "RandomToResultProcess",
+            "SubStepProcess", "PieProcess", "AccentProcess", "AscendingPictureAccentProcess", "PictureAccentProcess",
+            "RadialVenn", "RadialCycle", "RadialCluster", "RadialList", "MultiDirectionalCycle",
+            "DivergingRadial", "DivergingArrows", "FramedTextPicture", "GroupedList", "SegmentedPyramid",
+            "SegmentedProcess", "SegmentedCycle", "PictureGrid", "GridMatrix", "SpiralPicture",
+            "StackedList", "PictureCaptionList", "ProcessList", "BubblePictureList", "SquareAccentList",
+            "LinedList", "PictureAccentList", "TitledPictureAccentList", "SnapshotPictureList", "ContinuousArrowProcess",
+            "CircleArrowProcess", "ProcessArrows", "StaggeredProcess", "ConvergingRadial", "ConvergingArrows",
+            "TableHierarchy", "TableList", "TextCycle", "TrapezoidList", "DescendingProcess",
+            "ChevronList", "Equation", "CounterbalanceArrows", "TargetList", "CycleMatrix",
+            "AlternatingPictureBlocks", "AlternatingPictureCircles", "AlternatingHexagonList", "Gear", "ArchitectureLayout",
+            "ChevronAccentProcess", "CircleProcess", "ConvergingText", "HexagonRadial", "InterconnectedBlockProcess",
+            "InterconnectedRings", "PictureFrame", "PictureOrganizationChart", "RadialPictureList", "TabList",
+            "TabbedArc", "ThemePictureAccent", "ThemePictureAlternatingAccent", "ThemePictureGrid", "VaryingWidthList",
+            "VerticalBracketList"
+          ]
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 150
+        }
+      ],
+      "description": "ONLYOFFICE 9.4 的 151 种原生 SmartArt 预设；字符串名称与数值 0-150 一一对应"
+    },
+    "smartArtNodeUpdate": {
+      "type": "object",
+      "anyOf": [
+        {
+          "required": [
+            "index"
+          ]
+        },
+        {
+          "required": [
+            "nodeId"
+          ]
+        }
+      ],
+      "not": {
+        "required": [
+          "text",
+          "paragraphs"
+        ]
+      },
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "paragraphs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/slideTextParagraph"
+          }
+        },
+        "fontSize": {
+          "type": "number",
+          "minimum": 1
+        },
+        "fontFamily": {
+          "type": "string"
+        },
+        "bold": {
+          "type": "boolean"
+        },
+        "italic": {
+          "type": "boolean"
+        },
+        "underline": {
+          "type": "boolean"
+        },
+        "color": {
+          "$ref": "#/$defs/color"
+        },
+        "align": {
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "both"
+          ]
+        },
+        "verticalAlign": {
+          "enum": [
+            "top",
+            "center",
+            "bottom"
+          ]
+        },
+        "fill": {
+          "$ref": "#/$defs/fill"
+        },
+        "line": {
+          "$ref": "#/$defs/line"
         }
       },
       "additionalProperties": false
@@ -1217,6 +1347,9 @@
         },
         "titleFontSize": {
           "type": "number"
+        },
+        "titleBold": {
+          "type": "boolean"
         },
         "labelsFontSize": {
           "type": "number"
@@ -9063,6 +9196,225 @@
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
       },
+      "slides_inspect_smartarts": {
+        "type": "object",
+        "properties": {
+          "slide": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "maxSmartArts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "includeRaw": {
+            "type": "boolean"
+          },
+          "includeTextStyles": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "description": "只读检查 PPT 中的原生 SmartArt 预设、位置、逻辑节点、节点文本和可选样式/原始 JSON",
+        "x-effects": "read",
+        "x-argumentLimitClass": "standard",
+        "x-semanticValidators": []
+      },
+      "slides_add_smartart": {
+        "type": "object",
+        "required": [
+          "slide",
+          "type"
+        ],
+        "properties": {
+          "slide": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "type": {
+            "$ref": "#/$defs/smartArtType"
+          },
+          "xMm": {
+            "type": "number"
+          },
+          "yMm": {
+            "type": "number"
+          },
+          "widthMm": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "heightMm": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "rotationDeg": {
+            "type": "number"
+          },
+          "flipH": {
+            "type": "boolean"
+          },
+          "flipV": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "nodeFill": {
+            "$ref": "#/$defs/fill"
+          },
+          "nodeLine": {
+            "$ref": "#/$defs/line"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/smartArtNodeUpdate"
+            }
+          },
+          "includeRaw": {
+            "type": "boolean"
+          },
+          "includeTextStyles": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "description": "在指定 PPT 页异步创建 151 种预设之一的原生 SmartArt，并设置框架、名称及持久化到数据模型的节点文本和样式",
+        "x-effects": "write",
+        "x-argumentLimitClass": "standard",
+        "x-semanticValidators": []
+      },
+      "slides_update_smartart": {
+        "type": "object",
+        "required": [
+          "slide"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "smartArtId"
+            ]
+          },
+          {
+            "required": [
+              "smartArtIndex"
+            ]
+          },
+          {
+            "required": [
+              "name"
+            ]
+          }
+        ],
+        "properties": {
+          "slide": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "smartArtId": {
+            "type": "string"
+          },
+          "smartArtIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "xMm": {
+            "type": "number"
+          },
+          "yMm": {
+            "type": "number"
+          },
+          "widthMm": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "heightMm": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "rotationDeg": {
+            "type": "number"
+          },
+          "flipH": {
+            "type": "boolean"
+          },
+          "flipV": {
+            "type": "boolean"
+          },
+          "nodeFill": {
+            "$ref": "#/$defs/fill"
+          },
+          "nodeLine": {
+            "$ref": "#/$defs/line"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/smartArtNodeUpdate"
+            }
+          },
+          "includeRaw": {
+            "type": "boolean"
+          },
+          "includeTextStyles": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "description": "按 smartArtId、smartArtIndex 或 name 更新原生 SmartArt 的框架、名称及节点文本/样式，并同步回 SmartArt 数据模型",
+        "x-effects": "write",
+        "x-argumentLimitClass": "standard",
+        "x-semanticValidators": []
+      },
+      "slides_delete_smartart": {
+        "type": "object",
+        "required": [
+          "slide"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "smartArtId"
+            ]
+          },
+          {
+            "required": [
+              "smartArtIndex"
+            ]
+          },
+          {
+            "required": [
+              "name"
+            ]
+          }
+        ],
+        "properties": {
+          "slide": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "smartArtId": {
+            "type": "string"
+          },
+          "smartArtIndex": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "description": "按 smartArtId、smartArtIndex 或 name 删除 PPT 原生 SmartArt",
+        "x-effects": "write",
+        "x-argumentLimitClass": "standard",
+        "x-semanticValidators": []
+      },
       "slides_inspect_charts": {
         "type": "object",
         "properties": {
@@ -9092,6 +9444,25 @@
           "series",
           "seriesNames",
           "categories"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "holeSizePercent"
+              ]
+            },
+            "then": {
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "const": "doughnut"
+                }
+              }
+            }
+          }
         ],
         "properties": {
           "slide": {
@@ -9158,11 +9529,20 @@
             "minimum": 1,
             "maximum": 48
           },
+          "holeSizePercent": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 90,
+            "description": "环形图圆孔占直径的百分比；数值越小环越粗，仅适用于 doughnut"
+          },
           "title": {
             "type": "string"
           },
           "titleFontSize": {
             "type": "number"
+          },
+          "titleBold": {
+            "type": "boolean"
           },
           "rotationDeg": {
             "type": "number"
@@ -9288,11 +9668,20 @@
             "minimum": 1,
             "maximum": 48
           },
+          "holeSizePercent": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 90,
+            "description": "环形图圆孔占直径的百分比；数值越小环越粗，仅适用于 doughnut"
+          },
           "title": {
             "type": "string"
           },
           "titleFontSize": {
             "type": "number"
+          },
+          "titleBold": {
+            "type": "boolean"
           },
           "rotationDeg": {
             "type": "number"
@@ -11134,6 +11523,9 @@
           "titleFontSize": {
             "type": "number"
           },
+          "titleBold": {
+            "type": "boolean"
+          },
           "inRows": {
             "type": "boolean"
           },
@@ -11309,6 +11701,9 @@
           },
           "titleFontSize": {
             "type": "number"
+          },
+          "titleBold": {
+            "type": "boolean"
           },
           "rotationDeg": {
             "type": "number"

@@ -5,15 +5,27 @@ export type AiBridgeErrorCode =
   | "NOT_READY"
   | "CONNECTION_TIMEOUT"
   | "TIMEOUT"
+  | "BRIDGE_TIMEOUT"
+  | "EDITOR_TOKEN_REQUIRED"
+  | "INVALID_EDITOR_TOKEN"
+  | "EDITOR_TOKEN_EXPIRED"
+  | "INVALID_BRIDGE_RESUME_TOKEN"
+  | "BRIDGE_RESUME_TOKEN_EXPIRED"
+  | "INVALID_RELAY_SESSION"
+  | "NO_ACTIVE_EDITOR"
+  | "MULTIPLE_ACTIVE_EDITORS"
+  | "SESSION_NOT_FOUND"
   | "INVALID_TARGET_WINDOW"
   | "INVALID_TARGET_ORIGIN"
   | "INVALID_CLIENT_ID"
   | "INVALID_REQUEST_ID"
+  | "REQUEST_ID_CONFLICT"
   | "REQUEST_IN_FLIGHT"
   | "INVALID_COMMAND"
   | "INVALID_TOOL_CALL"
   | "INVALID_ARGUMENTS"
   | "INVALID_TOOL_ARGUMENTS"
+  | "INVALID_TARGET"
   | "ARGUMENTS_TOO_LARGE"
   | "TOO_MANY_CALLS"
   | "TOOL_NOT_ALLOWED"
@@ -22,7 +34,6 @@ export type AiBridgeErrorCode =
   | "DOCUMENT_NOT_CONFIGURED"
   | "DOCUMENT_MISMATCH"
   | "EDITOR_MISMATCH"
-  | "CONTRACT_VERSION_MISMATCH"
   | "PERSISTENCE_FAILED"
   | "INVALID_IMAGE_SOURCE"
   | "IMAGE_FETCH_BLOCKED"
@@ -32,13 +43,16 @@ export type AiBridgeErrorCode =
   | "IMAGE_ASSET_EXPIRED"
   | "IMAGE_API_UNSUPPORTED"
   | "WORD_API_UNSUPPORTED"
+  | "SLIDES_API_UNSUPPORTED"
   | "SHEETS_API_UNSUPPORTED"
-  | "SHEETS_VIEW_STATE_NOT_APPLIED"
+  | "BATCH_DEPENDENCY_REQUIRES_SPLIT"
+  | "SHEETS_CHART_CREATE_FAILED"
   | "SHEETS_RUNTIME_INCOMPATIBLE"
   | "SHEETS_CHART_PARTIAL_MUTATION"
   | "EXECUTION_FAILED"
   | "INVALID_LISTENER"
   | "CLIENT_DESTROYED"
+  | "CONTRACT_VERSION_MISMATCH"
   | string;
 
 export interface AiBridgeRequestOptions {
@@ -891,6 +905,7 @@ export interface AiBridgeChartDataLabels {
 export interface AiBridgeChartAxis {
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   labelsFontSize?: number;
   normalOrder?: boolean;
   majorTickMark?: string;
@@ -962,6 +977,7 @@ export interface AiBridgeChartFormatting {
   style?: number;
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   rotationDeg?: number;
   fill?: AiBridgeFill;
   line?: AiBridgeLine;
@@ -1509,6 +1525,10 @@ export type SlidesAddShapeArgs =
   );
 export interface SlidesUpdateShapeArgs extends SlidesObjectTarget, SlidesShapeFormatting {}
 export interface SlidesDeleteObjectArgs extends SlidesObjectTarget {}
+export type SlidesInspectSmartArtsArgs = AiBridgeGeneratedSlidesInspectSmartartsArgs;
+export type SlidesAddSmartArtArgs = AiBridgeGeneratedSlidesAddSmartartArgs;
+export type SlidesUpdateSmartArtArgs = AiBridgeGeneratedSlidesUpdateSmartartArgs;
+export type SlidesDeleteSmartArtArgs = AiBridgeGeneratedSlidesDeleteSmartartArgs;
 export interface SlidesInspectChartsArgs {
   slide?: number;
   maxCharts?: number;
@@ -4937,6 +4957,361 @@ export type AiBridgeGeneratedSlidesDeleteObjectArgs = {
   objectIndex?: number;
   name?: string;
 } & ({ objectId: string; } | { objectIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesInspectSmartartsArgs = {
+  slide?: number;
+  maxSmartArts?: number;
+  includeRaw?: boolean;
+  includeTextStyles?: boolean;
+};
+export type AiBridgeGeneratedSlidesAddSmartartArgs = {
+  slide: number;
+  type: ("AccentedPicture" | "Balance" | "TitledPictureBlocks" | "PictureAccentBlocks" | "BlockCycle" | "StackedVenn" | "VerticalEquation" | "VerticalBlockList" | "VerticalBendingProcess" | "VerticalBulletList" | "VerticalCurvedList" | "VerticalProcess" | "VerticalBoxList" | "VerticalPictureList" | "VerticalCircleList" | "VerticalPictureAccentList" | "VerticalArrowList" | "VerticalChevronList" | "VerticalAccentList" | "NestedTarget" | "Funnel" | "UpwardArrow" | "IncreasingArrowsProcess" | "StepUpProcess" | "CircularPictureCallout" | "HorizontalHierarchy" | "HorizontalLabeledHierarchy" | "HorizontalMultiLevelHierarchy" | "HorizontalOrganizationChart" | "HorizontalBulletList" | "HorizontalPictureList" | "ClosedChevronProcess" | "HierarchyList" | "Hierarchy" | "CirclePictureHierarchy" | "LabeledHierarchy" | "InvertedPyramid" | "HexagonCluster" | "CircleRelationship" | "CircleAccentTimeline" | "CircularBendingProcess" | "ArrowRibbon" | "LinearVenn" | "PictureLineup" | "TitlePictureLineup" | "BendingPictureCaptionList" | "BendingPictureAccentList" | "TitledMatrix" | "IncreasingCircleProcess" | "BendingPictureBlocks" | "BendingPictureCaption" | "BendingPictureSemiTransparentText" | "NonDirectionalCycle" | "ContinuousBlockProcess" | "ContinuousPictureList" | "ContinuousCycle" | "DescendingBlockList" | "StepDownProcess" | "ReverseList" | "OrganizationChart" | "NameAndTitleOrganizationChart" | "AlternatingFlow" | "PyramidList" | "PlusAndMinus" | "RepeatingBendingProcess" | "CaptionedPictures" | "DetailedProcess" | "PictureStrips" | "HalfCircleOrganizationChart" | "PhasedProcess" | "BasicVenn" | "BasicTimeline" | "BasicPie" | "BasicMatrix" | "BasicPyramid" | "BasicRadial" | "BasicTarget" | "BasicBlockList" | "BasicBendingProcess" | "BasicProcess" | "BasicChevronProcess" | "BasicCycle" | "OpposingIdeas" | "OpposingArrows" | "RandomToResultProcess" | "SubStepProcess" | "PieProcess" | "AccentProcess" | "AscendingPictureAccentProcess" | "PictureAccentProcess" | "RadialVenn" | "RadialCycle" | "RadialCluster" | "RadialList" | "MultiDirectionalCycle" | "DivergingRadial" | "DivergingArrows" | "FramedTextPicture" | "GroupedList" | "SegmentedPyramid" | "SegmentedProcess" | "SegmentedCycle" | "PictureGrid" | "GridMatrix" | "SpiralPicture" | "StackedList" | "PictureCaptionList" | "ProcessList" | "BubblePictureList" | "SquareAccentList" | "LinedList" | "PictureAccentList" | "TitledPictureAccentList" | "SnapshotPictureList" | "ContinuousArrowProcess" | "CircleArrowProcess" | "ProcessArrows" | "StaggeredProcess" | "ConvergingRadial" | "ConvergingArrows" | "TableHierarchy" | "TableList" | "TextCycle" | "TrapezoidList" | "DescendingProcess" | "ChevronList" | "Equation" | "CounterbalanceArrows" | "TargetList" | "CycleMatrix" | "AlternatingPictureBlocks" | "AlternatingPictureCircles" | "AlternatingHexagonList" | "Gear" | "ArchitectureLayout" | "ChevronAccentProcess" | "CircleProcess" | "ConvergingText" | "HexagonRadial" | "InterconnectedBlockProcess" | "InterconnectedRings" | "PictureFrame" | "PictureOrganizationChart" | "RadialPictureList" | "TabList" | "TabbedArc" | "ThemePictureAccent" | "ThemePictureAlternatingAccent" | "ThemePictureGrid" | "VaryingWidthList" | "VerticalBracketList" | number);
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  name?: string;
+  nodeFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  nodeLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  nodes?: Array<{
+    index?: number;
+    nodeId?: string;
+    text?: string;
+    paragraphs?: Array<{
+      text: string;
+      fontSize?: number;
+      fontFamily?: string;
+      bold?: boolean;
+      italic?: boolean;
+      underline?: boolean;
+      color?: string;
+      align?: "left" | "center" | "right" | "both";
+      firstLineIndentMm?: number;
+      leftIndentMm?: number;
+      rightIndentMm?: number;
+      spacingBeforePt?: number;
+      spacingAfterPt?: number;
+      lineSpacing?: number;
+      lineRule?: "auto" | "exact" | "atLeast";
+      level?: number;
+      listType?: "none" | "bullet" | "number";
+      bulletSymbol?: string;
+      numberingType?: string;
+      startAt?: number;
+    }>;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    verticalAlign?: "top" | "center" | "bottom";
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  } & ({ index: number; } | { nodeId: string; })>;
+  includeRaw?: boolean;
+  includeTextStyles?: boolean;
+};
+export type AiBridgeGeneratedSlidesUpdateSmartartArgs = {
+  slide: number;
+  smartArtId?: string;
+  smartArtIndex?: number;
+  name?: string;
+  xMm?: number;
+  yMm?: number;
+  widthMm?: number;
+  heightMm?: number;
+  rotationDeg?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  nodeFill?: ({
+    type: "none";
+  } | {
+    type: "solid";
+    color: string;
+  } | {
+    type: "linearGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+    angleDeg?: number;
+  } | {
+    type: "radialGradient";
+    stops: Array<{
+      position: number;
+      color: string;
+    }>;
+  } | {
+    type: "pattern";
+    pattern: string;
+    backgroundColor: string;
+    foregroundColor: string;
+  } | {
+    type?: "raw";
+    raw: unknown;
+  });
+  nodeLine?: {
+    type?: "solid" | "none";
+    enabled?: boolean;
+    widthPt?: number;
+    color?: string;
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    raw?: unknown;
+  };
+  nodes?: Array<{
+    index?: number;
+    nodeId?: string;
+    text?: string;
+    paragraphs?: Array<{
+      text: string;
+      fontSize?: number;
+      fontFamily?: string;
+      bold?: boolean;
+      italic?: boolean;
+      underline?: boolean;
+      color?: string;
+      align?: "left" | "center" | "right" | "both";
+      firstLineIndentMm?: number;
+      leftIndentMm?: number;
+      rightIndentMm?: number;
+      spacingBeforePt?: number;
+      spacingAfterPt?: number;
+      lineSpacing?: number;
+      lineRule?: "auto" | "exact" | "atLeast";
+      level?: number;
+      listType?: "none" | "bullet" | "number";
+      bulletSymbol?: string;
+      numberingType?: string;
+      startAt?: number;
+    }>;
+    fontSize?: number;
+    fontFamily?: string;
+    bold?: boolean;
+    italic?: boolean;
+    underline?: boolean;
+    color?: string;
+    align?: "left" | "center" | "right" | "both";
+    verticalAlign?: "top" | "center" | "bottom";
+    fill?: ({
+      type: "none";
+    } | {
+      type: "solid";
+      color: string;
+    } | {
+      type: "linearGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+      angleDeg?: number;
+    } | {
+      type: "radialGradient";
+      stops: Array<{
+        position: number;
+        color: string;
+      }>;
+    } | {
+      type: "pattern";
+      pattern: string;
+      backgroundColor: string;
+      foregroundColor: string;
+    } | {
+      type?: "raw";
+      raw: unknown;
+    });
+    line?: {
+      type?: "solid" | "none";
+      enabled?: boolean;
+      widthPt?: number;
+      color?: string;
+      fill?: ({
+        type: "none";
+      } | {
+        type: "solid";
+        color: string;
+      } | {
+        type: "linearGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+        angleDeg?: number;
+      } | {
+        type: "radialGradient";
+        stops: Array<{
+          position: number;
+          color: string;
+        }>;
+      } | {
+        type: "pattern";
+        pattern: string;
+        backgroundColor: string;
+        foregroundColor: string;
+      } | {
+        type?: "raw";
+        raw: unknown;
+      });
+      raw?: unknown;
+    };
+  } & ({ index: number; } | { nodeId: string; })>;
+  includeRaw?: boolean;
+  includeTextStyles?: boolean;
+} & ({ smartArtId: string; } | { smartArtIndex: number; } | { name: string; });
+export type AiBridgeGeneratedSlidesDeleteSmartartArgs = {
+  slide: number;
+  smartArtId?: string;
+  smartArtIndex?: number;
+  name?: string;
+} & ({ smartArtId: string; } | { smartArtIndex: number; } | { name: string; });
 export type AiBridgeGeneratedSlidesInspectChartsArgs = {
   slide?: number;
   maxCharts?: number;
@@ -4955,8 +5330,10 @@ export type AiBridgeGeneratedSlidesAddChartArgs = {
   heightMm?: number;
   name?: string;
   style?: number;
+  holeSizePercent?: number;
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   rotationDeg?: number;
   fill?: ({
     type: "none";
@@ -5209,6 +5586,7 @@ export type AiBridgeGeneratedSlidesAddChartArgs = {
   horizontalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -5220,6 +5598,7 @@ export type AiBridgeGeneratedSlidesAddChartArgs = {
   verticalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -5588,7 +5967,7 @@ export type AiBridgeGeneratedSlidesAddChartArgs = {
   }>;
   removeSeries?: Array<number>;
   includeRaw?: boolean;
-};
+} & ({ holeSizePercent: number; type: "doughnut"; } | { holeSizePercent?: never; });
 export type AiBridgeGeneratedSlidesUpdateChartArgs = {
   slide: number;
   chartId?: string;
@@ -5600,8 +5979,10 @@ export type AiBridgeGeneratedSlidesUpdateChartArgs = {
   widthMm?: number;
   heightMm?: number;
   style?: number;
+  holeSizePercent?: number;
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   rotationDeg?: number;
   fill?: ({
     type: "none";
@@ -5854,6 +6235,7 @@ export type AiBridgeGeneratedSlidesUpdateChartArgs = {
   horizontalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -5865,6 +6247,7 @@ export type AiBridgeGeneratedSlidesUpdateChartArgs = {
   verticalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -6692,6 +7075,7 @@ export type AiBridgeGeneratedSheetsAddChartArgs = {
   type?: "bar" | "barStacked" | "barStackedPercent" | "bar3D" | "barStacked3D" | "barStackedPercent3D" | "barStackedPercent3DPerspective" | "horizontalBar" | "horizontalBarStacked" | "horizontalBarStackedPercent" | "horizontalBar3D" | "horizontalBarStacked3D" | "horizontalBarStackedPercent3D" | "lineNormal" | "lineStacked" | "lineStackedPercent" | "lineNormalMarker" | "lineStackedMarker" | "lineStackedPerMarker" | "line3D" | "pie" | "pie3D" | "doughnut" | "scatter" | "scatterLine" | "scatterLineMarker" | "scatterSmooth" | "scatterSmoothMarker" | "stock" | "area" | "areaStacked" | "areaStackedPercent" | "comboCustom" | "comboBarLine" | "comboBarLineSecondary" | "radar" | "radarMarker" | "radarFilled" | "line" | "lineMarker" | "stackedBar" | "stackedBarPercent" | "stackedLine" | "stackedLinePercent" | "column";
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   inRows?: boolean;
   style?: number;
   widthMm?: number;
@@ -6959,6 +7343,7 @@ export type AiBridgeGeneratedSheetsAddChartArgs = {
   horizontalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -6970,6 +7355,7 @@ export type AiBridgeGeneratedSheetsAddChartArgs = {
   verticalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -7351,6 +7737,7 @@ export type AiBridgeGeneratedSheetsUpdateChartArgs = {
   style?: number;
   title?: string;
   titleFontSize?: number;
+  titleBold?: boolean;
   rotationDeg?: number;
   widthMm?: number;
   heightMm?: number;
@@ -7615,6 +8002,7 @@ export type AiBridgeGeneratedSheetsUpdateChartArgs = {
   horizontalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -7626,6 +8014,7 @@ export type AiBridgeGeneratedSheetsUpdateChartArgs = {
   verticalAxis?: {
     title?: string;
     titleFontSize?: number;
+    titleBold?: boolean;
     labelsFontSize?: number;
     normalOrder?: boolean;
     majorTickMark?: string;
@@ -8108,6 +8497,10 @@ export interface AiBridgeToolArgumentsMap {
   slides_add_shape: AiBridgeGeneratedSlidesAddShapeArgs;
   slides_update_shape: AiBridgeGeneratedSlidesUpdateShapeArgs;
   slides_delete_object: AiBridgeGeneratedSlidesDeleteObjectArgs;
+  slides_inspect_smartarts: AiBridgeGeneratedSlidesInspectSmartartsArgs;
+  slides_add_smartart: AiBridgeGeneratedSlidesAddSmartartArgs;
+  slides_update_smartart: AiBridgeGeneratedSlidesUpdateSmartartArgs;
+  slides_delete_smartart: AiBridgeGeneratedSlidesDeleteSmartartArgs;
   slides_inspect_charts: AiBridgeGeneratedSlidesInspectChartsArgs;
   slides_add_chart: AiBridgeGeneratedSlidesAddChartArgs;
   slides_update_chart: AiBridgeGeneratedSlidesUpdateChartArgs;
@@ -8281,6 +8674,10 @@ export interface AiBridgeSlidesApi {
   addShape(args: SlidesAddShapeArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   updateShape(args: SlidesUpdateShapeArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   deleteObject(args: SlidesDeleteObjectArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  inspectSmartArts(args?: SlidesInspectSmartArtsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  addSmartArt(args: SlidesAddSmartArtArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  updateSmartArt(args: SlidesUpdateSmartArtArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
+  deleteSmartArt(args: SlidesDeleteSmartArtArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   inspectCharts(args?: SlidesInspectChartsArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   addChart(args: SlidesAddChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;
   updateChart(args: SlidesUpdateChartArgs, options?: AiBridgeRequestOptions): Promise<AiBridgeExecutionResult>;

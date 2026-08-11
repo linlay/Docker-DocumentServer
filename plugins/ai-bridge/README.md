@@ -333,10 +333,10 @@ integration guide for complete examples and error behavior.
   `word_add_table`, `word_set_table_cell`, `word_format_table`,
   `word_edit_table`, `word_set_page_layout`, `word_set_header_footer`,
   `word_set_document_text`.
-- Slides: 61 allow-listed tools covering slides, themes, masters, layouts,
+- Slides: 67 allow-listed tools covering slides, themes, masters, layouts,
   placeholders, text/paragraphs, shapes, connectors, freeform geometry,
   grouping/alignment/layering, safe raster/SVG images, image-shape crops,
-  tables, charts, WordArt, math, OLE, notes, comments, hyperlinks,
+  tables, native SmartArt, charts, WordArt, math, OLE, notes, comments, hyperlinks,
   transitions/Morph, animations, macros, and slideshow control. See
   `public-api.json` for the canonical list and
   [PPTX-CAPABILITIES.zh-CN.md](PPTX-CAPABILITIES.zh-CN.md) for the P01-P77
@@ -383,13 +383,14 @@ therefore remains deterministic and does not create an undo entry.
 
 | Area | Supported operations |
 | --- | --- |
-| PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, chart summary, and optional raw Office JSON |
+| PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, native SmartArt preset/nodes, chart summary, and optional raw Office JSON |
 | PPT slides | Add, duplicate, delete, and set native solid/gradient/pattern/image backgrounds or follow layout/master |
 | PPT shapes | Add any preset geometry; update text, geometry, name, position, size, rotation, flips, padding, text style, fill, and line; delete any drawing |
 | PPT structure/theme | Slide CRUD/order/visibility/size; themes, theme colors/fonts, masters, layouts, placeholders, native image backgrounds, and template-object CRUD |
 | PPT text/tables | Rich paragraphs and multilevel lists, WordArt, math, notes, comments, tables with row/column edits and cell merge/split |
 | PPT images | Add imported PNG/JPEG/GIF/WebP/SVG; contain/stretch sizing, position, rotation, flips, borders, safe SVG normalization, and preset-shape crops |
-| PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
+| PPT SmartArt | Inspect, asynchronously create, update, and delete 151 native ONLYOFFICE 9.4 presets; stable node IDs, rich node text, fills/lines, data-model synchronization, and layout refit |
+| PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, bold titles, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
 | PPT animation/show | Slide transitions including Morph, object entrance/emphasis/exit/path effects, ordering/timing/interactive triggers, loop and live slideshow control |
 | XLSX workbook/cells | Strict JSON scalar values and exact-shape matrices, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
 | XLSX data | Sort, filter, capability-gated structured tables, ordinary `rangeStyle` regions, conditional formats, complete validation readback/drop-downs, and pivot tables |
