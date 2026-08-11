@@ -75,6 +75,38 @@ EDITOR_CONFIG = {
     },
 }
 
+WORD_CONTRACT_GROUPS = {
+    "content": (
+        "inspect", "replace_text", "append_paragraph", "insert_paragraph",
+        "format_document", "format_selection", "format_matches",
+        "delete_matches", "add_hyperlink", "add_comment", "add_bookmark",
+        "format_paragraphs", "set_paragraph_text", "delete_paragraphs",
+        "set_list", "insert_page_break", "navigate", "scroll",
+        "scale_font", "set_document_text",
+    ),
+    "tables": (
+        "format_table_advanced", "add_nested_table", "add_table",
+        "set_table_cell", "format_table", "edit_table",
+    ),
+    "structure": (
+        "inspect_advanced", "set_document_properties", "manage_section",
+        "manage_style", "set_tabs", "set_numbering", "set_page_layout",
+        "set_header_footer",
+    ),
+    "objects": (
+        "add_image", "manage_drawing", "add_shape", "add_chart",
+        "add_math", "add_ole_object",
+    ),
+    "long-document": (
+        "manage_fields", "manage_long_document", "manage_comments",
+        "manage_revisions", "set_watermark",
+    ),
+    "special": (
+        "set_protection", "manage_content_control", "manage_custom_xml",
+        "inspect_macros", "set_macros",
+    ),
+}
+
 SLIDE_CONTRACT_GROUPS = {
     "structure": (
         "inspect", "inspect_layouts", "inspect_backgrounds", "inspect_themes",
@@ -113,6 +145,41 @@ SLIDE_CONTRACT_GROUPS = {
         "set_transition", "inspect_animations", "manage_animation",
         "inspect_macros", "set_macros", "control_slideshow",
     ),
+}
+
+CELL_CONTRACT_GROUPS = {
+    "cells": (
+        "inspect", "set_values", "set_formula", "inspect_range",
+        "set_array_formula", "replace_text", "format_range",
+        "set_rich_text", "recalculate",
+    ),
+    "structure": (
+        "add_sheet", "rename_sheet", "delete_sheet", "manage_sheet",
+        "manage_range", "inspect_names", "manage_names", "sort", "filter",
+    ),
+    "tables": (
+        "inspect_tables", "manage_table", "manage_conditional_format",
+        "manage_validation", "inspect_pivots", "manage_pivot",
+    ),
+    "objects": (
+        "inspect_drawings", "manage_drawing", "manage_hyperlink",
+        "inspect_comments", "manage_comments",
+    ),
+    "workbook": (
+        "inspect_freeze_panes", "manage_freeze_panes", "inspect_properties",
+        "manage_properties", "inspect_protected_ranges",
+        "manage_protected_ranges", "inspect_page_layout",
+        "manage_page_layout", "inspect_macros", "set_macros",
+    ),
+    "charts": (
+        "add_chart", "inspect_charts", "update_chart", "delete_chart",
+    ),
+}
+
+EDITOR_CONTRACT_GROUPS = {
+    "word": WORD_CONTRACT_GROUPS,
+    "slide": SLIDE_CONTRACT_GROUPS,
+    "cell": CELL_CONTRACT_GROUPS,
 }
 
 
@@ -1512,36 +1579,31 @@ def build_artifacts(
             skill_path.read_text(encoding="utf-8"),
             contract["version"],
         )
-        if editor == "slide":
-            grouped_names = [
-                name
-                for names in SLIDE_CONTRACT_GROUPS.values()
-                for name in names
-            ]
-            if len(grouped_names) != len(set(grouped_names)):
-                raise ValueError("slide contract groups contain duplicate tools")
-            if set(grouped_names) != set(scoped["tools"]):
-                missing = sorted(set(scoped["tools"]) - set(grouped_names))
-                extra = sorted(set(grouped_names) - set(scoped["tools"]))
-                raise ValueError(
-                    "slide contract groups must cover every tool exactly once; "
-                    f"missing={missing}, extra={extra}"
-                )
-            for group_name, tool_names in SLIDE_CONTRACT_GROUPS.items():
-                grouped = scoped_contract_group(scoped, tool_names)
-                stem = f"contract-{group_name}.generated"
-                artifacts[references / f"{stem}.json"] = (
-                    json.dumps(grouped, ensure_ascii=False, indent=2) + "\n"
-                )
-                artifacts[references / f"{stem}.md"] = render_markdown(
-                    grouped,
-                    include_full_schema=False,
-                )
-        else:
-            artifacts[references / "contract.generated.json"] = (
-                json.dumps(scoped, ensure_ascii=False, indent=2) + "\n"
+        contract_groups = EDITOR_CONTRACT_GROUPS[editor]
+        grouped_names = [
+            name
+            for names in contract_groups.values()
+            for name in names
+        ]
+        if len(grouped_names) != len(set(grouped_names)):
+            raise ValueError(f"{editor} contract groups contain duplicate tools")
+        if set(grouped_names) != set(scoped["tools"]):
+            missing = sorted(set(scoped["tools"]) - set(grouped_names))
+            extra = sorted(set(grouped_names) - set(scoped["tools"]))
+            raise ValueError(
+                f"{editor} contract groups must cover every tool exactly once; "
+                f"missing={missing}, extra={extra}"
             )
-            artifacts[references / "contract.generated.md"] = render_markdown(scoped)
+        for group_name, tool_names in contract_groups.items():
+            grouped = scoped_contract_group(scoped, tool_names)
+            stem = f"contract-{group_name}.generated"
+            artifacts[references / f"{stem}.json"] = (
+                json.dumps(grouped, ensure_ascii=False, indent=2) + "\n"
+            )
+            artifacts[references / f"{stem}.md"] = render_markdown(
+                grouped,
+                include_full_schema=False,
+            )
         artifacts[
             skill_root / ".config" / "httpx" / config["toml"]
         ] = render_toml(

@@ -306,6 +306,10 @@ be the agent-visible HTTP(S) origin without credentials, a path, a query, or a
 fragment. The generator writes that configured origin into all three HTTPX
 bridge sites.
 
+Each online skill receives task-scoped contract groups. Group Markdown contains
+compact tool summaries, while the matching JSON contains only those tools and
+the transitive `$defs` they reference.
+
 Word, nested Word, and Slides table `data` cells accept
 `string | number | boolean | null` or a formatting object with a required string
 `text`. Use `color` for text color; `textColor` and other unknown fields are

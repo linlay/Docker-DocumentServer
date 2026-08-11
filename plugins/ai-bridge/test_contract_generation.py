@@ -764,24 +764,42 @@ class ContractGenerationTests(unittest.TestCase):
                     self.assertIn("PPTX_IMAGE_PATH", artifacts[toml_path])
                     self.assertIn("/ai/images/import", artifacts[toml_path])
                     self.assertIn('type:"relayAsset"', artifacts[toml_path])
-                    generated_tools: set[str] = set()
-                    for group_name, expected_tools in sync_contract.SLIDE_CONTRACT_GROUPS.items():
-                        json_path = skill_root / "references" / f"contract-{group_name}.generated.json"
-                        markdown_path = skill_root / "references" / f"contract-{group_name}.generated.md"
-                        self.assertIn(json_path, artifacts)
-                        self.assertIn(markdown_path, artifacts)
-                        grouped = json.loads(artifacts[json_path])
-                        self.assertEqual(tuple(grouped["tools"]), expected_tools)
-                        generated_tools.update(grouped["tools"])
-                        self.assertNotIn("<details>", artifacts[markdown_path])
-                    self.assertEqual(generated_tools, set(
-                        sync_contract.public_tool_name(editor, name)
-                        for name in self.contract["tools"][editor]
-                    ))
-                    self.assertNotIn(
-                        skill_root / "references" / "contract.generated.md",
-                        artifacts,
+                generated_tools: set[str] = set()
+                contract_groups = sync_contract.EDITOR_CONTRACT_GROUPS[editor]
+                for group_name, expected_tools in contract_groups.items():
+                    json_path = (
+                        skill_root
+                        / "references"
+                        / f"contract-{group_name}.generated.json"
                     )
+                    markdown_path = (
+                        skill_root
+                        / "references"
+                        / f"contract-{group_name}.generated.md"
+                    )
+                    self.assertIn(json_path, artifacts)
+                    self.assertIn(markdown_path, artifacts)
+                    grouped = json.loads(artifacts[json_path])
+                    self.assertEqual(tuple(grouped["tools"]), expected_tools)
+                    generated_tools.update(grouped["tools"])
+                    self.assertNotIn("<details>", artifacts[markdown_path])
+                    references = set(re.findall(
+                        r'"#/\$defs/([^"/]+)"',
+                        artifacts[json_path],
+                    ))
+                    self.assertLessEqual(references, set(grouped["$defs"]))
+                self.assertEqual(generated_tools, set(
+                    sync_contract.public_tool_name(editor, name)
+                    for name in self.contract["tools"][editor]
+                ))
+                self.assertNotIn(
+                    skill_root / "references" / "contract.generated.json",
+                    artifacts,
+                )
+                self.assertNotIn(
+                    skill_root / "references" / "contract.generated.md",
+                    artifacts,
+                )
                 self.assertEqual(action_names, expected_actions)
 
     def test_generation_rejects_scripts_directories_for_every_online_skill(self) -> None:
