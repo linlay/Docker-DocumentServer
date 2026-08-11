@@ -963,6 +963,18 @@
               return content && typeof content.GetAllParagraphs === "function" ? content.GetAllParagraphs() : [];
             }
 
+            function getParagraphText(paragraph) {
+              if (!paragraph || typeof paragraph.GetElementsCount !== "function") return "";
+              var text = "";
+              var elementCount = paragraph.GetElementsCount();
+              for (var elementIndex = 0; elementIndex < elementCount; elementIndex += 1) {
+                var element = paragraph.GetElement(elementIndex);
+                if (!element || safeCall(element, "GetClassType") !== "run") continue;
+                text += String(safeCall(element, "GetText") || "");
+              }
+              return text;
+            }
+
             function readableValue(target, method, transform) {
               var available = Boolean(target) && typeof target[method] === "function";
               if (!available) return { available: false, value: null };
@@ -1142,21 +1154,68 @@
               }
             }
 
-            function replaceShapeParagraphs(shape, paragraphSpecs) {
+            function writeParagraphContent(paragraph, spec) {
+              if (!paragraph || typeof paragraph.AddText !== "function") {
+                throw new Error("目标文本容器中的段落不可写");
+              }
+              if (typeof paragraph.RemoveAllElements === "function" && paragraph.RemoveAllElements() === false) {
+                throw new Error("清空目标段落失败");
+              }
+              var run = paragraph.AddText(String(spec.text || ""));
+              applyRunFormat(run, spec);
+              applyParagraphFormat(paragraph, spec);
+            }
+
+            function replaceContentParagraphs(content, paragraphSpecs) {
               if (!Array.isArray(paragraphSpecs) || !paragraphSpecs.length) {
                 throw new Error("paragraphs 必须是非空数组");
               }
-              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
               if (!content || typeof content.Push !== "function") throw new Error("目标图形不支持文本内容");
-              if (typeof content.RemoveAllElements === "function") content.RemoveAllElements();
+              if (typeof content.RemoveAllElements === "function" && content.RemoveAllElements() === false) {
+                throw new Error("清空目标文本内容失败");
+              }
+
+              var remainingParagraphs = typeof content.GetAllParagraphs === "function"
+                ? content.GetAllParagraphs()
+                : [];
+              var reusableParagraph = null;
+              if (remainingParagraphs.length === 1 && getParagraphText(remainingParagraphs[0]) === "") {
+                reusableParagraph = remainingParagraphs[0];
+              } else if (remainingParagraphs.length) {
+                throw new Error("清空文本后仍残留非空或多余段落");
+              }
+
               for (var index = 0; index < paragraphSpecs.length; index += 1) {
                 var spec = paragraphSpecs[index] || {};
-                var paragraph = Api.CreateParagraph();
-                var run = paragraph.AddText(String(spec.text || ""));
-                applyRunFormat(run, spec);
-                applyParagraphFormat(paragraph, spec);
-                content.Push(paragraph);
+                var paragraph = index === 0 && reusableParagraph
+                  ? reusableParagraph
+                  : Api.CreateParagraph();
+                writeParagraphContent(paragraph, spec);
+                if (paragraph !== reusableParagraph && content.Push(paragraph) === false) {
+                  throw new Error("写入目标文本段落失败");
+                }
               }
+
+              var writtenParagraphs = typeof content.GetAllParagraphs === "function"
+                ? content.GetAllParagraphs()
+                : [];
+              if (writtenParagraphs.length !== paragraphSpecs.length) {
+                throw new Error(
+                  "文本段落替换失败：期望 " + paragraphSpecs.length + " 段，实际 " + writtenParagraphs.length + " 段"
+                );
+              }
+              for (var writtenIndex = 0; writtenIndex < writtenParagraphs.length; writtenIndex += 1) {
+                var expectedText = String((paragraphSpecs[writtenIndex] || {}).text || "");
+                var actualText = getParagraphText(writtenParagraphs[writtenIndex]);
+                if (actualText !== expectedText) {
+                  throw new Error("文本段落替换失败：第 " + (writtenIndex + 1) + " 段内容不一致");
+                }
+              }
+            }
+
+            function replaceShapeParagraphs(shape, paragraphSpecs) {
+              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
+              replaceContentParagraphs(content, paragraphSpecs);
             }
 
             function describeTransition(transition) {
@@ -1237,14 +1296,7 @@
             }
 
             function replaceShapeText(shape, args) {
-              var content = safeCall(shape, "GetContent") || safeCall(shape, "GetDocContent");
-              if (!content) throw new Error("目标图形不支持文本内容");
-              if (typeof content.RemoveAllElements === "function") content.RemoveAllElements();
-              var paragraph = Api.CreateParagraph();
-              if (hasOwn(args, "align")) paragraph.SetJc(String(args.align));
-              var run = paragraph.AddText(String(args.text || ""));
-              applyRunFormat(run, args);
-              content.Push(paragraph);
+              replaceShapeParagraphs(shape, [args]);
             }
 
             function formatShapeText(shape, args) {
@@ -2943,6 +2995,7 @@
                   if (typeof Api.CreateLayout !== "function") throw new Error("当前 ONLYOFFICE 版本不支持创建自定义版式");
                   var layoutMasterIndex = Number(args.masterIndex || 1);
                   var layoutMaster = getMaster(layoutMasterIndex);
+                  var layoutCountBeforeCreate = layoutCount(layoutMaster);
                   var createdLayout = Api.CreateLayout(layoutMaster);
                   if (!createdLayout) throw new Error("创建自定义版式失败");
                   if (hasOwn(args, "name") && typeof createdLayout.SetName === "function") createdLayout.SetName(String(args.name));
@@ -2960,26 +3013,71 @@
                       createFill(placeholderSpec.fill),
                       createStroke(placeholderSpec.line)
                     );
-                    applyDrawingFrame(placeholderShape, {
-                      xMm: asFinite(placeholderSpec.xMm, 15),
-                      yMm: asFinite(placeholderSpec.yMm, 15),
-                    });
-                    if (hasOwn(placeholderSpec, "text")) replaceShapeText(placeholderShape, placeholderSpec);
+                    var placeholderOptions = {};
+                    for (var placeholderOptionField in placeholderSpec) {
+                      if (hasOwn(placeholderSpec, placeholderOptionField)) {
+                        placeholderOptions[placeholderOptionField] = placeholderSpec[placeholderOptionField];
+                      }
+                    }
+                    if (!hasOwn(placeholderOptions, "xMm")) placeholderOptions.xMm = 15;
+                    if (!hasOwn(placeholderOptions, "yMm")) placeholderOptions.yMm = 15;
+                    applyShapeOptions(placeholderShape, placeholderOptions);
+                    var placeholderHasTextStyle = hasOwn(placeholderSpec, "fontSize")
+                      || hasOwn(placeholderSpec, "fontFamily")
+                      || hasOwn(placeholderSpec, "bold")
+                      || hasOwn(placeholderSpec, "italic")
+                      || hasOwn(placeholderSpec, "underline")
+                      || hasOwn(placeholderSpec, "color")
+                      || hasOwn(placeholderSpec, "align");
+                    if (!hasOwn(placeholderSpec, "text") && placeholderHasTextStyle) {
+                      var emptyPlaceholderTextSpec = {};
+                      for (var placeholderField in placeholderSpec) {
+                        if (hasOwn(placeholderSpec, placeholderField)) {
+                          emptyPlaceholderTextSpec[placeholderField] = placeholderSpec[placeholderField];
+                        }
+                      }
+                      emptyPlaceholderTextSpec.text = "";
+                      replaceShapeText(placeholderShape, emptyPlaceholderTextSpec);
+                    }
                     if (typeof Api.CreatePlaceholder !== "function" || typeof placeholderShape.SetPlaceholder !== "function") {
                       throw new Error("当前 ONLYOFFICE 版本不支持版式占位符");
                     }
                     placeholderShape.SetPlaceholder(Api.CreatePlaceholder(String(placeholderSpec.type || "body")));
-                    createdLayout.AddObject(placeholderShape);
+                    if (createdLayout.AddObject(placeholderShape) === false) {
+                      throw new Error("向自定义版式添加占位符失败");
+                    }
+                  }
+                  var layoutCountAfterCreate = layoutCount(layoutMaster);
+                  var persistedLayout = null;
+                  for (var persistedLayoutIndex = 0; persistedLayoutIndex < layoutCountAfterCreate; persistedLayoutIndex += 1) {
+                    var candidateLayout = layoutMaster.GetLayout(persistedLayoutIndex);
+                    if (candidateLayout === createdLayout) {
+                      persistedLayout = candidateLayout;
+                      break;
+                    }
+                    if (
+                      persistedLayoutIndex >= layoutCountBeforeCreate
+                      && hasOwn(args, "name")
+                      && String(safeCall(candidateLayout, "GetName") || "") === String(args.name)
+                    ) {
+                      persistedLayout = candidateLayout;
+                      break;
+                    }
+                  }
+                  if (layoutCountAfterCreate <= layoutCountBeforeCreate || !persistedLayout) {
+                    var layoutPersistenceError = new Error("自定义版式创建后未出现在母版版式集合中");
+                    layoutPersistenceError.code = "LAYOUT_CREATION_NOT_PERSISTED";
+                    throw layoutPersistenceError;
                   }
                   if (Array.isArray(args.applyToSlides)) {
                     for (var applyLayoutIndex = 0; applyLayoutIndex < args.applyToSlides.length; applyLayoutIndex += 1) {
-                      getSlide(args.applyToSlides[applyLayoutIndex]).ApplyLayout(createdLayout);
+                      getSlide(args.applyToSlides[applyLayoutIndex]).ApplyLayout(persistedLayout);
                     }
                   }
                   changed += 1;
                   results.push({
                     name: call.name,
-                    layout: locateLayout(createdLayout, Boolean(args.includeRaw)),
+                    layout: locateLayout(persistedLayout, Boolean(args.includeRaw)),
                   });
                   break;
                 }

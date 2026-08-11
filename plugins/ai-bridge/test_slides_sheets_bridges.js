@@ -101,6 +101,7 @@ class SlideParagraph {
     this.runs.push(run);
     return run;
   }
+  RemoveAllElements() { this.runs = []; return true; }
   GetJc() { return this.align; }
   GetBullet() { return this.bullet ?? null; }
   SetJc(value) { this.align = value; }
@@ -115,15 +116,19 @@ class SlideParagraph {
 }
 
 class SlideContent {
-  constructor(text = "") {
+  constructor(text = "", preserveDefaultParagraph = false) {
     this.paragraphs = [new SlideParagraph(text)];
+    this.preserveDefaultParagraph = preserveDefaultParagraph;
   }
   GetAllParagraphs() { return this.paragraphs; }
   GetText() {
     return this.paragraphs.map(paragraph => paragraph.runs.map(run => run.text).join("")).join("\n");
   }
-  RemoveAllElements() { this.paragraphs = []; }
-  Push(paragraph) { this.paragraphs.push(paragraph); }
+  RemoveAllElements() {
+    this.paragraphs = this.preserveDefaultParagraph ? [new SlideParagraph()] : [];
+    return true;
+  }
+  Push(paragraph) { this.paragraphs.push(paragraph); return true; }
 }
 
 let drawingId = 0;
@@ -159,8 +164,8 @@ function mockStroke(width, fill) {
 }
 
 class SlideShape {
-  constructor(text = "") {
-    this.content = new SlideContent(text);
+  constructor(text = "", preserveDefaultParagraph = false) {
+    this.content = new SlideContent(text, preserveDefaultParagraph);
     this.position = [0, 0];
     this.size = [3600000, 2160000];
     this.rotation = 0;
@@ -802,9 +807,10 @@ class MockComment {
 }
 
 class MockSlide {
-  constructor(presentation, texts = []) {
+  constructor(presentation, texts = [], preserveDefaultParagraph = false) {
     this.presentation = presentation;
-    this.shapes = texts.map(text => new SlideShape(text));
+    this.preserveDefaultParagraph = preserveDefaultParagraph;
+    this.shapes = texts.map(text => new SlideShape(text, preserveDefaultParagraph));
     this.shapes.forEach(shape => { shape.parent = this; });
     this.charts = [];
     this.smartArts = [];
@@ -814,7 +820,7 @@ class MockSlide {
     this.background = null;
     this.visible = true;
     this.layout = presentation.masters[0].GetLayout(0);
-    this.notesBody = new SlideShape();
+    this.notesBody = new SlideShape("", preserveDefaultParagraph);
     this.transition = null;
     this.timeline = new MockTimeline();
   }
@@ -836,7 +842,7 @@ class MockSlide {
     this.layout = layout;
     for (const source of layout.GetAllDrawings()) {
       if (!source.GetPlaceholder()) continue;
-      const clone = new SlideShape(source.GetContent().GetText());
+      const clone = new SlideShape(source.GetContent().GetText(), this.preserveDefaultParagraph);
       clone.position = source.position.slice();
       clone.size = source.size.slice();
       clone.geometry.preset = source.geometry.preset;
@@ -931,7 +937,11 @@ class MockSlide {
     });
   }
   Duplicate() {
-    const copy = new MockSlide(this.presentation, this.shapes.map(shape => shape.GetContent().GetText()));
+    const copy = new MockSlide(
+      this.presentation,
+      this.shapes.map(shape => shape.GetContent().GetText()),
+      this.preserveDefaultParagraph,
+    );
     const index = this.presentation.slides.indexOf(this);
     this.presentation.slides.splice(index + 1, 0, copy);
     return copy;
@@ -944,24 +954,25 @@ class MockSlide {
   }
 }
 
-function slidesHarness() {
+function slidesHarness(options = {}) {
+  const preserveDefaultParagraph = Boolean(options.preserveDefaultParagraph);
   const layouts = [
     new MockLayout("Title Slide", "title"),
     new MockLayout("Title and Content", "obj"),
   ];
-  const centeredTitle = new SlideShape();
+  const centeredTitle = new SlideShape("", preserveDefaultParagraph);
   centeredTitle.SetName("Centered Title");
   centeredTitle.SetPlaceholder({ type: "ctrTitle", GetType() { return this.type; } });
   layouts[0].AddObject(centeredTitle);
-  const subtitle = new SlideShape();
+  const subtitle = new SlideShape("", preserveDefaultParagraph);
   subtitle.SetName("Subtitle");
   subtitle.SetPlaceholder({ type: "subtitle", GetType() { return this.type; } });
   layouts[0].AddObject(subtitle);
-  const title = new SlideShape();
+  const title = new SlideShape("", preserveDefaultParagraph);
   title.SetName("Title");
   title.SetPlaceholder({ type: "title", GetType() { return this.type; } });
   layouts[1].AddObject(title);
-  const body = new SlideShape();
+  const body = new SlideShape("", preserveDefaultParagraph);
   body.SetName("Content");
   body.SetPlaceholder({ type: "body", GetType() { return this.type; } });
   layouts[1].AddObject(body);
@@ -1005,8 +1016,8 @@ function slidesHarness() {
       else this.slides.push(slide);
     },
   };
-  const first = new MockSlide(presentation, ["Alpha draft", "replace-me"]);
-  const second = new MockSlide(presentation, ["Beta", "second slide"]);
+  const first = new MockSlide(presentation, ["Alpha draft", "replace-me"], preserveDefaultParagraph);
+  const second = new MockSlide(presentation, ["Beta", "second slide"], preserveDefaultParagraph);
   presentation.slides.push(first, second);
   const selection = { GetShapes: () => [first.shapes[0]] };
   const api = {
@@ -1023,7 +1034,7 @@ function slidesHarness() {
     CreateBlipFill: (url, mode) => mockFill("blip", { url, mode }),
     CreateStroke: (width, fill) => mockStroke(width, fill),
     CreateShape: (type, width, height, fill, line) => {
-      const shape = new SlideShape();
+      const shape = new SlideShape("", preserveDefaultParagraph);
       shape.geometry.preset = type;
       shape.size = [width, height];
       shape.fill = fill;
@@ -1033,7 +1044,7 @@ function slidesHarness() {
     CreatePlaceholder: type => ({ type, GetType() { return this.type; } }),
     CreateLayout: master => {
       const layout = new MockLayout("", "custom", master);
-      master.layouts.push(layout);
+      if (options.persistCreatedLayouts !== false) master.layouts.push(layout);
       return layout;
     },
     CreateThemeColorScheme: (colors, name) => ({
@@ -1116,7 +1127,7 @@ function slidesHarness() {
       return null;
     },
     CreateParagraph: () => new SlideParagraph(),
-    CreateSlide: () => new MockSlide(presentation),
+    CreateSlide: () => new MockSlide(presentation, [], preserveDefaultParagraph),
     __executeMethod(method, params, callback) {
       presentation.pluginCalls.push([method, params]);
       const values = {
@@ -1827,6 +1838,58 @@ test("Slides bridge atomically applies a layout and creates native rich text", a
   assert.equal(inspected.textStyles.paragraphs[1].list.type, "number");
 });
 
+test("Slides bridge reuses an engine-preserved empty paragraph for shape text", async () => {
+  const { bridge, presentation, first } = slidesHarness({ preserveDefaultParagraph: true });
+  first.shapes[0].SetName("Activity Header");
+
+  await bridge.execute([
+    {
+      name: "slides_set_text_content",
+      arguments: {
+        slide: 1,
+        name: "Activity Header",
+        paragraphs: [
+          { text: "活动背景", fontSize: 36, bold: true },
+          { text: "ACTIVITY BACKGROUND", fontSize: 16, bold: true },
+        ],
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 1,
+        name: "Activity Title",
+        text: "活动背景",
+        fontSize: 36,
+      },
+    },
+    {
+      name: "slides_add_slide",
+      arguments: {
+        masterIndex: 1,
+        layoutIndex: 2,
+        title: "活动背景",
+        titleFontSize: 36,
+      },
+    },
+  ]);
+
+  const richParagraphs = first.shapes[0].GetContent().GetAllParagraphs();
+  assert.equal(richParagraphs.length, 2);
+  assert.equal(richParagraphs[0].GetElement(0).GetText(), "活动背景");
+  assert.equal(richParagraphs[1].GetElement(0).GetText(), "ACTIVITY BACKGROUND");
+  assert.equal(first.shapes[0].GetContent().GetText(), "活动背景\nACTIVITY BACKGROUND");
+
+  const addedTextbox = first.shapes.find(shape => shape.GetName() === "Activity Title");
+  assert.equal(addedTextbox.GetContent().GetAllParagraphs().length, 1);
+  assert.equal(addedTextbox.GetContent().GetText(), "活动背景");
+  assert.equal(/^\r?\n|\r?\n$/.test(addedTextbox.GetContent().GetText()), false);
+
+  const addedSlideTitle = presentation.GetSlideByIndex(2).GetDrawingsByPlaceholderType("title")[0];
+  assert.equal(addedSlideTitle.GetContent().GetAllParagraphs().length, 1);
+  assert.equal(addedSlideTitle.GetContent().GetText(), "活动背景");
+});
+
 test("Slides bridge supports automatic, strict, and legacy title placement", async () => {
   const automaticHarness = slidesHarness();
   const centered = await automaticHarness.bridge.execute([{
@@ -2131,8 +2194,28 @@ test("Slides bridge inspects and customizes themes, masters, and layouts", async
         name: "AI Two Column",
         followMasterBackground: true,
         placeholders: [
-          { type: "title", text: "Title", xMm: 15, yMm: 10, widthMm: 220, heightMm: 25 },
-          { type: "body", xMm: 15, yMm: 45, widthMm: 110, heightMm: 100 },
+          {
+            type: "title",
+            text: "Title",
+            xMm: 15,
+            yMm: 10,
+            widthMm: 220,
+            heightMm: 25,
+            fontSize: 36,
+            verticalAlign: "bottom",
+            paddingMm: { left: 0, top: 0, right: 0, bottom: 0 },
+          },
+          {
+            type: "body",
+            xMm: 15,
+            yMm: 45,
+            widthMm: 110,
+            heightMm: 100,
+            fontSize: 20,
+            fontFamily: "Microsoft YaHei",
+            verticalAlign: "top",
+            paddingMm: { left: 2, top: 1, right: 2, bottom: 1 },
+          },
         ],
         applyToSlides: [1],
       },
@@ -2193,12 +2276,38 @@ test("Slides bridge inspects and customizes themes, masters, and layouts", async
   assert.equal(layout.GetName(), "AI Two Column");
   assert.equal(layout.GetAllDrawings().length, 2);
   assert.equal(layout.GetAllDrawings()[0].placeholder.type, "title");
+  assert.equal(layout.GetAllDrawings()[0].verticalAlign, "bottom");
+  assert.deepEqual(layout.GetAllDrawings()[0].paddings, [0, 0, 0, 0]);
+  assert.equal(layout.GetAllDrawings()[0].GetContent().GetAllParagraphs()[0].GetElement(0).GetFontSize(), 72);
+  assert.equal(layout.GetAllDrawings()[1].verticalAlign, "top");
+  assert.deepEqual(layout.GetAllDrawings()[1].paddings, [72000, 36000, 72000, 36000]);
+  assert.equal(layout.GetAllDrawings()[1].GetContent().GetAllParagraphs()[0].GetElement(0).GetFontSize(), 40);
+  assert.equal(layout.GetAllDrawings()[1].GetContent().GetText(), "");
   assert.equal(layout.background, "master");
   assert.equal(first.GetLayout(), layout);
   assert.equal(result.results[7].masters[0].drawings[0].name, "Brand bar updated");
   assert.equal(result.results[7].masters[0].drawings[0].heightMm, 12);
   assert.equal(master.GetAllDrawings().length, 0);
   assert.equal(second.GetTheme(), master.GetTheme());
+});
+
+test("Slides bridge rejects a custom layout that the master does not persist", async () => {
+  const { bridge, first } = slidesHarness({ persistCreatedLayouts: false });
+  const originalLayout = first.GetLayout();
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "slides_create_layout",
+      arguments: {
+        masterIndex: 1,
+        name: "Missing Layout",
+        placeholders: [{ type: "title", text: "Title" }],
+        applyToSlides: [1],
+      },
+    }]),
+    error => error.code === "LAYOUT_CREATION_NOT_PERSISTED",
+  );
+  assert.equal(first.GetLayout(), originalLayout);
 });
 
 test("Slides bridge manages rich paragraphs, object links, notes, comments, and transitions", async () => {
