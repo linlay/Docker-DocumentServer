@@ -1,9 +1,11 @@
 import base64
+import hashlib
 import http.client
 import io
 import json
 import os
 import re
+import shutil
 import socket
 import struct
 import tempfile
@@ -15,6 +17,67 @@ import zipfile
 from unittest import mock
 
 import copilot_server
+
+
+EXPECTED_PPTX_TEMPLATE_SHA256 = (
+    "095a6dcc476dea81e188f1c29c7ce65536d5f57e6b32d0f8acdf0ec5922b40d6"
+)
+
+
+def bundled_pptx_template_path():
+    return os.path.join(os.path.dirname(__file__), "templates", "new.pptx")
+
+
+def rewrite_zip_part(source: bytes, part_name: str, mutate) -> bytes:
+    output = io.BytesIO()
+    found = False
+    with zipfile.ZipFile(io.BytesIO(source)) as archive, zipfile.ZipFile(
+        output,
+        "w",
+    ) as destination:
+        for entry in archive.infolist():
+            if entry.is_dir():
+                continue
+            body = archive.read(entry.filename)
+            if entry.filename == part_name:
+                body = mutate(body)
+                found = True
+            destination.writestr(entry.filename, body)
+    if not found:
+        raise AssertionError(f"part not found: {part_name}")
+    return output.getvalue()
+
+
+class StaticDownloadResponse(io.BytesIO):
+    def __init__(self, body: bytes):
+        super().__init__(body)
+        self.headers = {}
+
+
+def minimal_xlsx_bytes() -> bytes:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        )
+        archive.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>',
+        )
+    return output.getvalue()
 
 
 class ContractAlignmentTests(unittest.TestCase):
@@ -311,11 +374,13 @@ class ContractAlignmentTests(unittest.TestCase):
 
 class BundledPptxTemplateTests(unittest.TestCase):
     def test_template_has_one_blank_slide_without_local_drawings(self):
-        template = os.path.join(
-            os.path.dirname(__file__),
-            "templates",
-            "new.pptx",
-        )
+        template = bundled_pptx_template_path()
+        with open(template, "rb") as stream:
+            self.assertEqual(
+                hashlib.sha256(stream.read()).hexdigest(),
+                EXPECTED_PPTX_TEMPLATE_SHA256,
+            )
+        copilot_server.validate_ooxml_package(template, "pptx")
         presentation_namespace = (
             "http://schemas.openxmlformats.org/presentationml/2006/main"
         )
@@ -369,14 +434,99 @@ class BundledPptxTemplateTests(unittest.TestCase):
             )
             self.assertEqual(common_slide_data.attrib.get("name"), "Blank")
 
+    def test_validator_rejects_structural_pptx_corruption(self):
+        with open(bundled_pptx_template_path(), "rb") as stream:
+            template = stream.read()
+
+        def duplicate_relationship(body):
+            start = body.index(b"<Relationship ")
+            end = body.index(b"/>", start) + 2
+            return body.replace(
+                b"</Relationships>",
+                body[start:end] + b"</Relationships>",
+                1,
+            )
+
+        def duplicate_presentation_element(body, prefix, closing_tag):
+            start = body.index(prefix)
+            end = body.index(b"/>", start) + 2
+            return body.replace(
+                closing_tag,
+                body[start:end] + closing_tag,
+                1,
+            )
+
+        cases = (
+            (
+                "ppt/notesMasters/notesMaster1.xml",
+                lambda body: body.replace(b'id="4"', b'id="3"', 1),
+                "pptx_duplicate_shape_id",
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                lambda body: body.replace(
+                    b"/ppt/slideLayouts/slideLayout2.xml",
+                    b"/ppt/slideLayouts/missing.xml",
+                    1,
+                ),
+                "ooxml_missing_relationship_target",
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                duplicate_relationship,
+                "ooxml_duplicate_relationship_id",
+            ),
+            (
+                "ppt/notesMasters/notesMaster1.xml",
+                lambda _body: b'<p:notesMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">',
+                "ooxml_malformed_xml",
+            ),
+            (
+                "ppt/presentation.xml",
+                lambda body: duplicate_presentation_element(
+                    body,
+                    b"<p:sldId ",
+                    b"</p:sldIdLst>",
+                ),
+                "pptx_duplicate_presentation_id",
+            ),
+            (
+                "ppt/presentation.xml",
+                lambda body: duplicate_presentation_element(
+                    body,
+                    b"<p:sldMasterId ",
+                    b"</p:sldMasterIdLst>",
+                ),
+                "pptx_duplicate_presentation_id",
+            ),
+        )
+        for part, mutate, expected_code in cases:
+            with self.subTest(code=expected_code):
+                corrupted = rewrite_zip_part(template, part, mutate)
+                with tempfile.NamedTemporaryFile(suffix=".pptx") as fixture:
+                    fixture.write(corrupted)
+                    fixture.flush()
+                    with self.assertRaises(
+                        copilot_server.OOXMLValidationError
+                    ) as raised:
+                        copilot_server.validate_ooxml_package(
+                            fixture.name,
+                            "pptx",
+                        )
+                self.assertEqual(raised.exception.code, expected_code)
+
 
 class DocumentGatewayTests(unittest.TestCase):
     def setUp(self):
         self.storage = tempfile.TemporaryDirectory()
         self.templates = tempfile.TemporaryDirectory()
         for extension in copilot_server.DOCUMENT_TYPES:
+            destination = os.path.join(self.templates.name, f"new.{extension}")
+            if extension == "pptx":
+                shutil.copy2(bundled_pptx_template_path(), destination)
+                continue
             with open(
-                os.path.join(self.templates.name, f"new.{extension}"),
+                destination,
                 "wb",
             ) as stream:
                 stream.write(f"blank-{extension}".encode())
@@ -423,23 +573,16 @@ class DocumentGatewayTests(unittest.TestCase):
                     os.path.join(self.storage.name, created["fileName"]),
                     "rb",
                 ) as stream:
-                    self.assertEqual(stream.read(), f"blank-{extension}".encode())
+                    actual = stream.read()
+                if extension == "pptx":
+                    with open(bundled_pptx_template_path(), "rb") as expected:
+                        self.assertEqual(actual, expected.read())
+                else:
+                    self.assertEqual(actual, f"blank-{extension}".encode())
 
     def test_pptx_template_override_is_type_specific_and_validated(self):
         override = os.path.join(self.templates.name, "override.pptx")
-        with zipfile.ZipFile(override, "w") as archive:
-            archive.writestr(
-                "[Content_Types].xml",
-                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
-            )
-            archive.writestr(
-                "ppt/presentation.xml",
-                '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
-            )
-            archive.writestr(
-                "ppt/slides/slide1.xml",
-                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>',
-            )
+        shutil.copy2(bundled_pptx_template_path(), override)
 
         with mock.patch.dict(
             os.environ,
@@ -463,6 +606,25 @@ class DocumentGatewayTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {"DOCUMENT_PPTX_TEMPLATE_PATH": invalid},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "有效的 PPTX 模板"):
+                copilot_server.document_template_path("pptx")
+
+        with open(bundled_pptx_template_path(), "rb") as stream:
+            corrupted = rewrite_zip_part(
+                stream.read(),
+                "ppt/notesMasters/notesMaster1.xml",
+                lambda body: body.replace(b'id="4"', b'id="3"', 1),
+            )
+        invalid_structure = os.path.join(
+            self.templates.name,
+            "invalid-structure.pptx",
+        )
+        with open(invalid_structure, "wb") as stream:
+            stream.write(corrupted)
+        with mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_PPTX_TEMPLATE_PATH": invalid_structure},
         ):
             with self.assertRaisesRegex(RuntimeError, "有效的 PPTX 模板"):
                 copilot_server.document_template_path("pptx")
@@ -736,8 +898,9 @@ class DocumentGatewayTests(unittest.TestCase):
         token = copilot_server.sign_jwt(callback, "document-test-secret")
         handler = mock.Mock()
         handler.headers = {}
-        response = io.BytesIO(b"PK\x03\x04saved-xlsx")
-        response.headers = {"Content-Length": "14"}
+        saved_xlsx = minimal_xlsx_bytes()
+        response = StaticDownloadResponse(saved_xlsx)
+        response.headers = {"Content-Length": str(len(saved_xlsx))}
 
         with mock.patch.object(
             copilot_server.urllib.request,
@@ -756,7 +919,7 @@ class DocumentGatewayTests(unittest.TestCase):
             os.path.join(self.storage.name, created["fileName"]),
             "rb",
         ) as stream:
-            self.assertEqual(stream.read(), b"PK\x03\x04saved-xlsx")
+            self.assertEqual(stream.read(), saved_xlsx)
         self.assertEqual(
             [
                 name
@@ -3334,6 +3497,127 @@ class BridgeLoggingTests(unittest.TestCase):
         self.assertNotIn("requestId", event)
         self.assertNotIn("sessionId", event)
         self.assertNotIn("phase", event)
+
+
+class DocumentPersistenceValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.environment = mock.patch.dict(
+            os.environ,
+            {"DOCUMENT_STORAGE_DIR": self.temporary.name},
+        )
+        self.environment.start()
+        self.document_id = "123e4567-e89b-42d3-a456-426614174000"
+        self.main_file = os.path.join(
+            self.temporary.name,
+            f"{self.document_id}.pptx",
+        )
+        with open(bundled_pptx_template_path(), "rb") as stream:
+            self.template = stream.read()
+        with open(self.main_file, "wb") as stream:
+            stream.write(self.template)
+
+    def tearDown(self):
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    def test_invalid_callback_does_not_replace_current_pptx(self):
+        corrupted = rewrite_zip_part(
+            self.template,
+            "ppt/notesMasters/notesMaster1.xml",
+            lambda body: body.replace(b'id="4"', b'id="3"', 1),
+        )
+        with (
+            mock.patch.object(
+                copilot_server,
+                "normalized_callback_download_url",
+                return_value="http://127.0.0.1/download",
+            ),
+            mock.patch.object(
+                copilot_server.urllib.request,
+                "urlopen",
+                return_value=StaticDownloadResponse(corrupted),
+            ),
+            self.assertRaises(copilot_server.BridgeError) as raised,
+        ):
+            copilot_server.persist_callback_document(
+                "pptx",
+                self.document_id,
+                "https://office.test/download",
+            )
+
+        self.assertEqual(raised.exception.code, "DOCUMENT_SAVE_INVALID_OOXML")
+        self.assertEqual(
+            raised.exception.details["validationCode"],
+            "pptx_duplicate_shape_id",
+        )
+        with open(self.main_file, "rb") as stream:
+            self.assertEqual(stream.read(), self.template)
+        self.assertEqual(
+            [
+                name
+                for name in os.listdir(self.temporary.name)
+                if ".saving-" in name
+            ],
+            [],
+        )
+
+    def test_non_ooxml_callback_uses_structural_error_and_preserves_file(self):
+        with (
+            mock.patch.object(
+                copilot_server,
+                "normalized_callback_download_url",
+                return_value="http://127.0.0.1/download",
+            ),
+            mock.patch.object(
+                copilot_server.urllib.request,
+                "urlopen",
+                return_value=StaticDownloadResponse(b"not-an-ooxml"),
+            ),
+            self.assertRaises(copilot_server.BridgeError) as raised,
+        ):
+            copilot_server.persist_callback_document(
+                "pptx",
+                self.document_id,
+                "https://office.test/download",
+            )
+
+        self.assertEqual(raised.exception.code, "DOCUMENT_SAVE_INVALID_OOXML")
+        self.assertEqual(
+            raised.exception.details["validationCode"],
+            "ooxml_invalid_zip",
+        )
+        with open(self.main_file, "rb") as stream:
+            self.assertEqual(stream.read(), self.template)
+        self.assertFalse(
+            any(".saving-" in name for name in os.listdir(self.temporary.name))
+        )
+
+    def test_valid_callback_atomically_replaces_current_pptx(self):
+        with open(self.main_file, "wb") as stream:
+            stream.write(b"old-version")
+        with (
+            mock.patch.object(
+                copilot_server,
+                "normalized_callback_download_url",
+                return_value="http://127.0.0.1/download",
+            ),
+            mock.patch.object(
+                copilot_server.urllib.request,
+                "urlopen",
+                return_value=StaticDownloadResponse(self.template),
+            ),
+        ):
+            result = copilot_server.persist_callback_document(
+                "pptx",
+                self.document_id,
+                "https://office.test/download",
+            )
+
+        self.assertTrue(result["persisted"])
+        self.assertEqual(result["bytes"], len(self.template))
+        with open(self.main_file, "rb") as stream:
+            self.assertEqual(stream.read(), self.template)
 
 
 class VersionHistoryTests(unittest.TestCase):

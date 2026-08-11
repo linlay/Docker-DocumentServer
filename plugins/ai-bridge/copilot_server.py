@@ -13,6 +13,7 @@ import ipaddress
 import json
 import math
 import os
+import posixpath
 import re
 import secrets
 import shutil
@@ -3683,42 +3684,398 @@ def document_storage_directory() -> str:
     )
 
 
+PACKAGE_RELATIONSHIPS_NAMESPACE = (
+    "http://schemas.openxmlformats.org/package/2006/relationships"
+)
+OFFICE_RELATIONSHIPS_NAMESPACE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+)
+PRESENTATION_NAMESPACE = (
+    "http://schemas.openxmlformats.org/presentationml/2006/main"
+)
+
+
+class OOXMLValidationError(ValueError):
+    def __init__(self, code: str, part: str = "", detail: str = ""):
+        message = f"OOXML validation failed: code={code}"
+        if part:
+            message += f" part={part}"
+        if detail:
+            message += f" detail={detail}"
+        super().__init__(message)
+        self.code = code
+        self.part = part
+        self.detail = detail
+
+
+def required_ooxml_parts(file_type: str) -> set[str]:
+    main_parts = {
+        "docx": "word/document.xml",
+        "xlsx": "xl/workbook.xml",
+        "pptx": "ppt/presentation.xml",
+    }
+    if file_type not in main_parts:
+        raise OOXMLValidationError(
+            "ooxml_unsupported_type",
+            detail=f"fileType={file_type}",
+        )
+    return {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        main_parts[file_type],
+    }
+
+
+def validate_ooxml_part_name(name: str) -> None:
+    trimmed = name.removesuffix("/")
+    if not trimmed or trimmed.startswith("/") or "\\" in trimmed:
+        raise OOXMLValidationError(
+            "ooxml_unsafe_part_name",
+            name,
+            "invalid package path",
+        )
+    clean = posixpath.normpath(trimmed)
+    if clean != trimmed or clean == ".." or clean.startswith("../"):
+        raise OOXMLValidationError(
+            "ooxml_unsafe_part_name",
+            name,
+            "path escapes package root",
+        )
+
+
+def relationship_source_part(relationship_part: str) -> str:
+    if relationship_part == "_rels/.rels":
+        return ""
+    directory = posixpath.dirname(relationship_part)
+    if (
+        posixpath.basename(directory) != "_rels"
+        or not relationship_part.endswith(".rels")
+    ):
+        raise OOXMLValidationError(
+            "ooxml_invalid_relationship_part",
+            relationship_part,
+            "invalid relationship part path",
+        )
+    source_directory = posixpath.dirname(directory)
+    source_name = posixpath.basename(relationship_part).removesuffix(".rels")
+    return (
+        source_name
+        if source_directory in ("", ".")
+        else posixpath.join(source_directory, source_name)
+    )
+
+
+def relationship_part_for_source(source: str) -> str:
+    if not source:
+        return "_rels/.rels"
+    directory = posixpath.dirname(source)
+    if directory in ("", "."):
+        return posixpath.join("_rels", posixpath.basename(source) + ".rels")
+    return posixpath.join(
+        directory,
+        "_rels",
+        posixpath.basename(source) + ".rels",
+    )
+
+
+def resolve_relationship_target(source: str, raw_target: str) -> str:
+    parsed = urllib.parse.urlsplit(raw_target)
+    if parsed.scheme or parsed.netloc:
+        raise ValueError("internal target is not a package path")
+    target = urllib.parse.unquote(parsed.path)
+    if not target:
+        target = source
+    elif target.startswith("/"):
+        target = target.removeprefix("/")
+    else:
+        target = posixpath.join(posixpath.dirname(source), target)
+    target = posixpath.normpath(target)
+    if (
+        target in ("", ".", "..")
+        or target.startswith("../")
+        or "\\" in target
+    ):
+        raise ValueError("target escapes package root")
+    return target
+
+
+def parse_relationships_part(
+    archive: zipfile.ZipFile,
+    part: str,
+) -> dict[str, dict[str, str]]:
+    relationships: dict[str, dict[str, str]] = {}
+    try:
+        with archive.open(part) as stream:
+            for event, element in ET.iterparse(stream, events=("start", "end")):
+                if event == "end":
+                    element.clear()
+                    continue
+                if element.tag != f"{{{PACKAGE_RELATIONSHIPS_NAMESPACE}}}Relationship":
+                    continue
+                relationship_id = element.attrib.get("Id", "")
+                target = element.attrib.get("Target", "")
+                if not relationship_id or not target:
+                    raise OOXMLValidationError(
+                        "ooxml_invalid_relationship",
+                        part,
+                        "relationship must have Id and Target",
+                    )
+                if relationship_id in relationships:
+                    raise OOXMLValidationError(
+                        "ooxml_duplicate_relationship_id",
+                        part,
+                        f"id={relationship_id}",
+                    )
+                relationships[relationship_id] = {
+                    "id": relationship_id,
+                    "target": target,
+                    "targetMode": element.attrib.get("TargetMode", ""),
+                }
+    except ET.ParseError as error:
+        raise OOXMLValidationError(
+            "ooxml_malformed_xml",
+            part,
+            str(error),
+        ) from error
+    return relationships
+
+
+def validate_ooxml_xml_part(
+    archive: zipfile.ZipFile,
+    part: str,
+    file_type: str,
+) -> list[str]:
+    relationship_references: list[str] = []
+    shape_ids: set[int] = set()
+    presentation_ids: dict[str, set[int]] = {
+        "sldId": set(),
+        "sldMasterId": set(),
+    }
+    try:
+        with archive.open(part) as stream:
+            for event, element in ET.iterparse(stream, events=("start", "end")):
+                if event == "end":
+                    element.clear()
+                    continue
+                for local_name in ("id", "embed", "link"):
+                    attribute_name = (
+                        f"{{{OFFICE_RELATIONSHIPS_NAMESPACE}}}{local_name}"
+                    )
+                    if attribute_name in element.attrib:
+                        relationship_references.append(
+                            element.attrib[attribute_name]
+                        )
+                if file_type != "pptx" or not element.tag.startswith(
+                    f"{{{PRESENTATION_NAMESPACE}}}"
+                ):
+                    continue
+                local_name = element.tag.rsplit("}", 1)[-1]
+                if local_name == "cNvPr":
+                    raw_id = element.attrib.get("id", "")
+                    try:
+                        shape_id = int(raw_id)
+                    except ValueError as error:
+                        raise OOXMLValidationError(
+                            "pptx_invalid_shape_id",
+                            part,
+                            f"id={raw_id}",
+                        ) from error
+                    if shape_id < 1 or shape_id > 0xFFFFFFFF:
+                        raise OOXMLValidationError(
+                            "pptx_invalid_shape_id",
+                            part,
+                            f"id={raw_id}",
+                        )
+                    if shape_id in shape_ids:
+                        raise OOXMLValidationError(
+                            "pptx_duplicate_shape_id",
+                            part,
+                            f"id={shape_id}",
+                        )
+                    shape_ids.add(shape_id)
+                if part == "ppt/presentation.xml" and local_name in presentation_ids:
+                    raw_id = element.attrib.get("id", "")
+                    try:
+                        presentation_id = int(raw_id)
+                    except ValueError as error:
+                        raise OOXMLValidationError(
+                            "pptx_invalid_presentation_id",
+                            part,
+                            f"{local_name}={raw_id}",
+                        ) from error
+                    if presentation_id < 1 or presentation_id > 0xFFFFFFFF:
+                        raise OOXMLValidationError(
+                            "pptx_invalid_presentation_id",
+                            part,
+                            f"{local_name}={raw_id}",
+                        )
+                    if presentation_id in presentation_ids[local_name]:
+                        raise OOXMLValidationError(
+                            "pptx_duplicate_presentation_id",
+                            part,
+                            f"{local_name}={presentation_id}",
+                        )
+                    presentation_ids[local_name].add(presentation_id)
+    except ET.ParseError as error:
+        raise OOXMLValidationError(
+            "ooxml_malformed_xml",
+            part,
+            str(error),
+        ) from error
+    return relationship_references
+
+
+def validate_ooxml_package(
+    path: str,
+    file_type: str,
+    maximum_bytes: int = DOCUMENT_MAX_SAVE_BYTES,
+) -> None:
+    file_type = file_type.lower()
+    try:
+        size = os.path.getsize(path)
+    except OSError as error:
+        raise OOXMLValidationError(
+            "ooxml_unreadable",
+            detail=str(error),
+        ) from error
+    if size < 4 or size > maximum_bytes:
+        raise OOXMLValidationError(
+            "ooxml_invalid_size",
+            detail=f"bytes={size}",
+        )
+    try:
+        with open(path, "rb") as stream:
+            if stream.read(4) != b"PK\x03\x04":
+                raise OOXMLValidationError(
+                    "ooxml_invalid_zip",
+                    detail="missing ZIP signature",
+                )
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if len(entries) > 100_000:
+                raise OOXMLValidationError(
+                    "ooxml_too_many_parts",
+                    detail=f"parts={len(entries)}",
+                )
+            parts: dict[str, zipfile.ZipInfo] = {}
+            total_uncompressed = 0
+            for entry in entries:
+                validate_ooxml_part_name(entry.filename)
+                if entry.is_dir():
+                    continue
+                if entry.filename in parts:
+                    raise OOXMLValidationError(
+                        "ooxml_duplicate_part",
+                        entry.filename,
+                        "duplicate ZIP entry",
+                    )
+                parts[entry.filename] = entry
+                if entry.file_size > maximum_bytes * 4:
+                    raise OOXMLValidationError(
+                        "ooxml_part_too_large",
+                        entry.filename,
+                        f"bytes={entry.file_size}",
+                    )
+                total_uncompressed += entry.file_size
+                if total_uncompressed > maximum_bytes * 4:
+                    raise OOXMLValidationError(
+                        "ooxml_expansion_too_large",
+                        detail=f"bytes={total_uncompressed}",
+                    )
+            for required in required_ooxml_parts(file_type):
+                if required not in parts:
+                    raise OOXMLValidationError(
+                        "ooxml_missing_required_part",
+                        required,
+                        "required part is absent",
+                    )
+
+            relationships_by_source: dict[
+                str,
+                dict[str, dict[str, str]],
+            ] = {}
+            for part in parts:
+                if not part.lower().endswith(".rels"):
+                    continue
+                relationships_by_source[relationship_source_part(part)] = (
+                    parse_relationships_part(archive, part)
+                )
+            for source, relationships in relationships_by_source.items():
+                for relationship in relationships.values():
+                    if relationship["targetMode"].lower() == "external":
+                        continue
+                    try:
+                        target = resolve_relationship_target(
+                            source,
+                            relationship["target"],
+                        )
+                    except ValueError as error:
+                        raise OOXMLValidationError(
+                            "ooxml_invalid_relationship_target",
+                            relationship_part_for_source(source),
+                            str(error),
+                        ) from error
+                    if target not in parts:
+                        raise OOXMLValidationError(
+                            "ooxml_missing_relationship_target",
+                            relationship_part_for_source(source),
+                            f"id={relationship['id']} target={target}",
+                        )
+
+            for part in parts:
+                lower_part = part.lower()
+                if not (lower_part.endswith(".xml") or lower_part.endswith(".rels")):
+                    continue
+                if lower_part.endswith(".rels"):
+                    continue
+                for relationship_id in validate_ooxml_xml_part(
+                    archive,
+                    part,
+                    file_type,
+                ):
+                    if relationship_id not in relationships_by_source.get(part, {}):
+                        raise OOXMLValidationError(
+                            "ooxml_missing_relationship",
+                            part,
+                            f"id={relationship_id}",
+                        )
+    except zipfile.BadZipFile as error:
+        raise OOXMLValidationError(
+            "ooxml_invalid_zip",
+            detail=str(error),
+        ) from error
+
+
 def document_template_path(file_type: str) -> str:
     if file_type not in DOCUMENT_TYPES:
         raise BridgeError(404, "DOCUMENT_TYPE_NOT_FOUND", "不支持的文档类型")
+    template = ""
     if file_type == "pptx":
-        configured = os.environ.get("DOCUMENT_PPTX_TEMPLATE_PATH", "").strip()
-        if configured:
-            validate_pptx_template(configured)
-            return configured
-    template_root = os.environ.get("DOCUMENT_TEMPLATE_ROOT", DOCUMENT_TEMPLATE_ROOT)
-    return os.path.join(template_root, f"new.{file_type}")
+        template = os.environ.get("DOCUMENT_PPTX_TEMPLATE_PATH", "").strip()
+    if not template:
+        template_root = os.environ.get("DOCUMENT_TEMPLATE_ROOT", DOCUMENT_TEMPLATE_ROOT)
+        template = os.path.join(template_root, f"new.{file_type}")
+    if file_type == "pptx":
+        validate_pptx_template(template)
+    return template
 
 
 def validate_pptx_template(path: str) -> None:
     if not os.path.isfile(path):
         raise RuntimeError("找不到 DOCUMENT_PPTX_TEMPLATE_PATH 指定的 PPTX 模板")
-    required_parts = {
-        "[Content_Types].xml",
-        "ppt/presentation.xml",
-    }
     try:
+        validate_ooxml_package(path, "pptx")
         with zipfile.ZipFile(path) as archive:
-            names = set(archive.namelist())
-            missing = sorted(required_parts - names)
-            slide_parts = sorted(
-                name
-                for name in names
-                if re.fullmatch(r"ppt/slides/slide[1-9][0-9]*\.xml", name)
-            )
-            if missing or not slide_parts:
-                details = missing or ["ppt/slides/slide*.xml"]
-                raise RuntimeError(
-                    "PPTX 模板缺少必要 OOXML 部件：" + ", ".join(details)
+            if not any(
+                re.fullmatch(r"ppt/slides/slide[1-9][0-9]*\.xml", name)
+                for name in archive.namelist()
+            ):
+                raise OOXMLValidationError(
+                    "pptx_template_missing_slide",
+                    "ppt/slides/slide*.xml",
+                    "template must contain at least one slide",
                 )
-            for part in ("[Content_Types].xml", "ppt/presentation.xml", slide_parts[0]):
-                ET.fromstring(archive.read(part))
-    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as error:
+    except (OSError, zipfile.BadZipFile, OOXMLValidationError) as error:
         raise RuntimeError("DOCUMENT_PPTX_TEMPLATE_PATH 不是有效的 PPTX 模板") from error
 
 
@@ -4584,19 +4941,19 @@ def persist_callback_document(
                         output.write(chunk)
                     output.flush()
                     os.fsync(output.fileno())
-            if downloaded < 4:
+            try:
+                validate_ooxml_package(temporary, file_type, maximum)
+            except OOXMLValidationError as error:
                 raise BridgeError(
                     502,
-                    "DOCUMENT_SAVE_EMPTY",
-                    "文档服务返回了空文件",
-                )
-            with open(temporary, "rb") as saved:
-                if saved.read(4) != b"PK\x03\x04":
-                    raise BridgeError(
-                        502,
-                        "DOCUMENT_SAVE_INVALID_FORMAT",
-                        "文档服务返回的文件格式无效",
-                    )
+                    "DOCUMENT_SAVE_INVALID_OOXML",
+                    "文档服务返回的 Office 文件结构无效",
+                    {
+                        "validationCode": error.code,
+                        "part": error.part,
+                        "detail": error.detail,
+                    },
+                ) from error
             os.chmod(temporary, 0o644)
             os.replace(temporary, destination)
             os.utime(destination, None)
