@@ -43,6 +43,7 @@
   let bridgeTerminalError = null;
   let relayStateValue = null;
   let relayStateCode = null;
+  let relayStateSignature = null;
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -112,16 +113,33 @@
     window.dispatchEvent(new CustomEvent(`ai-bridge-${name}`, { detail }));
   }
 
-  function setRelayState(value, code) {
+  function relayStateDetail(value, code, error) {
+    const diagnostic = error ? serializedError(error) : null;
+    const detail = { state: value };
+    const normalizedCode = code || diagnostic && diagnostic.code || null;
+    if (normalizedCode) detail.code = normalizedCode;
+    if (diagnostic && diagnostic.message) detail.message = diagnostic.message;
+    if (diagnostic && diagnostic.requestId) detail.requestId = diagnostic.requestId;
+    if (diagnostic && diagnostic.details !== undefined) detail.details = diagnostic.details;
+    return detail;
+  }
+
+  function setRelayState(value, code, error) {
     if (document.documentElement && document.documentElement.dataset) {
       document.documentElement.dataset.aiBridgeRelayState = value;
     }
-    const normalizedCode = code || null;
-    if (relayStateValue === value && relayStateCode === normalizedCode) return;
+    const detail = relayStateDetail(value, code, error);
+    const normalizedCode = detail.code || null;
+    let signature;
+    try {
+      signature = JSON.stringify(detail);
+    } catch (signatureError) {
+      signature = `${value}:${normalizedCode || ""}:${detail.message || ""}`;
+    }
+    if (relayStateSignature === signature) return;
     relayStateValue = value;
     relayStateCode = normalizedCode;
-    const detail = { state: value };
-    if (code) detail.code = code;
+    relayStateSignature = signature;
     window.dispatchEvent(new CustomEvent("ai-bridge-relay-state", { detail }));
   }
 
@@ -342,7 +360,7 @@
       },
     );
     document.documentElement.dataset.aiBridgeState = "contract-mismatch";
-    setRelayState("contract-mismatch", "CONTRACT_MISMATCH");
+    setRelayState("contract-mismatch", "CONTRACT_MISMATCH", bridgeTerminalError);
     for (const waiter of readyWaiters) waiter.reject(bridgeTerminalError);
     readyWaiters.clear();
   }
@@ -1115,24 +1133,42 @@
   }
 
   async function httpRelayPost(path, payload) {
-    const response = await window.fetch(`${httpRelayBaseURL()}/${path}`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: httpRelayHeaders(),
-      body: JSON.stringify(payload),
-    });
+    let response;
+    try {
+      response = await window.fetch(`${httpRelayBaseURL()}/${path}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: httpRelayHeaders(),
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      throw bridgeError(
+        "HTTP_RELAY_NETWORK_ERROR",
+        `HTTP Relay 网络请求失败：${error && error.message ? error.message : String(error)}`,
+        { details: { path } },
+      );
+    }
     let body;
     try {
       body = await response.json();
     } catch (error) {
-      throw bridgeError("HTTP_RELAY_INVALID_RESPONSE", `HTTP Relay 返回了无效响应：${response.status}`);
+      throw bridgeError(
+        "HTTP_RELAY_INVALID_RESPONSE",
+        `HTTP Relay 返回了无效响应：${response.status}`,
+        { details: { httpStatus: response.status, path } },
+      );
     }
     if (!response.ok || !body || body.ok === false) {
       const error = body && body.error || {};
+      const details = error.details && typeof error.details === "object"
+        ? { ...error.details }
+        : {};
+      details.httpStatus = response.status;
+      details.path = path;
       throw bridgeError(
         error.code || "HTTP_RELAY_FAILED",
         error.message || `HTTP Relay 请求失败：${response.status}`,
-        { details: error.details },
+        { details },
       );
     }
     return body;
@@ -1210,17 +1246,20 @@
       }
     }
 
-    function stopRelay(reason, code) {
+    function stopRelay(reason, code, error) {
       stopped = true;
       relayKey = null;
-      setRelayState(reason, code);
-      emit("relayError", { reason, code: code || "HTTP_RELAY_STOPPED" });
+      setRelayState(reason, code, error);
+      emit("relayError", {
+        reason,
+        ...serializedError(error || bridgeError(code || "HTTP_RELAY_STOPPED", reason)),
+      });
     }
 
-    function reloadForCredentialError(code) {
+    function reloadForCredentialError(code, error) {
       const now = Date.now();
       if (now - credentialReloadAt() < credentialReloadWindowMs) {
-        stopRelay("credential-error", code);
+        stopRelay("credential-error", code, error);
         return;
       }
       rememberCredentialReload(now);
@@ -1292,11 +1331,11 @@
             continue;
           }
           if (code === "SESSION_SUPERSEDED") {
-            stopRelay("superseded", code);
+            stopRelay("superseded", code, error);
             return;
           }
-          if (code === "CONTRACT_MISMATCH") {
-            stopRelay("contract-mismatch", code);
+          if (code === "CONTRACT_MISMATCH" || code === "CONTRACT_VERSION_MISMATCH") {
+            stopRelay("contract-mismatch", code, error);
             return;
           }
           if (
@@ -1309,10 +1348,10 @@
             code === "DOCUMENT_IDENTITY_MISMATCH" ||
             code === "INCOMPLETE_BRIDGE_IDENTITY"
           ) {
-            reloadForCredentialError(code);
+            reloadForCredentialError(code, error);
             return;
           }
-          setRelayState("retrying", code);
+          setRelayState("retrying", code, error);
           await new Promise(function (resolve) { window.setTimeout(resolve, retryDelayMs); });
           retryDelayMs = Math.min(10000, retryDelayMs * 2);
         }

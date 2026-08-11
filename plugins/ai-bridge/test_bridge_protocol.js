@@ -1340,6 +1340,57 @@ test("contract mismatch is terminal and reports one Relay state without register
   );
 });
 
+test("Relay contract version mismatch is terminal and preserves server diagnostics", async () => {
+  let registerCalls = 0;
+  const mismatchDetails = {
+    expectedContractVersion: "0.2.1",
+    expectedContractSha256: "a".repeat(64),
+    receivedContractVersion: "0.2.1",
+    receivedContractSha256: "b".repeat(64),
+  };
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    hostFetch: async requestPath => {
+      assert.ok(requestPath.endsWith("/register"));
+      registerCalls += 1;
+      return relayResponse(409, {
+        ok: false,
+        error: {
+          code: "CONTRACT_VERSION_MISMATCH",
+          message: "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
+          details: mismatchDetails,
+        },
+      });
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "contract-mismatch");
+  const requestCount = harness.hostRelayPaths.length;
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  assert.equal(registerCalls, 1);
+  assert.equal(harness.hostRelayPaths.length, requestCount);
+  const terminalDetail = JSON.parse(JSON.stringify(
+    harness.hostWindow.dispatchedEvents
+      .filter(event => event.type === "ai-bridge-relay-state")
+      .at(-1).detail,
+  ));
+  assert.deepEqual(
+    terminalDetail,
+    {
+      state: "contract-mismatch",
+      code: "CONTRACT_VERSION_MISMATCH",
+      message: "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
+      details: {
+        ...mismatchDetails,
+        httpStatus: 409,
+        path: "register",
+      },
+    },
+  );
+});
+
 test("explicit HTTP opt-in does not start Relay on a public host", async () => {
   const harness = createHarness({
     hostname: "office.test",
