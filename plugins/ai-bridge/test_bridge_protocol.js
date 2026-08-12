@@ -108,8 +108,8 @@ function createHarness(options = {}) {
     },
     crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
     btoa: value => Buffer.from(value, "binary").toString("base64"),
-    setTimeout,
-    clearTimeout,
+    setTimeout: options.hostSetTimeout || setTimeout,
+    clearTimeout: options.hostClearTimeout || clearTimeout,
     history: { replaceState() {} },
     navigator: { sendBeacon() { return true; } },
     sessionStorage,
@@ -186,7 +186,11 @@ function createHarness(options = {}) {
     parent: null,
     postMessage(message, targetOrigin) {
       ancestorMessages.push({ ancestor: "host", message, targetOrigin });
-      if (targetOrigin !== "https://app.test" || options.dropPluginHello) return;
+      if (
+        targetOrigin !== "https://app.test"
+        || options.dropPluginHello
+        || (options.delayPluginHello && message.type === "hello")
+      ) return;
       queueMicrotask(() => hostWindow.dispatch("message", {
         origin: "https://docs.test",
         source: pluginHandle,
@@ -208,7 +212,11 @@ function createHarness(options = {}) {
     parent: outerProxy,
     postMessage(message, targetOrigin) {
       ancestorMessages.push({ ancestor: "host", message, targetOrigin });
-      if (targetOrigin !== "https://app.test" || options.dropPluginHello) return;
+      if (
+        targetOrigin !== "https://app.test"
+        || options.dropPluginHello
+        || (options.delayPluginHello && message.type === "hello")
+      ) return;
       queueMicrotask(() => hostWindow.dispatch("message", {
         origin: "https://docs.test",
         source: pluginHandle,
@@ -302,6 +310,7 @@ function createHarness(options = {}) {
     window: hostWindow,
     document: hostDocument,
     URL,
+    Date: options.hostDate || Date,
     CustomEvent: class CustomEvent {
       constructor(name, options) { this.type = name; this.detail = options && options.detail; }
     },
@@ -1321,6 +1330,123 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
   );
 });
 
+test("HTTP Relay keeps registering when the plugin becomes ready after 120 seconds", async () => {
+  let now = 1_000_000;
+  let startupTimer = null;
+  const FakeDate = class extends Date {
+    static now() { return now; }
+  };
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    delayPluginHello: true,
+    pluginSetInterval: () => 0,
+    pluginClearInterval: () => {},
+    hostDate: FakeDate,
+    hostSetTimeout(callback, delay) {
+      if (delay === 180000) {
+        startupTimer = { callback, delay };
+        return 180000;
+      }
+      return setTimeout(callback, delay);
+    },
+    hostClearTimeout(timer) {
+      if (timer !== 180000) clearTimeout(timer);
+    },
+    hostFetch: async requestPath => {
+      if (requestPath.endsWith("/register")) {
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        return relayResponse(409, {
+          ok: false,
+          error: { code: "SESSION_SUPERSEDED", message: "done" },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  assert.equal(harness.documentElement.dataset.aiBridgeRelayState, "registering");
+  assert.equal(startupTimer.delay, 180000);
+  assert.deepEqual(harness.hostRelayPaths, []);
+
+  now += 120000;
+  const hello = harness.ancestorMessages.find(entry => entry.message?.type === "hello").message;
+  harness.hostWindow.dispatch("message", {
+    origin: "https://docs.test",
+    source: harness.pluginHandle,
+    data: hello,
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
+  const registerRequest = harness.hostRelayPaths.find(path => path.endsWith("/register"));
+  assert.ok(registerRequest);
+  const registration = harness.hostWindow.dispatchedEvents.find(
+    event => event.type === "ai-bridge-relay-state" && event.detail.state === "ready",
+  );
+  assert.ok(registration);
+  assert.equal(
+    harness.hostWindow.aiBridge.getState().ready,
+    true,
+  );
+  assert.equal(
+    harness.hostWindow.dispatchedEvents.some(
+      event => event.type === "ai-bridge-relay-state" && event.detail.code === "NOT_READY",
+    ),
+    false,
+  );
+});
+
+test("HTTP Relay stops with startup diagnostics after 180 seconds", async () => {
+  let now = 1_000_000;
+  let startupTimeout = null;
+  const FakeDate = class extends Date {
+    static now() { return now; }
+  };
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    dropPluginHello: true,
+    pluginSetInterval: () => 0,
+    pluginClearInterval: () => {},
+    hostDate: FakeDate,
+    hostSetTimeout(callback, delay) {
+      if (delay === 180000) {
+        startupTimeout = callback;
+        return 180000;
+      }
+      return setTimeout(callback, delay);
+    },
+    hostClearTimeout(timer) {
+      if (timer !== 180000) clearTimeout(timer);
+    },
+    hostFetch: async () => {
+      throw new Error("startup timeout must stop before Relay registration");
+    },
+  });
+
+  assert.equal(harness.documentElement.dataset.aiBridgeRelayState, "registering");
+  assert.equal(typeof startupTimeout, "function");
+  now += 180000;
+  startupTimeout();
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-timeout");
+  const detail = harness.hostWindow.dispatchedEvents
+    .filter(event => event.type === "ai-bridge-relay-state")
+    .at(-1).detail;
+  assert.equal(detail.code, "PLUGIN_STARTUP_TIMEOUT");
+  assert.equal(detail.details.timeoutMs, 180000);
+  assert.equal(detail.details.startup.hostScriptMs, 0);
+  assert.deepEqual(harness.hostRelayPaths, []);
+});
+
 test("contract mismatch is terminal and reports one Relay state without registering", async () => {
   const harness = createHarness({
     hostname: "localhost",
@@ -1482,18 +1608,18 @@ test("superseded HTTP Relay stops without re-registering or reloading", async ()
   assert.equal(harness.reloadCount, 0);
 });
 
-test("first Relay credential failure schedules only one page reload", async () => {
+test("first invalid editor session schedules only one page reload", async () => {
   const harness = createHarness({
     hostname: "localhost",
     httpRelay: true,
     relayBaseUrl: "/api/v1/editor-relay",
     hostFetch: async requestPath => {
       assert.ok(requestPath.endsWith("/register"));
-      return relayResponse(401, {
+      return relayResponse(403, {
         ok: false,
         error: {
-          code: "EDITOR_TOKEN_EXPIRED",
-          message: "expired",
+          code: "editor_session_invalid",
+          message: "invalid session",
         },
       });
     },
@@ -1510,7 +1636,7 @@ test("first Relay credential failure schedules only one page reload", async () =
   assert.equal(harness.hostRelayPaths.length, 1);
 });
 
-test("repeated Relay credential failure inside the guard window becomes terminal", async () => {
+test("repeated invalid editor session inside the guard window becomes terminal", async () => {
   const harness = createHarness({
     hostname: "localhost",
     httpRelay: true,
@@ -1520,11 +1646,11 @@ test("repeated Relay credential failure inside the guard window becomes terminal
     },
     hostFetch: async requestPath => {
       assert.ok(requestPath.endsWith("/register"));
-      return relayResponse(401, {
+      return relayResponse(403, {
         ok: false,
         error: {
-          code: "EDITOR_TOKEN_EXPIRED",
-          message: "expired again",
+          code: "editor_session_invalid",
+          message: "invalid session again",
         },
       });
     },
@@ -1536,6 +1662,37 @@ test("repeated Relay credential failure inside the guard window becomes terminal
 
   assert.equal(harness.reloadCount, 0);
   assert.equal(harness.hostRelayPaths.length, requestCount);
+});
+
+test("successful Relay registration clears the credential reload guard", async () => {
+  const guardKey = "aiBridgeCredentialReloadAt:demo.docx|docx|word|user-1";
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    localValues: { [guardKey]: String(Date.now()) },
+    sessionValues: { [guardKey]: String(Date.now()) },
+    hostFetch: async requestPath => {
+      if (requestPath.endsWith("/register")) {
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        return relayResponse(409, {
+          ok: false,
+          error: { code: "SESSION_SUPERSEDED", message: "done" },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
+  assert.equal(harness.localValues.has(guardKey), false);
+  assert.equal(harness.sessionValues.has(guardKey), false);
 });
 
 test("plugin rejects a command when the host document key changes", async () => {

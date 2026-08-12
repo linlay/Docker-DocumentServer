@@ -1178,7 +1178,8 @@
   function startHttpRelay() {
     if (!httpRelayEnabled() || typeof window.fetch !== "function") return;
     const httpSessionId = createRequestId("http-session");
-    const credentialReloadWindowMs = 60000;
+    const relayStartupTimeoutMs = 180000;
+    const credentialReloadWindowMs = 600000;
     let relayKey = null;
     let resumeToken = null;
     let stopped = false;
@@ -1247,6 +1248,29 @@
       }
     }
 
+    function clearCredentialReload() {
+      const key = credentialReloadKey();
+      try {
+        if (window.localStorage) window.localStorage.removeItem(key);
+      } catch (error) {
+        // A stale guard is harmless when persistent storage is unavailable.
+      }
+      try {
+        if (window.sessionStorage) window.sessionStorage.removeItem(key);
+      } catch (error) {
+        // A stale guard is harmless when per-tab storage is unavailable.
+      }
+      try {
+        const currentUrl = new URL(window.location.href);
+        if (currentUrl.searchParams.has("aiBridgeCredentialReloadAt")) {
+          currentUrl.searchParams.delete("aiBridgeCredentialReloadAt");
+          window.history.replaceState(null, "", currentUrl.toString());
+        }
+      } catch (error) {
+        // Storage-backed guards were already cleared when available.
+      }
+    }
+
     function stopRelay(reason, code, error) {
       stopped = true;
       relayKey = null;
@@ -1272,7 +1296,21 @@
 
     async function register() {
       setRelayState("registering");
-      await waitUntilReady(30000);
+      try {
+        await waitUntilReady(relayStartupTimeoutMs);
+      } catch (error) {
+        if (!error || error.code !== "NOT_READY") throw error;
+        throw bridgeError(
+          "PLUGIN_STARTUP_TIMEOUT",
+          "ai-bridge 插件启动超时",
+          {
+            details: {
+              timeoutMs: relayStartupTimeoutMs,
+              startup: { ...startupMarks },
+            },
+          },
+        );
+      }
       const payload = {
         sessionId: httpSessionId,
         state: relayStateSnapshot(),
@@ -1287,6 +1325,7 @@
       const response = await httpRelayPost("register", payload);
       relayKey = response.relayKey;
       resumeToken = response.resumeToken || resumeToken;
+      clearCredentialReload();
       setRelayState("ready");
     }
 
@@ -1339,11 +1378,16 @@
             stopRelay("contract-mismatch", code, error);
             return;
           }
+          if (code === "PLUGIN_STARTUP_TIMEOUT") {
+            stopRelay("startup-timeout", code, error);
+            return;
+          }
           if (
             code === "EDITOR_TOKEN_REQUIRED" ||
             code === "INVALID_EDITOR_TOKEN" ||
             code === "EDITOR_TOKEN_EXPIRED" ||
             code === "BRIDGE_RESUME_TOKEN_EXPIRED" ||
+            code === "editor_session_invalid" ||
             code === "DOCUMENT_MISMATCH" ||
             code === "EDITOR_MISMATCH" ||
             code === "DOCUMENT_IDENTITY_MISMATCH" ||
