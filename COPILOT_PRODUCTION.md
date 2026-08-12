@@ -27,8 +27,15 @@ Python persistence endpoints are intentionally disabled and return
 
 Use `document-hub/deploy/compose.yml` and follow
 `document-hub/README.md`. Required deployment inputs include the pinned
-DocumentServer image, `AI_BRIDGE_PLUGIN_DIR`, public origins, authentication
-configuration, and the four file-based secrets documented there.
+DocumentServer image, the sibling Docker-DocumentServer build context, public
+origins, authentication configuration, and the four file-based secrets
+documented there.
+
+The source-ui image bakes the browser plugin and Python Relay into one
+immutable artifact. Do not bind-mount `plugins/ai-bridge` over the running
+container: static assets would change immediately while the Relay keeps the
+contract loaded at process startup, allowing one container to expose two
+contract versions.
 
 The same `AI_RELAY_INTERNAL_SECRET_FILE` must be mounted into document-hub and
 DocumentServer. Keep DocumentServer port 3001 unpublished. The empty

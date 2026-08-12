@@ -30,5 +30,20 @@ RUN set -eux; \
     done; \
     rm /tmp/onlyoffice-web-apps-source-ui.patch
 
+# Keep the browser plugin and the Relay in one immutable image. Serving plugin
+# files from a live bind mount while the Python Relay keeps its startup-time
+# contract in memory can expose two contract versions from one container.
+COPY --chown=ds:ds plugins/ai-bridge/ /var/www/onlyoffice/documentserver/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/
+COPY --chown=ds:ds plugins/ai-bridge/nginx-document-app.conf /opt/onlyoffice-copilot/nginx-document-app.conf
+COPY --chown=ds:ds plugins/ai-bridge/copilot_server.py /opt/onlyoffice-copilot/copilot_server.py
+COPY --chown=ds:ds plugins/ai-bridge/run-copilot.sh /opt/onlyoffice-copilot/run-copilot.sh
+COPY plugins/ai-bridge/supervisor-ds-copilot.conf /etc/supervisor/conf.d/ds-copilot.conf
+
+RUN chmod 0555 /opt/onlyoffice-copilot/run-copilot.sh; \
+    chmod 0444 \
+      /opt/onlyoffice-copilot/nginx-document-app.conf \
+      /opt/onlyoffice-copilot/copilot_server.py \
+      /etc/supervisor/conf.d/ds-copilot.conf
+
 LABEL org.opencontainers.image.title="ONLYOFFICE DocumentServer with source-level compact editor UI" \
       org.opencontainers.image.version="9.4.0-129-source-ui"
