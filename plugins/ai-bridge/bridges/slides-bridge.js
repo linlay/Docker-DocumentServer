@@ -668,10 +668,6 @@
               });
             }
 
-            function slideTables(slide) {
-              return typeof slide.GetAllTables === "function" ? slide.GetAllTables() : [];
-            }
-
             function pushUnique(target, values) {
               for (var index = 0; index < values.length; index += 1) {
                 if (target.indexOf(values[index]) === -1) target.push(values[index]);

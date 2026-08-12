@@ -6,6 +6,8 @@ export type AiBridgeErrorCode =
   | "CONNECTION_TIMEOUT"
   | "TIMEOUT"
   | "BRIDGE_TIMEOUT"
+  | "HTTP_RELAY_NETWORK_ERROR"
+  | "HTTP_RELAY_INVALID_RESPONSE"
   | "EDITOR_TOKEN_REQUIRED"
   | "INVALID_EDITOR_TOKEN"
   | "EDITOR_TOKEN_EXPIRED"
@@ -13,8 +15,6 @@ export type AiBridgeErrorCode =
   | "BRIDGE_RESUME_TOKEN_EXPIRED"
   | "INVALID_RELAY_SESSION"
   | "NO_ACTIVE_EDITOR"
-  | "MULTIPLE_ACTIVE_EDITORS"
-  | "SESSION_NOT_FOUND"
   | "INVALID_TARGET_WINDOW"
   | "INVALID_TARGET_ORIGIN"
   | "INVALID_CLIENT_ID"
@@ -31,9 +31,13 @@ export type AiBridgeErrorCode =
   | "TOOL_NOT_ALLOWED"
   | "CONTROL_NOT_ALLOWED"
   | "METHOD_NOT_ALLOWED"
+  | "MESSAGE_NOT_SUPPORTED"
   | "DOCUMENT_NOT_CONFIGURED"
   | "DOCUMENT_MISMATCH"
   | "EDITOR_MISMATCH"
+  | "PERSISTENCE_NOT_AVAILABLE"
+  | "PERSISTENCE_INVALID_RESPONSE"
+  | "PERSISTENCE_TIMEOUT"
   | "PERSISTENCE_FAILED"
   | "INVALID_IMAGE_SOURCE"
   | "IMAGE_FETCH_BLOCKED"
@@ -52,6 +56,7 @@ export type AiBridgeErrorCode =
   | "EXECUTION_FAILED"
   | "INVALID_LISTENER"
   | "CLIENT_DESTROYED"
+  | "CONTRACT_MISMATCH"
   | "CONTRACT_VERSION_MISMATCH"
   | string;
 
@@ -76,7 +81,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.1";
+  contractVersion?: "0.2.2";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -99,10 +104,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.1";
+  version: "0.2.2";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.1";
+  contractVersion: "0.2.2";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -150,7 +155,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.1";
+  contractVersion: "0.2.2";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -8736,7 +8741,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.1";
+  readonly version: "0.2.2";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;
@@ -8785,6 +8790,18 @@ export interface AiBridgeClientConstructor {
 }
 
 export interface AiBridgeHostOptions {
+  /** Enable the document-hub long-poll Relay. relayBaseUrl must also be configured. */
+  httpRelay?: boolean;
+  /** Same-origin document-hub Relay base path, e.g. /api/v1/editor-relay. */
+  relayBaseUrl?: string;
+  /** Same-origin image service base path. */
+  imageBaseUrl?: string;
+  /** Same-origin persistence service base path. */
+  persistenceBaseUrl?: string;
+  /** document-hub editor session identifier forwarded to Relay requests. */
+  editorSessionId?: string;
+  /** Stable document-hub document identifier. */
+  documentId?: string;
   getEditorConfig?: () => Record<string, unknown>;
   /** Exact origins allowed to use client-sdk.js. There is no default allow-list. */
   clientOrigins?: string[];

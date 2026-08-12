@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "toolNaming": {
@@ -34,10 +34,12 @@
     },
     "httpRelay": {
       "kind": "long-poll",
-      "basePath": "/copilot-api/bridge",
-      "validationPath": "/copilot-api/bridge/validate",
-      "localDemoOnly": true,
-      "bindsWith": "ONLYOFFICE editor JWT",
+      "externalBasePath": "/api/v1/editor-relay",
+      "internalBasePath": "/copilot-api/bridge/internal",
+      "imageBasePath": "/api/v1/editor-relay/images",
+      "persistenceBasePath": "/api/v1/editor-relay/persistence",
+      "configuredBy": "window.aiBridgeOptions",
+      "requiresExplicitConfiguration": true,
       "methods": [
         "executeTool",
         "executeBatch",
@@ -47,7 +49,7 @@
         "redo",
         "getState"
       ],
-      "documentSelection": "JWT document.key must equal the active browser session document.key",
+      "documentSelection": "document-hub resolves relaySessionId from the authenticated stable document identity",
       "requiresOpenEditorPage": true
     },
     "broadcastChannel": false
@@ -155,6 +157,8 @@
     "CONNECTION_TIMEOUT",
     "TIMEOUT",
     "BRIDGE_TIMEOUT",
+    "HTTP_RELAY_NETWORK_ERROR",
+    "HTTP_RELAY_INVALID_RESPONSE",
     "EDITOR_TOKEN_REQUIRED",
     "INVALID_EDITOR_TOKEN",
     "EDITOR_TOKEN_EXPIRED",
@@ -162,8 +166,6 @@
     "BRIDGE_RESUME_TOKEN_EXPIRED",
     "INVALID_RELAY_SESSION",
     "NO_ACTIVE_EDITOR",
-    "MULTIPLE_ACTIVE_EDITORS",
-    "SESSION_NOT_FOUND",
     "INVALID_TARGET_WINDOW",
     "INVALID_TARGET_ORIGIN",
     "INVALID_CLIENT_ID",
@@ -180,9 +182,13 @@
     "TOOL_NOT_ALLOWED",
     "CONTROL_NOT_ALLOWED",
     "METHOD_NOT_ALLOWED",
+    "MESSAGE_NOT_SUPPORTED",
     "DOCUMENT_NOT_CONFIGURED",
     "DOCUMENT_MISMATCH",
     "EDITOR_MISMATCH",
+    "PERSISTENCE_NOT_AVAILABLE",
+    "PERSISTENCE_INVALID_RESPONSE",
+    "PERSISTENCE_TIMEOUT",
     "PERSISTENCE_FAILED",
     "INVALID_IMAGE_SOURCE",
     "IMAGE_FETCH_BLOCKED",
@@ -201,6 +207,7 @@
     "EXECUTION_FAILED",
     "INVALID_LISTENER",
     "CLIENT_DESTROYED",
+    "CONTRACT_MISMATCH",
     "CONTRACT_VERSION_MISMATCH"
   ],
   "$defs": {
@@ -11845,162 +11852,6 @@
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []
       }
-    }
-  },
-  "httpRelaySchemas": {
-    "attachRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "fileName": {
-          "type": "string",
-          "minLength": 1
-        },
-        "editorType": {
-          "enum": [
-            "word",
-            "slide",
-            "cell"
-          ]
-        }
-      },
-      "required": [
-        "fileName",
-        "editorType"
-      ]
-    },
-    "executeToolRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "sessionId": {
-          "type": "string"
-        },
-        "method": {
-          "const": "executeTool"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1
-        },
-        "argumentsJson": {
-          "type": "string",
-          "maxLength": 12000000
-        },
-        "requestId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "pattern": "^[A-Za-z0-9._:-]+$"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 300000,
-          "default": 90000
-        }
-      },
-      "required": [
-        "method",
-        "name",
-        "argumentsJson",
-        "requestId"
-      ]
-    },
-    "executeBatchRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "sessionId": {
-          "type": "string"
-        },
-        "method": {
-          "const": "executeBatch"
-        },
-        "toolCallsJson": {
-          "type": "string",
-          "maxLength": 12000000
-        },
-        "requestId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "pattern": "^[A-Za-z0-9._:-]+$"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 300000,
-          "default": 90000
-        }
-      },
-      "required": [
-        "method",
-        "toolCallsJson",
-        "requestId"
-      ]
-    },
-    "validateRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "sessionId": {
-          "type": "string"
-        },
-        "toolCallsJson": {
-          "type": "string",
-          "maxLength": 12000000
-        },
-        "requestId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "pattern": "^[A-Za-z0-9._:-]+$"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 300000,
-          "default": 90000
-        }
-      },
-      "required": [
-        "toolCallsJson"
-      ]
-    },
-    "controlRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "sessionId": {
-          "type": "string"
-        },
-        "method": {
-          "enum": [
-            "save",
-            "history",
-            "undo",
-            "redo",
-            "getState"
-          ]
-        },
-        "requestId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200,
-          "pattern": "^[A-Za-z0-9._:-]+$"
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "minimum": 100,
-          "maximum": 300000,
-          "default": 90000
-        }
-      },
-      "required": [
-        "method",
-        "requestId"
-      ]
     }
   }
 }

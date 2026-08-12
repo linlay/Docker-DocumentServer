@@ -1,9 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.2.1";
+  const VERSION = "0.2.2";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "70ec17d16d9dd617ae25d95c812658641c127fdabc6db9680a8d43db3a7b8373";
+  const CONTRACT_SHA256 = "df040c09458cd8fd9b71d8ea2ec2ba82611a88f2c5134775e3785d94ff027414";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -478,6 +478,8 @@
   async function importImageSource(source) {
     const token = editorToken();
     if (!token) throw bridgeError("EDITOR_TOKEN_REQUIRED", "当前编辑器没有可用于导入图片的凭证");
+    const imageBaseURL = imageRelayBaseURL();
+    if (!imageBaseURL) throw bridgeError("IMAGE_FETCH_FAILED", "当前页面没有配置图片导入服务");
     if (!source || typeof source !== "object" || Array.isArray(source)) {
       throw bridgeError("INVALID_IMAGE_SOURCE", "source 必须是图片来源对象");
     }
@@ -508,7 +510,7 @@
       }
       let response;
       try {
-        response = await window.fetch(`${imageRelayBaseURL()}/import`, {
+        response = await window.fetch(`${imageBaseURL}/import`, {
           method: "POST",
           credentials: "same-origin",
           headers: {
@@ -536,7 +538,7 @@
       }
       asset = body.asset;
     }
-    const configuredAssetPrefix = `${imageRelayBaseURL()}/`;
+    const configuredAssetPrefix = `${imageBaseURL}/`;
     if (
       !asset
       || typeof asset.path !== "string"
@@ -1024,36 +1026,30 @@
   window.AiBridgeError = window.AiBridgeError || AiBridgeError;
 
   function httpRelayEnabled() {
-    const configured = configuredOptions.httpRelay;
-    if (configured === false) return false;
-    const loopback = window.location.hostname === "localhost"
-      || window.location.hostname === "127.0.0.1"
-      || window.location.hostname === "::1"
-      || window.location.hostname === "[::1]";
-    if (loopback) return true;
-    return configured === true && window.location.protocol === "https:";
+    return configuredOptions.httpRelay === true && Boolean(httpRelayBaseURL());
   }
 
-  function httpRelayBaseURL() {
-    const configured = configuredOptions.relayBaseUrl;
-    return String(configured || "/copilot-api/bridge").replace(/\/$/, "");
-  }
-
-  function imageRelayBaseURL() {
-    const configured = configuredOptions.imageBaseUrl;
-    return String(configured || "/copilot-api/images").replace(/\/$/, "");
-  }
-
-  function persistenceBaseURL() {
-    const configured = configuredOptions.persistenceBaseUrl;
-    if (typeof configured !== "string" || !configured) return "";
+  function configuredServiceBaseURL(value) {
+    if (typeof value !== "string" || !value) return "";
     try {
-      const resolved = new URL(configured, window.location.href);
+      const resolved = new URL(value, window.location.href);
       if (resolved.origin !== window.location.origin || resolved.search || resolved.hash) return "";
       return resolved.pathname.replace(/\/$/, "");
     } catch (error) {
       return "";
     }
+  }
+
+  function httpRelayBaseURL() {
+    return configuredServiceBaseURL(configuredOptions.relayBaseUrl);
+  }
+
+  function imageRelayBaseURL() {
+    return configuredServiceBaseURL(configuredOptions.imageBaseUrl);
+  }
+
+  function persistenceBaseURL() {
+    return configuredServiceBaseURL(configuredOptions.persistenceBaseUrl);
   }
 
   function httpRelayHeaders() {
@@ -1093,7 +1089,12 @@
       throw bridgeError(
         error.code || "PERSISTENCE_FAILED",
         error.message || `文档持久化请求失败：${response.status}`,
-        { details: error.details },
+        {
+          details: {
+            ...(error.details && typeof error.details === "object" ? error.details : {}),
+            path: action,
+          },
+        },
       );
     }
     return body;

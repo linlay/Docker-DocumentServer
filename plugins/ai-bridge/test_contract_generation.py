@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.1")
+        self.assertEqual(self.contract["version"], "0.2.2")
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -459,21 +459,21 @@ class ContractGenerationTests(unittest.TestCase):
 
     def test_asset_revision_is_content_addressed_and_order_independent(self) -> None:
         first = sync_contract.compute_asset_revision(
-            "0.2.1",
+            "0.2.2",
             {"b.js": "second\n", "a.js": "first\n"},
         )
         reordered = sync_contract.compute_asset_revision(
-            "0.2.1",
+            "0.2.2",
             {"a.js": "first\n", "b.js": "second\n"},
         )
         changed = sync_contract.compute_asset_revision(
-            "0.2.1",
+            "0.2.2",
             {"a.js": "first\n", "b.js": "changed\n"},
         )
 
         self.assertEqual(first, reordered)
         self.assertNotEqual(first, changed)
-        self.assertRegex(first, r"^0\.2\.1-[0-9a-f]{64}$")
+        self.assertRegex(first, r"^0\.2\.2-[0-9a-f]{64}$")
 
     def test_runtime_asset_revision_covers_every_browser_bridge(self) -> None:
         artifacts = sync_contract.build_artifacts(self.contract, None)
@@ -483,16 +483,8 @@ class ContractGenerationTests(unittest.TestCase):
             r"[?&]v=([^&\"'\s<>]+)",
             artifacts[sync_contract.INDEX_PATH],
         )
-        copilot_match = re.search(
-            r'^EDITOR_ASSET_REVISION = "([^"]+)"$',
-            artifacts[sync_contract.COPILOT_SERVER_PATH],
-            re.MULTILINE,
-        )
-
         self.assertEqual(index_revisions, [revision] * 4)
-        self.assertIsNotNone(copilot_match)
-        self.assertEqual(copilot_match.group(1), revision)
-        self.assertRegex(revision, r"^0\.2\.1-[0-9a-f]{64}$")
+        self.assertRegex(revision, r"^0\.2\.2-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
             artifacts[sync_contract.CONFIG_PATH],
@@ -520,8 +512,6 @@ class ContractGenerationTests(unittest.TestCase):
                 "bridges/word-bridge.js",
                 "bridges/slides-bridge.js",
                 "bridges/sheets-bridge.js",
-                "editor-shell.js",
-                "local-guest.js",
             },
         )
         changed_sources = dict(sources)
@@ -724,7 +714,7 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(skill_path, artifacts)
                 self.assertIn(toml_path, artifacts)
                 self.assertIn(
-                    '  version: "0.2.1"',
+                    '  version: "0.2.2"',
                     artifacts[skill_path],
                 )
                 self.assertIn(

@@ -1,108 +1,20 @@
 import base64
-import hashlib
-import http.client
 import io
 import json
 import os
 import re
-import shutil
 import socket
 import struct
 import tempfile
 import threading
 import time
 import unittest
-import xml.etree.ElementTree as ET
-import zipfile
 from unittest import mock
 
 import copilot_server
 
 
-EXPECTED_PPTX_TEMPLATE_SHA256 = (
-    "095a6dcc476dea81e188f1c29c7ce65536d5f57e6b32d0f8acdf0ec5922b40d6"
-)
-
-
-def bundled_pptx_template_path():
-    return os.path.join(os.path.dirname(__file__), "templates", "new.pptx")
-
-
-def rewrite_zip_part(source: bytes, part_name: str, mutate) -> bytes:
-    output = io.BytesIO()
-    found = False
-    with zipfile.ZipFile(io.BytesIO(source)) as archive, zipfile.ZipFile(
-        output,
-        "w",
-    ) as destination:
-        for entry in archive.infolist():
-            if entry.is_dir():
-                continue
-            body = archive.read(entry.filename)
-            if entry.filename == part_name:
-                body = mutate(body)
-                found = True
-            destination.writestr(entry.filename, body)
-    if not found:
-        raise AssertionError(f"part not found: {part_name}")
-    return output.getvalue()
-
-
-class StaticDownloadResponse(io.BytesIO):
-    def __init__(self, body: bytes):
-        super().__init__(body)
-        self.headers = {}
-
-
-def minimal_xlsx_bytes() -> bytes:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w") as archive:
-        archive.writestr(
-            "[Content_Types].xml",
-            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
-        )
-        archive.writestr(
-            "_rels/.rels",
-            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-        )
-        archive.writestr(
-            "xl/workbook.xml",
-            '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
-        )
-        archive.writestr(
-            "xl/_rels/workbook.xml.rels",
-            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
-        )
-        archive.writestr(
-            "xl/worksheets/sheet1.xml",
-            '<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>',
-        )
-    return output.getvalue()
-
-
 class ContractAlignmentTests(unittest.TestCase):
-    def test_editor_shell_prepares_identity_before_starting_doc_editor(self):
-        base_dir = os.path.dirname(__file__)
-        with open(
-            os.path.join(base_dir, "editor-shell.js"),
-            encoding="utf-8",
-        ) as stream:
-            shell = stream.read()
-        with open(
-            os.path.join(base_dir, "local-guest.js"),
-            encoding="utf-8",
-        ) as stream:
-            guest = stream.read()
-
-        self.assertIn("root.config = config;", shell)
-        self.assertIn("await loadHostBridge();", shell)
-        self.assertIn("OnlyOfficeLocalGuest.prepareEditor(config)", shell)
-        self.assertLess(
-            shell.index("OnlyOfficeLocalGuest.prepareEditor(config)"),
-            shell.index("new root.DocsAPI.DocEditor"),
-        )
-        self.assertIn("prepareEditor: prepareEditor", guest)
-        self.assertNotIn("prepareExample", guest)
 
     def test_document_app_has_no_example_proxy_or_html_rewriting(self):
         config_path = os.path.join(
@@ -174,6 +86,41 @@ class ContractAlignmentTests(unittest.TestCase):
                     copilot_server.v1_relay_route_allowed(method, path)
                 )
 
+    def test_representative_legacy_routes_return_gone(self):
+        class Request:
+            def __init__(self, path):
+                self.path = path
+                self.headers = {}
+                self.client_address = ("127.0.0.1", 0)
+
+            def log_bridge_error(self, _error, _payload=None):
+                return None
+
+        responses = []
+
+        def capture(_handler, status, payload, _headers=None):
+            responses.append((status, payload))
+
+        with mock.patch.object(copilot_server, "json_response", side_effect=capture):
+            for method, path in (
+                ("POST", "/bridge/attach"),
+                ("POST", "/chat"),
+                ("POST", "/checkpoint"),
+                ("POST", "/new-docx"),
+                ("GET", "/admin"),
+                ("GET", "/docx/123e4567-e89b-42d3-a456-426614174000"),
+            ):
+                with self.subTest(method=method, path=path):
+                    request = Request(path)
+                    if method == "POST":
+                        copilot_server.Handler.do_POST(request)
+                    else:
+                        copilot_server.Handler.do_GET(request)
+                    status, payload = responses.pop()
+                    self.assertEqual(status, 410)
+                    code = payload.get("code") or (payload.get("error") or {}).get("code")
+                    self.assertEqual(code, "LEGACY_BUSINESS_DISABLED")
+
     def test_compose_passes_only_private_relay_environment_to_copilot_process(self):
         base_dir = os.path.dirname(__file__)
         with open(
@@ -230,8 +177,7 @@ class ContractAlignmentTests(unittest.TestCase):
         config_revision = plugin_config["variations"][0]["url"].split("?v=", 1)[1]
 
         self.assertEqual(revisions, [config_revision] * 4)
-        self.assertRegex(config_revision, r"^0\.2\.1-[0-9a-f]{64}$")
-        self.assertEqual(copilot_server.EDITOR_ASSET_REVISION, config_revision)
+        self.assertRegex(config_revision, r"^0\.2\.2-[0-9a-f]{64}$")
         for relative_path in ("README.md", "INTEGRATION.zh-CN.md"):
             with self.subTest(path=relative_path):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
@@ -239,23 +185,19 @@ class ContractAlignmentTests(unittest.TestCase):
                 self.assertIn("?v=<asset-revision>", contents)
                 self.assertNotRegex(contents, r"\?v=[^\s\"']*-rev\d+")
 
-    def test_word_model_tools_match_the_public_contract(self):
+    def test_word_argument_schemas_match_the_public_contract(self):
         contract_path = os.path.join(os.path.dirname(__file__), "public-api.json")
         with open(contract_path, encoding="utf-8") as stream:
             contract = json.load(stream)
 
         contract_names = list(contract["tools"]["word"])
-        model_names = [
-            entry["function"]["name"]
-            for entry in copilot_server.WORD_TOOLS
-        ]
+        model_names = list(copilot_server.ARGUMENT_SCHEMAS_BY_EDITOR["word"])
 
         self.assertEqual(model_names, contract_names)
         self.assertIn("word_add_image", model_names)
-        for entry in copilot_server.WORD_TOOLS:
-            function = entry["function"]
-            self.assertTrue(function["description"])
-            self.assertNotIn("$ref", json.dumps(function["parameters"]))
+        for schema in copilot_server.ARGUMENT_SCHEMAS_BY_EDITOR["word"].values():
+            self.assertTrue(schema["description"])
+            self.assertNotIn("$ref", json.dumps(schema))
 
     def test_table_cell_contract_accepts_mixed_values_and_reports_exact_invalid_paths(self):
         valid_word_calls = [
@@ -336,11 +278,13 @@ class ContractAlignmentTests(unittest.TestCase):
                 },
             },
         ]
-        normalized_calls, normalizations = copilot_server.normalize_word_tool_calls(
-            compatibility_and_invalid_calls
+        normalized_calls, normalizations = copilot_server.normalize_editor_tool_calls(
+            "word",
+            compatibility_and_invalid_calls,
         )
-        word_errors = copilot_server.validate_word_tool_calls(
-            compatibility_and_invalid_calls
+        word_errors = (
+            copilot_server.validate_editor_tool_calls("word", normalized_calls)
+            + copilot_server.suspicious_word_unit_errors(compatibility_and_invalid_calls)
         )
         slide_errors = copilot_server.validate_editor_tool_calls(
             "slide",
@@ -369,601 +313,6 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertEqual(
             [(error["tool"], error["path"]) for error in slide_errors],
             [("slides_add_table", "arguments.data[0][0].text")],
-        )
-
-
-class BundledPptxTemplateTests(unittest.TestCase):
-    def test_template_has_one_blank_slide_without_local_drawings(self):
-        template = bundled_pptx_template_path()
-        with open(template, "rb") as stream:
-            self.assertEqual(
-                hashlib.sha256(stream.read()).hexdigest(),
-                EXPECTED_PPTX_TEMPLATE_SHA256,
-            )
-        copilot_server.validate_ooxml_package(template, "pptx")
-        presentation_namespace = (
-            "http://schemas.openxmlformats.org/presentationml/2006/main"
-        )
-        package_relationships_namespace = (
-            "http://schemas.openxmlformats.org/package/2006/relationships"
-        )
-        with zipfile.ZipFile(template) as archive:
-            presentation = ET.fromstring(archive.read("ppt/presentation.xml"))
-            slide_ids = presentation.findall(
-                f".//{{{presentation_namespace}}}sldId"
-            )
-            self.assertEqual(len(slide_ids), 1)
-
-            slide = ET.fromstring(archive.read("ppt/slides/slide1.xml"))
-            shape_tree = slide.find(
-                f".//{{{presentation_namespace}}}spTree"
-            )
-            self.assertIsNotNone(shape_tree)
-            drawing_names = {
-                "sp",
-                "pic",
-                "graphicFrame",
-                "cxnSp",
-                "grpSp",
-            }
-            local_drawings = [
-                child
-                for child in shape_tree
-                if child.tag.rsplit("}", 1)[-1] in drawing_names
-            ]
-            self.assertEqual(local_drawings, [])
-
-            relationships = ET.fromstring(
-                archive.read("ppt/slides/_rels/slide1.xml.rels")
-            )
-            layout_relationships = [
-                item
-                for item in relationships.findall(
-                    f"{{{package_relationships_namespace}}}Relationship"
-                )
-                if item.attrib.get("Type", "").endswith("/slideLayout")
-            ]
-            self.assertEqual(len(layout_relationships), 1)
-            layout_name = os.path.basename(layout_relationships[0].attrib["Target"])
-            layout = ET.fromstring(
-                archive.read(f"ppt/slideLayouts/{layout_name}")
-            )
-            self.assertEqual(layout.attrib.get("type"), "blank")
-            common_slide_data = layout.find(
-                f"{{{presentation_namespace}}}cSld"
-            )
-            self.assertEqual(common_slide_data.attrib.get("name"), "Blank")
-
-    def test_validator_rejects_structural_pptx_corruption(self):
-        with open(bundled_pptx_template_path(), "rb") as stream:
-            template = stream.read()
-
-        def duplicate_relationship(body):
-            start = body.index(b"<Relationship ")
-            end = body.index(b"/>", start) + 2
-            return body.replace(
-                b"</Relationships>",
-                body[start:end] + b"</Relationships>",
-                1,
-            )
-
-        def duplicate_presentation_element(body, prefix, closing_tag):
-            start = body.index(prefix)
-            end = body.index(b"/>", start) + 2
-            return body.replace(
-                closing_tag,
-                body[start:end] + closing_tag,
-                1,
-            )
-
-        cases = (
-            (
-                "ppt/notesMasters/notesMaster1.xml",
-                lambda body: body.replace(b'id="4"', b'id="3"', 1),
-                "pptx_duplicate_shape_id",
-            ),
-            (
-                "ppt/slides/_rels/slide1.xml.rels",
-                lambda body: body.replace(
-                    b"/ppt/slideLayouts/slideLayout2.xml",
-                    b"/ppt/slideLayouts/missing.xml",
-                    1,
-                ),
-                "ooxml_missing_relationship_target",
-            ),
-            (
-                "ppt/slides/_rels/slide1.xml.rels",
-                duplicate_relationship,
-                "ooxml_duplicate_relationship_id",
-            ),
-            (
-                "ppt/notesMasters/notesMaster1.xml",
-                lambda _body: b'<p:notesMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">',
-                "ooxml_malformed_xml",
-            ),
-            (
-                "ppt/presentation.xml",
-                lambda body: duplicate_presentation_element(
-                    body,
-                    b"<p:sldId ",
-                    b"</p:sldIdLst>",
-                ),
-                "pptx_duplicate_presentation_id",
-            ),
-            (
-                "ppt/presentation.xml",
-                lambda body: duplicate_presentation_element(
-                    body,
-                    b"<p:sldMasterId ",
-                    b"</p:sldMasterIdLst>",
-                ),
-                "pptx_duplicate_presentation_id",
-            ),
-        )
-        for part, mutate, expected_code in cases:
-            with self.subTest(code=expected_code):
-                corrupted = rewrite_zip_part(template, part, mutate)
-                with tempfile.NamedTemporaryFile(suffix=".pptx") as fixture:
-                    fixture.write(corrupted)
-                    fixture.flush()
-                    with self.assertRaises(
-                        copilot_server.OOXMLValidationError
-                    ) as raised:
-                        copilot_server.validate_ooxml_package(
-                            fixture.name,
-                            "pptx",
-                        )
-                self.assertEqual(raised.exception.code, expected_code)
-
-
-class DocumentGatewayTests(unittest.TestCase):
-    def setUp(self):
-        self.storage = tempfile.TemporaryDirectory()
-        self.templates = tempfile.TemporaryDirectory()
-        for extension in copilot_server.DOCUMENT_TYPES:
-            destination = os.path.join(self.templates.name, f"new.{extension}")
-            if extension == "pptx":
-                shutil.copy2(bundled_pptx_template_path(), destination)
-                continue
-            with open(
-                destination,
-                "wb",
-            ) as stream:
-                stream.write(f"blank-{extension}".encode())
-        self.environment = mock.patch.dict(
-            os.environ,
-            {
-                "DOCUMENT_STORAGE_DIR": self.storage.name,
-                "DOCUMENT_TEMPLATE_ROOT": self.templates.name,
-                "DOCUMENT_PPTX_TEMPLATE_PATH": "",
-                "DOCUMENT_PUBLIC_ORIGIN": "https://office.test",
-                "DOCUMENT_ADMIN_USERNAME": "document-admin",
-                "DOCUMENT_ADMIN_PASSWORD": "correct horse battery staple",
-                "JWT_SECRET": "document-test-secret",
-            },
-        )
-        self.environment.start()
-        with copilot_server.DOCUMENT_RATE_LIMIT_LOCK:
-            copilot_server.DOCUMENT_RATE_LIMITS.clear()
-
-    def tearDown(self):
-        self.environment.stop()
-        self.templates.cleanup()
-        self.storage.cleanup()
-        with copilot_server.DOCUMENT_RATE_LIMIT_LOCK:
-            copilot_server.DOCUMENT_RATE_LIMITS.clear()
-
-    def test_creates_all_supported_formats_with_capability_urls(self):
-        for extension in copilot_server.DOCUMENT_TYPES:
-            with self.subTest(extension=extension):
-                created = copilot_server.create_document(extension)
-                self.assertRegex(
-                    created["documentId"],
-                    copilot_server.DOCUMENT_UUID_PATTERN,
-                )
-                self.assertEqual(
-                    created["fileName"],
-                    f"{created['documentId']}.{extension}",
-                )
-                self.assertEqual(
-                    created["editorUrl"],
-                    f"https://office.test/{extension}/{created['documentId']}",
-                )
-                with open(
-                    os.path.join(self.storage.name, created["fileName"]),
-                    "rb",
-                ) as stream:
-                    actual = stream.read()
-                if extension == "pptx":
-                    with open(bundled_pptx_template_path(), "rb") as expected:
-                        self.assertEqual(actual, expected.read())
-                else:
-                    self.assertEqual(actual, f"blank-{extension}".encode())
-
-    def test_pptx_template_override_is_type_specific_and_validated(self):
-        override = os.path.join(self.templates.name, "override.pptx")
-        shutil.copy2(bundled_pptx_template_path(), override)
-
-        with mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_PPTX_TEMPLATE_PATH": override},
-        ):
-            self.assertEqual(copilot_server.document_template_path("pptx"), override)
-            self.assertEqual(
-                copilot_server.document_template_path("docx"),
-                os.path.join(self.templates.name, "new.docx"),
-            )
-            created = copilot_server.create_document("pptx")
-            with open(
-                os.path.join(self.storage.name, created["fileName"]),
-                "rb",
-            ) as stream, open(override, "rb") as expected:
-                self.assertEqual(stream.read(), expected.read())
-
-        invalid = os.path.join(self.templates.name, "invalid.pptx")
-        with open(invalid, "wb") as stream:
-            stream.write(b"not-a-pptx")
-        with mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_PPTX_TEMPLATE_PATH": invalid},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "有效的 PPTX 模板"):
-                copilot_server.document_template_path("pptx")
-
-        with open(bundled_pptx_template_path(), "rb") as stream:
-            corrupted = rewrite_zip_part(
-                stream.read(),
-                "ppt/notesMasters/notesMaster1.xml",
-                lambda body: body.replace(b'id="4"', b'id="3"', 1),
-            )
-        invalid_structure = os.path.join(
-            self.templates.name,
-            "invalid-structure.pptx",
-        )
-        with open(invalid_structure, "wb") as stream:
-            stream.write(corrupted)
-        with mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_PPTX_TEMPLATE_PATH": invalid_structure},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "有效的 PPTX 模板"):
-                copilot_server.document_template_path("pptx")
-
-    def test_uuid_collision_retries_without_overwriting_existing_file(self):
-        first_id = "123e4567-e89b-42d3-a456-426614174000"
-        second_id = "223e4567-e89b-42d3-a456-426614174000"
-        existing = os.path.join(self.storage.name, f"{first_id}.docx")
-        with open(existing, "wb") as stream:
-            stream.write(b"existing")
-
-        with mock.patch.object(
-            copilot_server.uuid,
-            "uuid4",
-            side_effect=[copilot_server.uuid.UUID(first_id), copilot_server.uuid.UUID(second_id)],
-        ):
-            created = copilot_server.create_document("docx")
-
-        self.assertEqual(created["documentId"], second_id)
-        with open(existing, "rb") as stream:
-            self.assertEqual(stream.read(), b"existing")
-
-    def test_invalid_and_unknown_capability_ids_are_indistinguishable(self):
-        for document_id in (
-            "not-a-uuid",
-            "123e4567-e89b-42d3-a456-426614174000",
-        ):
-            with self.subTest(document_id=document_id):
-                with self.assertRaises(copilot_server.BridgeError) as raised:
-                    copilot_server.document_path("docx", document_id)
-                self.assertEqual(raised.exception.status, 404)
-                self.assertEqual(raised.exception.code, "DOCUMENT_NOT_FOUND")
-
-    def test_httpx_binding_helper_accepts_only_existing_uuid_file_names(self):
-        created = copilot_server.create_document("docx")
-
-        self.assertEqual(
-            copilot_server.document_file_identity(created["fileName"]),
-            ("docx", created["documentId"]),
-        )
-        for file_name in (
-            "legacy-name.docx",
-            f"{created['documentId']}.xlsx",
-            "../" + created["fileName"],
-        ):
-            with self.subTest(file_name=file_name):
-                with self.assertRaises(copilot_server.BridgeError) as raised:
-                    copilot_server.document_file_identity(file_name)
-                self.assertEqual(raised.exception.status, 404)
-                self.assertEqual(raised.exception.code, "DOCUMENT_NOT_FOUND")
-
-    def test_creation_rate_limit_allows_burst_then_refills(self):
-        for _ in range(copilot_server.DOCUMENT_CREATE_BURST):
-            copilot_server.enforce_document_creation_rate("192.0.2.10", now=100)
-
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.enforce_document_creation_rate("192.0.2.10", now=100)
-        self.assertEqual(raised.exception.status, 429)
-        self.assertEqual(raised.exception.details["retryAfter"], 6)
-
-        copilot_server.enforce_document_creation_rate("192.0.2.10", now=106)
-
-    def test_admin_list_only_contains_uuid_documents(self):
-        first = copilot_server.create_document("docx")
-        second = copilot_server.create_document("xlsx")
-        with open(os.path.join(self.storage.name, "legacy-name.docx"), "wb") as stream:
-            stream.write(b"legacy")
-        os.makedirs(
-            os.path.join(self.storage.name, f"{first['fileName']}-history"),
-        )
-        with open(os.path.join(self.storage.name, ".private"), "wb") as stream:
-            stream.write(b"hidden")
-
-        listed = copilot_server.list_uuid_documents()
-
-        self.assertEqual(
-            {item["fileName"] for item in listed},
-            {first["fileName"], second["fileName"]},
-        )
-        page = copilot_server.admin_documents_html(listed)
-        self.assertIn(
-            f"<code>{first['editorUrl']}</code>",
-            page,
-        )
-        self.assertNotIn("legacy-name.docx", page)
-
-    def test_basic_auth_fails_closed_and_uses_constant_credentials(self):
-        handler = mock.Mock()
-        handler.headers = {}
-        with self.assertRaises(copilot_server.BridgeError) as missing:
-            copilot_server.require_document_admin(handler)
-        self.assertEqual(missing.exception.status, 401)
-
-        handler.headers = {
-            "Authorization": "Basic "
-            + base64.b64encode(b"document-admin:wrong").decode()
-        }
-        with self.assertRaises(copilot_server.BridgeError) as wrong:
-            copilot_server.require_document_admin(handler)
-        self.assertEqual(wrong.exception.status, 401)
-
-        handler.headers = {
-            "Authorization": "Basic "
-            + base64.b64encode(
-                b"document-admin:correct horse battery staple"
-            ).decode()
-        }
-        copilot_server.require_document_admin(handler)
-
-        with mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_ADMIN_USERNAME": "", "DOCUMENT_ADMIN_PASSWORD": ""},
-        ):
-            with self.assertRaises(copilot_server.BridgeError) as unconfigured:
-                copilot_server.require_document_admin(handler)
-        self.assertEqual(unconfigured.exception.status, 503)
-
-    def test_editor_config_uses_first_party_loopback_storage_and_signed_jwt(self):
-        created = copilot_server.create_document("xlsx")
-        config = copilot_server.document_editor_config(
-            "xlsx",
-            created["documentId"],
-        )
-        claims = copilot_server.verify_editor_jwt_payload(config["token"])
-
-        self.assertRegex(config["document"]["key"], copilot_server.DOCUMENT_KEY_PATTERN)
-        self.assertTrue(
-            config["document"]["url"].startswith(
-                "http://127.0.0.1/__document_storage/download/xlsx/"
-            )
-        )
-        self.assertEqual(
-            config["editorConfig"]["callbackUrl"],
-            "http://127.0.0.1/__document_storage/callback/xlsx/"
-            + created["documentId"],
-        )
-        self.assertEqual(config["editorConfig"]["lang"], "zh")
-        self.assertTrue(
-            config["editorConfig"]["customization"]["compactToolbar"]
-        )
-        self.assertEqual(
-            config["editorConfig"]["user"]["id"],
-            "pending-local-guest",
-        )
-        self.assertEqual(
-            claims["document"]["key"],
-            config["document"]["key"],
-        )
-
-    def test_document_key_is_stable_until_canonical_file_changes(self):
-        created = copilot_server.create_document("docx")
-        first = copilot_server.document_revision_key(
-            "docx",
-            created["documentId"],
-        )
-        second = copilot_server.document_revision_key(
-            "docx",
-            created["documentId"],
-        )
-        path = os.path.join(self.storage.name, created["fileName"])
-        with open(path, "ab") as stream:
-            stream.write(b"-changed")
-        os.utime(path, ns=(time.time_ns(), time.time_ns()))
-        changed = copilot_server.document_revision_key(
-            "docx",
-            created["documentId"],
-        )
-
-        self.assertEqual(first, second)
-        self.assertNotEqual(first, changed)
-
-    def test_editor_response_is_first_party_html_without_internal_redirect(self):
-        created = copilot_server.create_document("pptx")
-        handler = mock.Mock()
-
-        copilot_server.document_editor_response(
-            handler,
-            "pptx",
-            created["documentId"],
-        )
-
-        handler.send_response.assert_called_once_with(200)
-        headers = {
-            call.args[0]: call.args[1]
-            for call in handler.send_header.call_args_list
-        }
-        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
-        self.assertEqual(headers["X-Frame-Options"], "SAMEORIGIN")
-        self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
-        self.assertNotIn("X-Accel-Redirect", headers)
-        body = handler.wfile.write.call_args.args[0].decode("utf-8")
-        self.assertIn("/web-apps/apps/api/documents/api.js", body)
-        self.assertIn("editor-shell.js", body)
-        self.assertNotIn("example", body.lower())
-
-    def test_editor_response_allows_only_configured_cross_origin_parent(self):
-        created = copilot_server.create_document("xlsx")
-        handler = mock.Mock()
-
-        with mock.patch.dict(
-            os.environ,
-            {
-                "DOCUMENT_FRAME_ANCESTORS":
-                    "'self' http://localhost:* http://127.0.0.1:*",
-            },
-        ):
-            copilot_server.document_editor_response(
-                handler,
-                "xlsx",
-                created["documentId"],
-            )
-
-        headers = {
-            call.args[0]: call.args[1]
-            for call in handler.send_header.call_args_list
-        }
-        self.assertNotIn("X-Frame-Options", headers)
-        self.assertIn(
-            "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*",
-            headers["Content-Security-Policy"],
-        )
-
-    def test_frame_ancestor_configuration_rejects_wildcards(self):
-        with mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_FRAME_ANCESTORS": "'self' https://*.example.com"},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "精确 HTTP"):
-                copilot_server.document_frame_ancestors()
-
-    def test_storage_download_requires_jwt_and_uses_internal_file_acceleration(self):
-        created = copilot_server.create_document("docx")
-        token = copilot_server.sign_jwt(
-            {"url": "http://127.0.0.1/__document_storage/download"},
-            "document-test-secret",
-        )
-        handler = mock.Mock()
-        handler.headers = {"Authorization": f"Bearer {token}"}
-
-        copilot_server.storage_download_response(
-            handler,
-            "docx",
-            created["documentId"],
-        )
-
-        handler.send_header.assert_any_call(
-            "X-Accel-Redirect",
-            f"/__document_files/{created['fileName']}",
-        )
-        handler.headers = {}
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.storage_download_response(
-                handler,
-                "docx",
-                created["documentId"],
-            )
-        self.assertEqual(raised.exception.status, 401)
-
-    def test_signed_callback_atomically_replaces_canonical_document(self):
-        created = copilot_server.create_document("xlsx")
-        config = copilot_server.document_editor_config(
-            "xlsx",
-            created["documentId"],
-        )
-        callback = {
-            "filetype": "xlsx",
-            "key": config["document"]["key"],
-            "status": 6,
-            "url": "http://127.0.0.1/cache/files/output.xlsx?signature=test",
-        }
-        token = copilot_server.sign_jwt(callback, "document-test-secret")
-        handler = mock.Mock()
-        handler.headers = {}
-        saved_xlsx = minimal_xlsx_bytes()
-        response = StaticDownloadResponse(saved_xlsx)
-        response.headers = {"Content-Length": str(len(saved_xlsx))}
-
-        with mock.patch.object(
-            copilot_server.urllib.request,
-            "urlopen",
-            return_value=response,
-        ):
-            result = copilot_server.process_document_callback(
-                handler,
-                {"token": token},
-                "xlsx",
-                created["documentId"],
-            )
-
-        self.assertEqual(result, {"error": 0})
-        with open(
-            os.path.join(self.storage.name, created["fileName"]),
-            "rb",
-        ) as stream:
-            self.assertEqual(stream.read(), saved_xlsx)
-        self.assertEqual(
-            [
-                name
-                for name in os.listdir(self.storage.name)
-                if ".saving-" in name
-            ],
-            [],
-        )
-
-    def test_callback_rewrites_a_loopback_host_port_to_container_nginx(self):
-        self.assertEqual(
-            copilot_server.normalized_callback_download_url(
-                "http://127.0.0.1:11981/cache/files/output.xlsx?signature=test"
-            ),
-            "http://127.0.0.1/cache/files/output.xlsx?signature=test",
-        )
-
-    def test_callback_rejects_a_valid_token_for_another_document(self):
-        created = copilot_server.create_document("pptx")
-        other = copilot_server.create_document("pptx")
-        config = copilot_server.document_editor_config(
-            "pptx",
-            other["documentId"],
-        )
-        token = copilot_server.sign_jwt(
-            {
-                "key": config["document"]["key"],
-                "status": 4,
-            },
-            "document-test-secret",
-        )
-        handler = mock.Mock()
-        handler.headers = {}
-
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.process_document_callback(
-                handler,
-                {"token": token},
-                "pptx",
-                created["documentId"],
-            )
-        self.assertEqual(
-            raised.exception.code,
-            "DOCUMENT_CALLBACK_KEY_MISMATCH",
         )
 
 
@@ -1219,123 +568,6 @@ class ImageImportTests(unittest.TestCase):
         self.assertNotIn("remote response body", raised.exception.message)
 
 
-class LocalGuestTokenTests(unittest.TestCase):
-    def setUp(self):
-        self.jwt_secret = "local-guest-test-secret"
-        self.jwt_patcher = mock.patch.object(
-            copilot_server,
-            "get_jwt_secret",
-            return_value=self.jwt_secret,
-        )
-        self.jwt_patcher.start()
-        self.expires_at = int(time.time()) + 300
-
-    def tearDown(self):
-        self.jwt_patcher.stop()
-
-    def editor_token(self, expires_at=None):
-        return copilot_server.sign_jwt(
-            {
-                "document": {
-                    "key": "document-key-v1",
-                    "title": "demo.docx",
-                    "fileType": "docx",
-                    "permissions": {
-                        "edit": True,
-                        "review": True,
-                        "download": False,
-                    },
-                },
-                "documentType": "word",
-                "editorConfig": {
-                    "callbackUrl": "https://app.test/callback",
-                    "customization": {"compactToolbar": True},
-                    "user": {
-                        "id": "uid-1",
-                        "name": "John Smith",
-                        "roles": ["reviewer"],
-                    },
-                },
-                "iat": int(time.time()),
-                "exp": self.expires_at if expires_at is None else expires_at,
-            },
-            self.jwt_secret,
-        )
-
-    def test_valid_editor_token_is_reissued_for_stable_guest(self):
-        anonymous_id = "123e4567-e89b-42d3-a456-426614174000"
-        response = copilot_server.issue_anonymous_editor_config(
-            {
-                "editorToken": self.editor_token(),
-                "anonymousId": anonymous_id,
-                "name": "Attacker-selected name",
-                "permissions": {"download": True},
-            }
-        )
-        payload = copilot_server.verify_editor_jwt_payload(response["token"])
-
-        self.assertTrue(response["ok"])
-        self.assertEqual(response["expiresAt"], self.expires_at)
-        self.assertEqual(
-            payload["editorConfig"]["user"],
-            {
-                "group": "",
-                "id": f"local-guest:{anonymous_id}",
-                "image": "",
-                "name": "访客",
-                "roles": [],
-            },
-        )
-        self.assertEqual(payload["editorConfig"]["customization"]["anonymous"], {
-            "request": False,
-            "label": "访客",
-        })
-        self.assertEqual(payload["document"]["key"], "document-key-v1")
-        self.assertEqual(
-            payload["document"]["permissions"],
-            {"edit": True, "review": True, "download": False},
-        )
-        self.assertEqual(payload["editorConfig"]["callbackUrl"], "https://app.test/callback")
-        self.assertEqual(payload["exp"], self.expires_at)
-
-    def test_invalid_guest_uuid_is_rejected(self):
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.issue_anonymous_editor_config(
-                {
-                    "editorToken": self.editor_token(),
-                    "anonymousId": "not-a-uuid",
-                }
-            )
-
-        self.assertEqual(raised.exception.status, 400)
-        self.assertEqual(raised.exception.code, "INVALID_ANONYMOUS_ID")
-
-    def test_expired_editor_token_is_not_extended(self):
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.issue_anonymous_editor_config(
-                {
-                    "editorToken": self.editor_token(int(time.time()) - 1),
-                    "anonymousId": "123e4567-e89b-42d3-a456-426614174000",
-                }
-            )
-
-        self.assertEqual(raised.exception.code, "EDITOR_TOKEN_EXPIRED")
-
-    def test_tampered_editor_token_is_rejected(self):
-        token = self.editor_token()
-        tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
-
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.issue_anonymous_editor_config(
-                {
-                    "editorToken": tampered,
-                    "anonymousId": "123e4567-e89b-42d3-a456-426614174000",
-                }
-            )
-
-        self.assertEqual(raised.exception.code, "INVALID_EDITOR_TOKEN")
-
-
 class HttpRelayTests(unittest.TestCase):
     def setUp(self):
         self.storage = tempfile.TemporaryDirectory()
@@ -1540,7 +772,6 @@ class HttpRelayTests(unittest.TestCase):
             "INVALID_COMMAND": 400,
             "EDITOR_TOKEN_EXPIRED": 401,
             "CONTROL_NOT_ALLOWED": 403,
-            "SESSION_NOT_FOUND": 404,
             "IMAGE_ASSET_EXPIRED": 410,
             "REQUEST_ID_CONFLICT": 409,
             "ARGUMENTS_TOO_LARGE": 413,
@@ -1552,9 +783,12 @@ class HttpRelayTests(unittest.TestCase):
             "SHEETS_API_UNSUPPORTED": 501,
             "SHEETS_RUNTIME_INCOMPATIBLE": 500,
             "SHEETS_CHART_PARTIAL_MUTATION": 500,
+            "PERSISTENCE_INVALID_RESPONSE": 502,
             "PERSISTENCE_FAILED": 502,
+            "PERSISTENCE_NOT_AVAILABLE": 503,
             "NOT_READY": 503,
             "BRIDGE_TIMEOUT": 504,
+            "PERSISTENCE_TIMEOUT": 504,
             "FUTURE_EDITOR_ERROR": 500,
         }
         for code, expected_status in cases.items():
@@ -1673,15 +907,6 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.BRIDGE_REJECTED_CREDENTIALS,
         )
 
-    def test_missing_editor_token_message_is_editor_neutral(self):
-        handler = mock.Mock()
-        handler.headers = {}
-
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.bridge_authorization(handler)
-
-        self.assertEqual(raised.exception.code, "EDITOR_TOKEN_REQUIRED")
-        self.assertNotIn("bind_current_word", raised.exception.message)
 
     def test_http_relay_only_allows_large_arguments_for_image_tools(self):
         large_data_url = "data:image/png;base64," + ("A" * 300000)
@@ -1804,7 +1029,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "pptx",
             "editorType": "slide",
             "userId": "uid-1",
-            "authKind": "binding",
         }
         validated = copilot_server.bridge_validate(
             {
@@ -1890,7 +1114,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "docx",
             "editorType": "word",
             "userId": "uid-1",
-            "authKind": "binding",
         }
 
         result = copilot_server.bridge_validate(
@@ -2151,11 +1374,12 @@ class HttpRelayTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
 
     def test_word_canonical_property_wins_without_relaxing_unsafe_inputs(self):
-        normalized, normalizations = copilot_server.normalize_word_tool_calls(
+        normalized, normalizations = copilot_server.normalize_editor_tool_calls(
+            "word",
             [{
                 "name": "word_set_document_properties",
                 "arguments": {"author": 42, "creator": "标准作者"},
-            }]
+            }],
         )
         self.assertEqual(normalized[0]["arguments"], {"creator": "标准作者"})
         self.assertEqual(normalizations[0]["kind"], "canonicalWins")
@@ -2186,7 +1410,7 @@ class HttpRelayTests(unittest.TestCase):
         for call, expected_path in invalid_cases:
             with self.subTest(expected_path=expected_path):
                 with self.assertRaises(copilot_server.BridgeError) as raised:
-                    copilot_server.require_valid_word_tool_calls([call])
+                    copilot_server.require_valid_editor_tool_calls("word", [call])
                 self.assertEqual(raised.exception.code, "INVALID_TOOL_ARGUMENTS")
                 self.assertIn(
                     expected_path,
@@ -2209,7 +1433,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "docx",
             "editorType": "word",
             "userId": "uid-1",
-            "authKind": "binding",
         }
         commands_before = dict(copilot_server.BRIDGE_COMMANDS)
         requests_before = dict(copilot_server.BRIDGE_REQUESTS)
@@ -2257,7 +1480,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "pptx",
             "editorType": "slide",
             "userId": "uid-1",
-            "authKind": "binding",
         }
         commands_before = dict(copilot_server.BRIDGE_COMMANDS)
         requests_before = dict(copilot_server.BRIDGE_REQUESTS)
@@ -2346,7 +1568,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "xlsx",
             "editorType": "cell",
             "userId": "uid-1",
-            "authKind": "binding",
         }
         commands_before = dict(copilot_server.BRIDGE_COMMANDS)
         requests_before = dict(copilot_server.BRIDGE_REQUESTS)
@@ -2506,7 +1727,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "xlsx",
             "editorType": "cell",
             "userId": "uid-1",
-            "authKind": "binding",
         }
 
         valid = copilot_server.bridge_validate(
@@ -2625,7 +1845,6 @@ class HttpRelayTests(unittest.TestCase):
             "fileType": "xlsx",
             "editorType": "cell",
             "userId": "uid-1",
-            "authKind": "binding",
         }
         commands_before = dict(copilot_server.BRIDGE_COMMANDS)
         with self.assertRaises(copilot_server.BridgeError) as raised:
@@ -2778,18 +1997,6 @@ class HttpRelayTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "INVALID_BRIDGE_RESUME_TOKEN")
 
-    def test_sessions_exchanges_editor_jwt_for_scoped_binding_token(self):
-        self.register()
-        editor_claims = copilot_server.verify_editor_jwt(self.editor_token())
-
-        response = copilot_server.bridge_sessions(editor_claims)
-        binding_claims = copilot_server.verify_bridge_binding_token(response["bindingToken"])
-
-        self.assertEqual(binding_claims["authKind"], "binding")
-        self.assertEqual(binding_claims["fileName"], "demo.docx")
-        self.assertGreater(response["bindingExpiresAt"], int(time.time()))
-        self.assertEqual(len(response["sessions"]), 1)
-        self.assertTrue(response["sessions"][0]["authoritative"])
 
     def test_internal_session_reports_ready_authoritative_contract_state(self):
         self.register(
@@ -2820,228 +2027,10 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.internal_bridge_session("http-session:newer")["ready"]
         )
 
-    def test_attach_issues_binding_for_ready_docx_xlsx_and_pptx_relays(self):
-        cases = [
-            (
-                "11111111-1111-4111-8111-111111111111",
-                "docx",
-                "word",
-            ),
-            (
-                "22222222-2222-4222-8222-222222222222",
-                "xlsx",
-                "cell",
-            ),
-            (
-                "33333333-3333-4333-8333-333333333333",
-                "pptx",
-                "slide",
-            ),
-        ]
-        for index, (document_id, file_type, editor_type) in enumerate(cases):
-            with self.subTest(file_type=file_type):
-                file_name = self.create_document_file(document_id, file_type)
-                session_id = f"http-session:attach-{file_type}"
-                user_id = f"uid-{index + 1}"
-                self.register(
-                    session_id,
-                    f"document-key-{file_type}",
-                    file_name=file_name,
-                    file_type=file_type,
-                    editor_type=editor_type,
-                    user_id=user_id,
-                )
-
-                response = copilot_server.bridge_attach(
-                    {
-                        "fileName": file_name,
-                        "editorType": editor_type,
-                    }
-                )
-                claims = copilot_server.verify_bridge_binding_token(
-                    response["bindingToken"]
-                )
-
-                self.assertTrue(response["ok"])
-                self.assertGreater(response["bindingExpiresAt"], int(time.time()))
-                self.assertEqual(response["session"]["sessionId"], session_id)
-                self.assertTrue(response["session"]["ready"])
-                self.assertEqual(response["session"]["editorType"], editor_type)
-                self.assertEqual(claims["fileName"], file_name)
-                self.assertEqual(claims["fileType"], file_type)
-                self.assertEqual(claims["editorType"], editor_type)
-                self.assertEqual(claims["userId"], user_id)
-
-    def test_attach_selects_latest_ready_relay_for_same_file(self):
-        file_name = self.create_document_file(
-            "44444444-4444-4444-8444-444444444444",
-            "docx",
-        )
-        self.register(
-            "http-session:attach-first",
-            "document-key-attach",
-            file_name=file_name,
-            user_id="uid-first",
-        )
-        self.register(
-            "http-session:attach-second",
-            "document-key-attach",
-            file_name=file_name,
-            user_id="uid-second",
-        )
-
-        response = copilot_server.bridge_attach(
-            {"fileName": file_name, "editorType": "word"}
-        )
-        claims = copilot_server.verify_bridge_binding_token(response["bindingToken"])
-
-        self.assertEqual(
-            response["session"]["sessionId"],
-            "http-session:attach-second",
-        )
-        self.assertEqual(claims["userId"], "uid-second")
-
-    def test_attach_rejects_missing_editor_type_mismatch_and_missing_document(self):
-        file_name = self.create_document_file(
-            "55555555-5555-4555-8555-555555555555",
-            "docx",
-        )
-        cases = [
-            (
-                {"fileName": file_name},
-                422,
-                "INVALID_ARGUMENTS",
-            ),
-            (
-                {"fileName": file_name, "editorType": "cell"},
-                409,
-                "EDITOR_MISMATCH",
-            ),
-            (
-                {
-                    "fileName": "66666666-6666-4666-8666-666666666666.docx",
-                    "editorType": "word",
-                },
-                404,
-                "DOCUMENT_NOT_FOUND",
-            ),
-        ]
-        for payload, status, code in cases:
-            with self.subTest(code=code):
-                with (
-                    mock.patch.object(
-                        copilot_server,
-                        "bridge_binding_token",
-                    ) as token_issuer,
-                    self.assertRaises(copilot_server.BridgeError) as raised,
-                ):
-                    copilot_server.bridge_attach(payload)
-                self.assertEqual(raised.exception.status, status)
-                self.assertEqual(raised.exception.code, code)
-                token_issuer.assert_not_called()
-
-    def test_attach_requires_a_ready_active_relay(self):
-        file_name = self.create_document_file(
-            "77777777-7777-4777-8777-777777777777",
-            "docx",
-        )
-        self.register(
-            "http-session:attach-not-ready",
-            "document-key-not-ready",
-            file_name=file_name,
-            ready=False,
-        )
-
-        with (
-            mock.patch.object(copilot_server, "BRIDGE_DISCOVERY_WAIT_SECONDS", 0),
-            self.assertRaises(copilot_server.BridgeError) as raised,
-        ):
-            copilot_server.bridge_attach(
-                {"fileName": file_name, "editorType": "word"}
-            )
-
-        self.assertEqual(raised.exception.status, 503)
-        self.assertEqual(raised.exception.code, "NO_ACTIVE_EDITOR")
-
-    def test_attach_binding_routes_to_refreshed_relay(self):
-        file_name = self.create_document_file(
-            "88888888-8888-4888-8888-888888888888",
-            "docx",
-        )
-        self.register(
-            "http-session:attach-before-refresh",
-            "document-key-before-refresh",
-            file_name=file_name,
-        )
-        response = copilot_server.bridge_attach(
-            {"fileName": file_name, "editorType": "word"}
-        )
-        binding_claims = copilot_server.verify_bridge_binding_token(
-            response["bindingToken"]
-        )
-
-        self.register(
-            "http-session:attach-after-refresh",
-            "document-key-after-refresh",
-            file_name=file_name,
-        )
-        refreshed = copilot_server.bridge_sessions(binding_claims)
-
-        self.assertEqual(
-            refreshed["sessions"][0]["sessionId"],
-            "http-session:attach-after-refresh",
-        )
-
-    def test_editor_jwt_binds_to_the_ready_local_guest_session(self):
-        anonymous_id = "123e4567-e89b-42d3-a456-426614174000"
-        guest_user_id = f"local-guest:{anonymous_id}"
-        initial_token = self.editor_token()
-        guest_token = copilot_server.issue_anonymous_editor_config(
-            {
-                "editorToken": initial_token,
-                "anonymousId": anonymous_id,
-            }
-        )["token"]
-        guest_state = self.editor_state()
-        guest_state["context"]["userId"] = guest_user_id
-        copilot_server.bridge_register(
-            {
-                "sessionId": "http-session:guest",
-                "editorToken": guest_token,
-                "state": guest_state,
-            }
-        )
-
-        initial_claims = copilot_server.verify_editor_jwt(initial_token)
-        response = copilot_server.bridge_sessions(initial_claims)
-        binding_claims = copilot_server.verify_bridge_binding_token(
-            response["bindingToken"]
-        )
-
-        self.assertEqual(binding_claims["userId"], guest_user_id)
-        with copilot_server.BRIDGE_CONDITION:
-            session_id, _ = copilot_server.bridge_select_session_locked(
-                "",
-                binding_claims,
-            )
-        self.assertEqual(session_id, "http-session:guest")
-
-    def test_expired_binding_token_is_rejected(self):
-        with mock.patch.object(copilot_server, "BRIDGE_BINDING_TOKEN_TTL_SECONDS", -1):
-            token, _ = copilot_server.bridge_binding_token(
-                copilot_server.verify_editor_jwt(self.editor_token())
-            )
-
-        with self.assertRaises(copilot_server.BridgeError) as raised:
-            copilot_server.verify_bridge_binding_token(token)
-
-        self.assertEqual(raised.exception.code, "BRIDGE_BINDING_TOKEN_EXPIRED")
 
     def test_new_registration_supersedes_old_document_version(self):
         first = self.register("http-session:first", "document-key-v1")
-        editor_claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
-        binding = copilot_server.bridge_sessions(editor_claims)["bindingToken"]
-        binding_claims = copilot_server.verify_bridge_binding_token(binding)
+        claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
 
         second = self.register("http-session:second", "document-key-v2")
 
@@ -3056,20 +2045,22 @@ class HttpRelayTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "SESSION_SUPERSEDED")
 
-        response = copilot_server.bridge_sessions(binding_claims)
-        self.assertEqual([item["sessionId"] for item in response["sessions"]], ["http-session:second"])
-        self.assertEqual(response["sessions"][0]["documentKey"], "document-key-v2")
+        with copilot_server.BRIDGE_CONDITION:
+            selected_id, selected = copilot_server.bridge_select_session_locked(
+                "http-session:first",
+                claims,
+            )
+        self.assertEqual(selected_id, "http-session:second")
+        self.assertEqual(selected["documentKey"], "document-key-v2")
         self.assertGreater(
-            response["sessions"][0]["generation"],
+            selected["generation"],
             first["session"]["generation"],
         )
         self.assertTrue(second["session"]["authoritative"])
 
-    def test_stale_binding_session_hint_routes_execute_to_latest_page(self):
+    def test_stale_session_hint_routes_execute_to_latest_page(self):
         self.register("http-session:first", "document-key-v1")
-        editor_claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
-        binding = copilot_server.bridge_sessions(editor_claims)["bindingToken"]
-        binding_claims = copilot_server.verify_bridge_binding_token(binding)
+        claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
         second = self.register("http-session:second", "document-key-v2")
         holder = {}
         request = {
@@ -3083,7 +2074,7 @@ class HttpRelayTests(unittest.TestCase):
 
         worker = threading.Thread(
             target=lambda: holder.update(
-                result=copilot_server.bridge_execute(request, binding_claims)
+                result=copilot_server.bridge_execute(request, claims)
             )
         )
         worker.start()
@@ -3113,9 +2104,7 @@ class HttpRelayTests(unittest.TestCase):
 
     def test_latest_page_close_does_not_restore_superseded_page(self):
         first = self.register("http-session:first", "document-key-v1")
-        editor_claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
-        binding = copilot_server.bridge_sessions(editor_claims)["bindingToken"]
-        binding_claims = copilot_server.verify_bridge_binding_token(binding)
+        claims = copilot_server.verify_editor_jwt(self.editor_token("document-key-v1"))
         second = self.register("http-session:second", "document-key-v2")
 
         copilot_server.bridge_unregister(
@@ -3131,7 +2120,7 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.BRIDGE_CONDITION,
             self.assertRaises(copilot_server.BridgeError) as raised,
         ):
-            copilot_server.bridge_select_session_locked("http-session:first", binding_claims)
+            copilot_server.bridge_select_session_locked("http-session:first", claims)
         self.assertEqual(raised.exception.code, "NO_ACTIVE_EDITOR")
 
         with self.assertRaises(copilot_server.BridgeError) as old_register:
@@ -3142,7 +2131,7 @@ class HttpRelayTests(unittest.TestCase):
         with copilot_server.BRIDGE_CONDITION:
             selected_id, _ = copilot_server.bridge_select_session_locked(
                 "http-session:first",
-                binding_claims,
+                claims,
             )
         self.assertEqual(selected_id, "http-session:refreshed")
         self.assertTrue(refreshed["session"]["authoritative"])
@@ -3150,14 +2139,13 @@ class HttpRelayTests(unittest.TestCase):
         self.assertNotIn("http-session:first", copilot_server.BRIDGE_SESSIONS)
         self.assertEqual(first["session"]["sessionId"], "http-session:first")
 
-    def test_binding_token_cannot_select_another_stable_document(self):
+    def test_stable_identity_cannot_select_another_document(self):
         self.register()
         foreign_claims = {
             "fileName": "another.docx",
             "fileType": "docx",
             "editorType": "word",
             "userId": "uid-1",
-            "authKind": "binding",
         }
 
         with (
@@ -3331,10 +2319,8 @@ class HttpRelayTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "REQUEST_ID_CONFLICT")
         self.assertEqual(raised.exception.status, 409)
 
-        binding = copilot_server.bridge_sessions(claims)["bindingToken"]
-        binding_claims = copilot_server.verify_bridge_binding_token(binding)
         self.register("http-session:next", "document-key-v2")
-        cached_after_handoff = copilot_server.bridge_execute(request, binding_claims)
+        cached_after_handoff = copilot_server.bridge_execute(request, claims)
         self.assertTrue(cached_after_handoff["cached"])
         self.assertEqual(cached_after_handoff["result"]["text"], "current document")
 
@@ -3497,218 +2483,6 @@ class BridgeLoggingTests(unittest.TestCase):
         self.assertNotIn("requestId", event)
         self.assertNotIn("sessionId", event)
         self.assertNotIn("phase", event)
-
-
-class DocumentPersistenceValidationTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.environment = mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_STORAGE_DIR": self.temporary.name},
-        )
-        self.environment.start()
-        self.document_id = "123e4567-e89b-42d3-a456-426614174000"
-        self.main_file = os.path.join(
-            self.temporary.name,
-            f"{self.document_id}.pptx",
-        )
-        with open(bundled_pptx_template_path(), "rb") as stream:
-            self.template = stream.read()
-        with open(self.main_file, "wb") as stream:
-            stream.write(self.template)
-
-    def tearDown(self):
-        self.environment.stop()
-        self.temporary.cleanup()
-
-    def test_invalid_callback_does_not_replace_current_pptx(self):
-        corrupted = rewrite_zip_part(
-            self.template,
-            "ppt/notesMasters/notesMaster1.xml",
-            lambda body: body.replace(b'id="4"', b'id="3"', 1),
-        )
-        with (
-            mock.patch.object(
-                copilot_server,
-                "normalized_callback_download_url",
-                return_value="http://127.0.0.1/download",
-            ),
-            mock.patch.object(
-                copilot_server.urllib.request,
-                "urlopen",
-                return_value=StaticDownloadResponse(corrupted),
-            ),
-            self.assertRaises(copilot_server.BridgeError) as raised,
-        ):
-            copilot_server.persist_callback_document(
-                "pptx",
-                self.document_id,
-                "https://office.test/download",
-            )
-
-        self.assertEqual(raised.exception.code, "DOCUMENT_SAVE_INVALID_OOXML")
-        self.assertEqual(
-            raised.exception.details["validationCode"],
-            "pptx_duplicate_shape_id",
-        )
-        with open(self.main_file, "rb") as stream:
-            self.assertEqual(stream.read(), self.template)
-        self.assertEqual(
-            [
-                name
-                for name in os.listdir(self.temporary.name)
-                if ".saving-" in name
-            ],
-            [],
-        )
-
-    def test_non_ooxml_callback_uses_structural_error_and_preserves_file(self):
-        with (
-            mock.patch.object(
-                copilot_server,
-                "normalized_callback_download_url",
-                return_value="http://127.0.0.1/download",
-            ),
-            mock.patch.object(
-                copilot_server.urllib.request,
-                "urlopen",
-                return_value=StaticDownloadResponse(b"not-an-ooxml"),
-            ),
-            self.assertRaises(copilot_server.BridgeError) as raised,
-        ):
-            copilot_server.persist_callback_document(
-                "pptx",
-                self.document_id,
-                "https://office.test/download",
-            )
-
-        self.assertEqual(raised.exception.code, "DOCUMENT_SAVE_INVALID_OOXML")
-        self.assertEqual(
-            raised.exception.details["validationCode"],
-            "ooxml_invalid_zip",
-        )
-        with open(self.main_file, "rb") as stream:
-            self.assertEqual(stream.read(), self.template)
-        self.assertFalse(
-            any(".saving-" in name for name in os.listdir(self.temporary.name))
-        )
-
-    def test_valid_callback_atomically_replaces_current_pptx(self):
-        with open(self.main_file, "wb") as stream:
-            stream.write(b"old-version")
-        with (
-            mock.patch.object(
-                copilot_server,
-                "normalized_callback_download_url",
-                return_value="http://127.0.0.1/download",
-            ),
-            mock.patch.object(
-                copilot_server.urllib.request,
-                "urlopen",
-                return_value=StaticDownloadResponse(self.template),
-            ),
-        ):
-            result = copilot_server.persist_callback_document(
-                "pptx",
-                self.document_id,
-                "https://office.test/download",
-            )
-
-        self.assertTrue(result["persisted"])
-        self.assertEqual(result["bytes"], len(self.template))
-        with open(self.main_file, "rb") as stream:
-            self.assertEqual(stream.read(), self.template)
-
-
-class VersionHistoryTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.environment = mock.patch.dict(
-            os.environ,
-            {"DOCUMENT_STORAGE_DIR": self.temporary.name},
-        )
-        self.environment.start()
-        self.file_name = "123e4567-e89b-42d3-a456-426614174000.docx"
-        self.main_file = os.path.join(self.temporary.name, self.file_name)
-        with open(self.main_file, "wb") as stream:
-            stream.write(b"version-one")
-
-    def tearDown(self):
-        self.environment.stop()
-        self.temporary.cleanup()
-
-    def test_checkpoint_undo_and_redo_restore_file_bytes(self):
-        checkpoint = copilot_server.create_checkpoint(self.file_name)
-        self.assertTrue(checkpoint["canUndo"])
-
-        with open(self.main_file, "wb") as stream:
-            stream.write(b"version-two")
-
-        undone = copilot_server.restore_version(
-            self.file_name,
-            "undo",
-            None,
-            None,
-        )
-        with open(self.main_file, "rb") as stream:
-            self.assertEqual(stream.read(), b"version-one")
-        self.assertTrue(undone["canRedo"])
-
-        redone = copilot_server.restore_version(
-            self.file_name,
-            "redo",
-            None,
-            None,
-        )
-        with open(self.main_file, "rb") as stream:
-            self.assertEqual(stream.read(), b"version-two")
-        self.assertTrue(redone["canUndo"])
-
-    def test_forcesave_error_four_is_a_downloadable_noop(self):
-        with mock.patch.object(copilot_server, "command_service", return_value={"error": 4, "key": "key"}):
-            result = copilot_server.force_save(
-                "key",
-                self.file_name,
-                allow_no_changes=True,
-            )
-
-        self.assertTrue(result["noChanges"])
-        self.assertTrue(result["persisted"])
-        self.assertFalse(result["accepted"])
-        self.assertEqual(result["status"], "no_changes")
-        self.assertEqual(result["commandError"], 4)
-
-    def test_forcesave_error_four_after_mutation_is_failed(self):
-        with (
-            mock.patch.object(copilot_server, "command_service", return_value={"error": 4, "key": "key"}),
-            mock.patch.object(copilot_server.time, "time", side_effect=[0, 13]),
-            mock.patch.object(copilot_server.time, "sleep"),
-        ):
-            result = copilot_server.force_save("key", self.file_name)
-
-        self.assertFalse(result["noChanges"])
-        self.assertFalse(result["persisted"])
-        self.assertFalse(result["accepted"])
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["commandError"], 4)
-
-    def test_forcesave_command_error_returns_failed_status(self):
-        with mock.patch.object(copilot_server, "command_service", return_value={"error": 3, "key": "key"}):
-            result = copilot_server.force_save("key", self.file_name)
-
-        self.assertFalse(result["persisted"])
-        self.assertEqual(result["status"], "failed")
-        self.assertEqual(result["commandError"], 3)
-
-    def test_missing_editor_session_does_not_delay_restore(self):
-        with (
-            mock.patch.object(copilot_server, "command_service", return_value={"error": 1, "key": "old-key"}),
-            mock.patch.object(copilot_server.time, "sleep") as sleep,
-        ):
-            result = copilot_server.disconnect_editor("old-key", "uid-1")
-
-        self.assertEqual(result["error"], 1)
-        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

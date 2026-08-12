@@ -1,81 +1,49 @@
-# ONLYOFFICE Copilot production integration
+# ONLYOFFICE ai-bridge production integration
 
-This deployment uses ONLYOFFICE DocumentServer as the editing engine and the
-first-party `copilot_server.py` process as the document manager and storage
-service. The bundled DocumentServer sample application is disabled with
-`EXAMPLE_ENABLED=false` and is not part of the request path.
+The production boundary is document-hub v1. ONLYOFFICE DocumentServer hosts the
+headless ai-bridge browser plugin and the private `copilot_server.py` Relay;
+document-hub owns document creation, storage, callbacks, versions, permissions,
+anonymous links, and all public HTTP APIs.
 
 ## Request flow
 
-1. `POST /new-docx`, `/new-xlsx`, or `/new-pptx` creates an OOXML file under
-   `/var/lib/onlyoffice/copilot/documents`.
-2. `GET /<type>/<uuid>` returns a first-party HTML shell, a signed editor
-   configuration, and the ai-bridge plugin configuration.
-3. DocumentServer downloads the source through the loopback-only
-   `/__document_storage/download/<type>/<uuid>` endpoint.
-4. DocumentServer posts status changes to the loopback-only
-   `/__document_storage/callback/<type>/<uuid>` endpoint.
-5. Status `2` and `6` callbacks download the authenticated DocumentServer
-   output into a same-directory temporary file, validate the OOXML signature,
-   fsync it, and atomically replace the canonical file.
+1. document-hub creates or opens the document and returns the signed ONLYOFFICE
+   editor configuration.
+2. The host page explicitly configures `window.aiBridgeOptions` with the
+   document-hub Relay, image, persistence, document, and editor-session paths.
+3. `host-bridge.js` registers the open editor with the private Relay on port
+   3001. Port 3001 is available only on the Compose private network.
+4. Authenticated document-hub APIs validate and forward tool calls to
+   `/bridge/internal/*`; the browser polls, executes the command, and returns
+   the result.
+5. Saves, history, undo, redo, image imports, and document lifecycle operations
+   remain document-hub responsibilities.
 
-The public reverse proxy never needs to allow the storage endpoints. Container
-Nginx accepts those endpoints only from `127.0.0.1` or `::1`, and the Python
-service additionally verifies the shared HS256 JWT.
+The old UUID document application, public attach/binding Relay, `/chat`, and
+Python persistence endpoints are intentionally disabled and return
+`LEGACY_BUSINESS_DISABLED`.
 
-## Persistence
+## Deployment
 
-Compose bind-mounts:
+Use `document-hub/deploy/compose.yml` and follow
+`document-hub/README.md`. Required deployment inputs include the pinned
+DocumentServer image, `AI_BRIDGE_PLUGIN_DIR`, public origins, authentication
+configuration, and the four file-based secrets documented there.
 
-```text
-./data/documents -> /var/lib/onlyoffice/copilot/documents
-```
+The same `AI_RELAY_INTERNAL_SECRET_FILE` must be mounted into document-hub and
+DocumentServer. Keep DocumentServer port 3001 unpublished. The empty
+`nginx-document-app.conf` include is intentional: it prevents legacy public
+DocumentServer routes from being restored.
 
-On `singapore02`, the host path is:
-
-```text
-/docker/Docker-DocumentServer/data/documents
-```
-
-The mounted directory must be writable by container user `ds` (`101:102`).
-Files under `data/` are runtime data and are excluded from Git.
-
-## Required configuration
-
-Copy `.env.copilot.example` to `.env` and set:
-
-- `ONLYOFFICE_JWT_SECRET` to a long, stable secret.
-- `DOCUMENT_PUBLIC_ORIGIN` to the browser-facing origin.
-- `DOCUMENT_FRAME_ANCESTORS` to `'self'` plus the exact parent origins allowed
-  to embed document pages. `http://localhost:*` and
-  `http://127.0.0.1:*` are the only supported wildcard-port forms; wildcard
-  domains are rejected. When a cross-origin parent is configured, CSP replaces
-  the conflicting `X-Frame-Options: SAMEORIGIN` restriction.
-- `DOCUMENT_PPTX_TEMPLATE_PATH` optionally selects a different valid PPTX
-  template. The Compose default is the generic blank template mounted with
-  ai-bridge; this setting does not affect DOCX or XLSX templates.
-- `DOCUMENT_ADMIN_USERNAME` and `DOCUMENT_ADMIN_PASSWORD`.
-- `DOCUMENT_MAX_SAVE_BYTES` to the maximum accepted callback output size.
-
-The same JWT secret protects browser editor configuration, DocumentServer
-commands, source downloads, callback requests, and ai-bridge credentials.
-Never commit `.env`.
-
-## Operational verification
-
-After deployment:
+## Verification
 
 ```bash
-docker compose -f docker-compose.copilot.yml config --quiet
-docker compose -f docker-compose.copilot.yml up -d
-docker inspect onlyoffice-documentserver --format '{{.State.Health.Status}}'
-curl -fsS http://127.0.0.1:11981/copilot-api/health
+docker compose --env-file .env -f document-hub/deploy/compose.yml config
+docker compose --env-file .env -f document-hub/deploy/compose.yml up -d --build
+curl -fsS http://127.0.0.1:8090/health
 ```
 
-Create a document, open the returned URL, change it, trigger Save, close the
-editor, and confirm the host file modification time and size change. Restart
-the container and reopen the same UUID URL to verify persistence.
-
-The public `/__document_storage/` path must remain inaccessible. A direct
-public request should return `403`, while authenticated DocumentServer
-loopback requests should return `200`.
+Open an editable document through document-hub and verify Relay readiness,
+tool execution, image import, save, history, undo, and redo. Direct requests to
+legacy `/copilot-api/bridge/attach`, `/copilot-api/chat`, UUID document, and
+old persistence paths must remain unavailable.

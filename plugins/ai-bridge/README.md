@@ -1,573 +1,119 @@
-# ai-bridge
+# ONLYOFFICE ai-bridge
 
-> **document-hub v1 notice:** the UUID-based `/copilot-api/*` application and
-> public Relay described in legacy sections below are disabled in the hardened
-> deployment. v1 keeps the browser plugin but routes registration, persistence,
-> and external HTTPX execution through `document-hub`. HTTPX sends the same
-> externally issued user JWT on document-scoped `session`, `validate`, and
-> `execute` requests; there is no public attach, pairing code, binding token, or
-> `X-AI-Binding`. See
-> `../../../document-hub/docs/httpx-ai-bridge.zh-CN.md` in the sibling repository.
-
-`ai-bridge` is a headless ONLYOFFICE plugin. It has no panel, toolbar, chat UI,
-or model client. An external Copilot page sends allow-listed JSON tool calls to
-the plugin, and the plugin executes them in the current document with the
-ONLYOFFICE Office JavaScript API.
-
-Plugin identity:
-
-- Name: `ai-bridge`
-- Version: `0.2.1`
-- GUID: `asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}`
-- Editors: Word, Presentation, Spreadsheet
+ai-bridge is a headless ONLYOFFICE plugin that exposes validated Word, Slides,
+and Sheets tools. In production, document-hub v1 is the only document and HTTP
+business boundary.
 
 ## Architecture
 
-```text
-External Copilot UI
-  -> window.aiBridge (same-page API)
-     OR client-sdk.js -> allow-listed postMessage relay
-     OR HTTPX -> document-hub user-JWT API -> private /bridge/internal relay
-  -> host-bridge.js
-  -> POST /copilot-api/images/import (image tools only)
-  -> instance-bound postMessage protocol
-  -> headless ai-bridge plugin (plugin.js)
-  -> allow-listed Word / Slides / Sheets bridge
-  -> Asc.plugin.callCommand()
-  -> ONLYOFFICE Office JavaScript API
-  -> Api.Save()
-  -> POST /copilot-api/forcesave
-  -> callback persistence
-```
+- `plugin.js` runs inside the ONLYOFFICE plugin frame and dispatches validated
+  commands to the editor-specific bridge.
+- `host-bridge.js` exposes `window.aiBridge`, supports the postMessage SDK,
+  and connects an open editor to document-hub's long-poll Relay.
+- `copilot_server.py` is a private Relay and validation service. It does not
+  create, store, list, administer, or version documents.
+- document-hub owns authentication, documents, callbacks, permissions,
+  persistence, image ingress, and all public APIs.
 
-The host and plugin perform a per-editor handshake. Commands contain the
-current `document.key` and editor type, and the plugin rejects a command if its
-target does not match the open document. The protocol does not use
-`BroadcastChannel`, so opening multiple documents in same-origin browser tabs
-does not broadcast a command to every plugin instance.
+Legacy UUID document routes, public attach/binding endpoints, `/chat`, and
+Python persistence endpoints are intentionally disabled.
 
-## Add the plugin to an editor
+## Host configuration
 
-Add the plugin config to the editor configuration and autostart it:
+Set the host options after the ONLYOFFICE editor configuration is available:
 
 ```js
-const editorConfig = {
-  documentType: "word",
-  document: {
-    key: "document-123-version-7",
-    fileType: "docx",
-    title: "report.docx",
-    url: "https://storage.example.com/report.docx",
-  },
-  editorConfig: {
-    callbackUrl: "https://app.example.com/onlyoffice/callback",
-    user: { id: "user-42", name: "Demo User" },
-    customization: {
-      compactToolbar: true,
-    },
-    plugins: {
-      pluginsData: [
-        "https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/config.json?v=<asset-revision>",
-      ],
-      autostart: ["asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}"],
-      options: {
-        "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}": {
-          hostOrigin: window.location.origin,
-          channelId: crypto.randomUUID(),
-        },
-      },
-    },
-  },
+window.aiBridgeOptions = {
+  httpRelay: true,
+  relayBaseUrl: "/api/v1/editor-relay",
+  imageBaseUrl: "/api/v1/editor-relay/images",
+  persistenceBaseUrl: "/api/v1/editor-relay/persistence",
+  editorSessionId: editorConfig.sessionId,
+  documentId: editorConfig.documentId,
+  getEditorConfig: () => editorConfig,
+  clientOrigins: ["https://app.example.com"],
 };
-
-const docEditor = new DocsAPI.DocEditor("editor", editorConfig);
 ```
 
-The first-party editor shell generates and signs this configuration in
-`copilot_server.py`; `nginx-document-app.conf` only routes the editor and
-loopback storage endpoints.
-
-The plugin options bind the hidden plugin frame to the exact editor host page.
-They must be set before `DocsAPI.DocEditor` is constructed. If the editor host
-is itself embedded in a cross-origin iframe, the plugin walks its ancestor
-windows and delivers the handshake only to the ancestor whose origin matches
-`hostOrigin`; the outer page does not need to load a Relay script. Sandboxed
-hosts must allow both scripts and same-origin behavior. An opaque `"null"`
-origin is intentionally unsupported. When options are absent, only the legacy
-top-level-page handshake is used.
-
-Before constructing the editor, `local-guest.js` stores one UUID v4 in
-`onlyoffice.localGuestId.v1`, submits the already-signed editor token to
-`POST /copilot-api/editor-config/anonymous`, and applies the returned
-server-signed user `{ id: "local-guest:<uuid>", name: "访客" }`. The endpoint
-only accepts an existing valid editor JWT and a UUID; it does not accept a
-document config, permissions, or caller-selected name.
-
-The signed configuration removes the complete left-menu layout container and
-hides the unused Collaboration and Plugins toolbar tabs without changing
-document permissions. The editor chrome is implemented by the source-patched
-DocumentServer image built from `Dockerfile.source-ui`, not by plugin-side DOM
-or CSS interception. `compactHeader` removes the separate document-title row;
-`compactHeaderQuickAccess` creates native Save, Print, Undo, and Redo controls
-in the toolbar's right-side header panel; `compactHeaderHideLogo` avoids
-mounting the logo into that row; and `forceCompactToolbar` makes the signed
-`compactToolbar` value authoritative over an older browser preference.
-`sourceUiLayout` applies layout visibility without enabling extended branding.
-ONLYOFFICE's native Mixtbar handles double-click expand/fold behavior.
-
-## Load the external-page API
-
-Load `host-bridge.js` in the page that owns the ONLYOFFICE editor. If the
-editor config is not available as a global `config` variable, provide it before
-loading the script:
+Then load the host bridge:
 
 ```html
-<script>
-  window.aiBridgeOptions = {
-    getEditorConfig: () => editorConfig,
-  };
-</script>
 <script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/host-bridge.js?v=<asset-revision>"></script>
 ```
 
-`host-bridge.js` must run in the page that contains the editor. A cross-origin
-Copilot iframe or popup can use the allow-listed `client-sdk.js` relay described
-in `INTEGRATION.zh-CN.md`. A completely unrelated tab or process with no window
-reference must relay its command through the application's authenticated
-WebSocket or HTTP channel. The bundled localhost demo now includes such an HTTP
-Relay internally. In the hardened v1 deployment, HTTPX calls `document-hub`
-with a user JWT and document ID. `document-hub` verifies the local ACTIVE user
-and live owner/editor ACL, chooses that user's newest online editor page, and
-uses a private service secret when forwarding to the Relay. HTTPX never receives
-the ONLYOFFICE editor JWT, Relay key, or internal session credential.
+HTTP Relay is never enabled implicitly. Relay, image, and persistence base URLs
+must be explicit same-origin paths.
 
-The bundled Nginx example keeps the pre-existing demo storage identity
-`185.199.108.133` stable after the loopback bind, so previously uploaded local
-example files continue resolving to the same storage directory.
-
-## Stable local guest identity
-
-An external editor host can reuse the browser helper and the same-origin
-re-signing contract. Obtain a normal signed config first, proxy the anonymous
-config endpoint under the editor host's own origin, and prepare the config
-before constructing `DocsAPI.DocEditor`:
-
-```html
-<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/local-guest.js?v=<asset-revision>"></script>
-<script>
-  const editorConfig = await fetch("/api/onlyoffice/editor-config").then(
-    response => response.json(),
-  );
-
-  await window.OnlyOfficeLocalGuest.prepare(editorConfig, {
-    endpoint: "/api/onlyoffice/editor-config/anonymous",
-  });
-
-  new DocsAPI.DocEditor("editor", editorConfig);
-</script>
-```
-
-The proxy target must implement the bundled
-`POST /copilot-api/editor-config/anonymous` request
-`{ editorToken, anonymousId }` and return `{ ok, user, token, expiresAt }`.
-Do not enable wildcard CORS and never expose `JWT_SECRET` to the page. Clearing
-the browser's site storage intentionally creates a new pseudonymous identity.
-
-## External Copilot API
-
-Wait for the hidden plugin to be ready:
+## JavaScript API
 
 ```js
 await window.aiBridge.ready();
-
-console.log(window.aiBridge.context);
-console.log(window.aiBridge.capabilities);
-```
-
-Execute one typed operation:
-
-```js
-await window.aiBridge.word.replaceText({
-  search: "Old company",
-  replace: "New company",
-});
-```
-
-Execute an agent-produced batch:
-
-The following `window.aiBridge` call is the browser/plugin-internal transport,
-so its raw batch names keep the editor prefixes. Calls through document-hub's
-`/api/v1/documents/{documentId}/ai/*` HTTP API use unprefixed public names such
-as `replace_text` and `append_paragraph`.
-
-```js
-const result = await window.aiBridge.executeBatch([
-  {
-    name: "word_replace_text",
-    arguments: { search: "Draft", replace: "Final" },
-  },
-  {
-    name: "word_append_paragraph",
-    arguments: { text: "Generated by the external Copilot." },
-  },
+const result = await window.aiBridge.word.inspect({ maxChars: 5000 });
+await window.aiBridge.executeBatch([
+  { name: "replace_text", arguments: { search: "old", replace: "new" } },
 ]);
 ```
 
-Insert an external image. The host imports the source first and normally sends
-only a short-lived, signed same-origin URL to the plugin:
+Tool names are unprefixed on public Relay and batch envelopes. Direct
+editor-specific methods remain grouped under `word`, `slides`, and `sheets`.
+The compatibility alias `window.onlyofficeAI` remains available.
+
+Save, history, undo, and redo require a configured document-hub persistence
+service. Without it, the bridge returns `PERSISTENCE_NOT_AVAILABLE`.
+
+## postMessage client
+
+```html
+<script src="https://docs.example.com/sdkjs-plugins/{A17E5F31-64AA-4E37-9A42-8D430814C2F6}/client-sdk.js?v=<asset-revision>"></script>
+```
 
 ```js
-await window.aiBridge.word.addImage({
-  source: { type: "url", url: "https://images.example.com/diagram.png" },
-  widthMm: 120,
-  search: "Architecture",
-  wrapping: "square",
-  name: "Architecture diagram",
+const client = new AiBridgeClient({
+  targetWindow: editorFrame.contentWindow,
+  targetOrigin: "https://docs.example.com",
 });
-
-await window.aiBridge.slides.addImage({
-  slide: 2,
-  source: { type: "dataUrl", dataUrl: clipboardImageDataUrl },
-  widthMm: 140,
-  rotationDeg: 2,
-  name: "Pasted screenshot",
-});
-
-await window.aiBridge.slides.setBackground({
-  slide: 2,
-  mode: "image",
-  source: { type: "dataUrl", dataUrl: clipboardImageDataUrl },
-  fillMode: "stretch",
-});
-
-await window.aiBridge.slides.setTemplateBackground({
-  scope: "layout",
-  masterIndex: 1,
-  layoutIndex: 2,
-  mode: "image",
-  source: { type: "url", url: "https://images.example.com/layout-background.png" },
-  fillMode: "stretch",
-});
+await client.ready();
+const state = await client.refreshState();
 ```
 
-`source` accepts public HTTPS URLs or strict
-`data:image/{png,jpeg,gif,webp};base64,...` / `data:image/svg+xml;base64,...`
-values. SVG is parsed and normalized, with scripts, event handlers, external
-resources, DTDs, and entities rejected. The service rejects private
-network targets, unsafe redirects, mismatched MIME/magic bytes, images over
-8 MiB, edges over 12,000 pixels, or more than 40 MP. Set
-`COPILOT_IMAGE_ALLOWED_HOSTS` to a comma-separated optional hostname allow-list.
-On the localhost demo, ONLYOFFICE blocks engine-side loopback downloads by
-default. The trusted host therefore reads the already-imported asset through
-its signed URL and passes an internal Data URL to `Api.CreateImage`; this keeps
-the DocumentServer private-IP filter enabled.
+`clientOrigins` must contain exact origins. Wildcards are rejected.
 
-Common controls:
+## Contract
 
-```js
-await window.aiBridge.save();
-await window.aiBridge.undo();
-await window.aiBridge.redo();
-const history = await window.aiBridge.history();
-```
-
-`window.onlyofficeAI` is kept as a compatibility alias for
-`window.aiBridge`.
-
-For a complete Chinese integration guide covering a direct host page,
-cross-origin iframe/popup relay, document identity, idempotency, errors, and
-production persistence, see [INTEGRATION.zh-CN.md](INTEGRATION.zh-CN.md).
-
-The versioned public contract is available as:
-
-- `public-api.d.ts`: TypeScript declarations for the full API and all tool arguments.
-- `public-api.json`: machine-readable tool schemas, limits, errors, and transport metadata.
-- `client-sdk.js`: optional cross-origin iframe/popup client for the allow-listed relay.
-- `DOCX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge D01-D70 capability matrix.
-- `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
-- `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
-
-`public-api.json` is the single machine contract. After changing it or its
-runtime semantics, regenerate the checked-in projections and the zenmind-env
-HTTPX/skill artifacts:
+`public-api.json` is the source of truth for tool schemas, limits, controls,
+errors, transport metadata, and the contract hash. Run the generator after
+changing it:
 
 ```bash
-python3 tools/sync_contract.py --write \
-  --zenmind-root /path/to/zenmind-env \
-  --httpx-base-url https://docs.example.com
-python3 tools/sync_contract.py --check \
-  --zenmind-root /path/to/zenmind-env \
-  --httpx-base-url https://docs.example.com
+python3 tools/sync_contract.py --write
+python3 tools/sync_contract.py --check
 ```
 
-Generated files contain an edit warning and must not be changed directly.
-`--httpx-base-url` is required when generating zenmind-env projections. It must
-be the agent-visible HTTP(S) origin without credentials, a path, a query, or a
-fragment. The generator writes that configured origin into all three HTTPX
-bridge sites.
+Do not edit generated regions in `plugin.js` or `public-api.d.ts` manually.
 
-Each online skill receives task-scoped contract groups. Group Markdown contains
-compact tool summaries, while the matching JSON contains only those tools and
-the transitive `$defs` they reference.
+## Private Relay endpoints
 
-Word, nested Word, and Slides table `data` cells accept
-`string | number | boolean | null` or a formatting object with a required string
-`text`. Use `color` for text color; `textColor` and other unknown fields are
-rejected before mutation. Word cell formatting overrides table-level text
-defaults. Slides applies each cell object first and then applies `header` to the
-first row without replacing text unless `header.text` is present. See the
-integration guide for complete examples and error behavior.
+document-hub is the only caller of the internal endpoints:
 
-## Tool names
+- browser Relay: `/bridge/register`, `/bridge/poll`, `/bridge/result`,
+  `/bridge/unregister`
+- document-hub Relay: `/bridge/internal/execute`,
+  `/bridge/internal/validate`, `/bridge/internal/session`,
+  `/bridge/internal/drop`, `/bridge/internal/images/import`
+- diagnostics/assets: `/health`, `/bridge/contract/{editor}`, `/images/*`
 
-- Word: `word_inspect`, `word_replace_text`, `word_append_paragraph`,
-  `word_insert_paragraph`, `word_format_document`, `word_format_selection`,
-  `word_format_matches`, `word_delete_matches`, `word_add_hyperlink`,
-  `word_add_comment`, `word_add_bookmark`, `word_add_image`,
-  `word_inspect_advanced`, `word_set_document_properties`,
-  `word_manage_section`, `word_manage_style`, `word_set_tabs`,
-  `word_set_numbering`, `word_format_table_advanced`, `word_add_nested_table`,
-  `word_manage_drawing`, `word_add_shape`, `word_add_chart`, `word_add_math`,
-  `word_add_ole_object`, `word_manage_fields`, `word_manage_long_document`,
-  `word_manage_comments`, `word_manage_revisions`, `word_set_protection`,
-  `word_manage_content_control`, `word_manage_custom_xml`, `word_inspect_macros`,
-  `word_set_macros`, `word_set_watermark`, `word_format_paragraphs`,
-  `word_set_paragraph_text`, `word_delete_paragraphs`, `word_set_list`,
-  `word_insert_page_break`, `word_navigate`, `word_scroll`, `word_scale_font`,
-  `word_add_table`, `word_set_table_cell`, `word_format_table`,
-  `word_edit_table`, `word_set_page_layout`, `word_set_header_footer`,
-  `word_set_document_text`.
-- Slides: 67 allow-listed tools covering slides, themes, masters, layouts,
-  placeholders, text/paragraphs, shapes, connectors, freeform geometry,
-  grouping/alignment/layering, safe raster/SVG images, image-shape crops,
-  tables, native SmartArt, charts, WordArt, math, OLE, notes, comments, hyperlinks,
-  transitions/Morph, animations, macros, and slideshow control. See
-  `public-api.json` for the canonical list and
-  [PPTX-CAPABILITIES.zh-CN.md](PPTX-CAPABILITIES.zh-CN.md) for the P01-P77
-  mapping.
-- Sheets: 43 allow-listed tools covering inspection, typed values, formulas and
-  array formulas, ranges, rich text, sheets, defined names, recalculation,
-  sorting/filtering/tables, conditional formatting, validation, pivots, charts,
-  drawings, hyperlinks, comments, freeze panes, document properties, protected
-  ranges, page layout, and macros. See `public-api.json` for the canonical list
-  and [XLSX-CAPABILITIES.zh-CN.md](XLSX-CAPABILITIES.zh-CN.md) for the X01-X78
-  mapping.
+Every request requires the private Relay secret. Port 3001 must not be
+published.
 
-The external agent must send tool names and JSON arguments, never JavaScript
-source. `plugin.js` checks the editor-specific allow list before calling a
-bridge. Requests are serialized, deduplicated by request ID, and cached briefly
-so a retried transport message cannot apply the same edit twice.
-
-### Word capability coverage
-
-| Area | Supported operations |
-| --- | --- |
-| Read/context | Full text, selection, pages, sections, properties, styles, numbering, drawings, bookmarks, notes, comments, revisions, content controls and custom XML |
-| Text | Replace, delete exact matches, overwrite a paragraph or the whole document |
-| Character style | Font, size, bold, italic, underline, strikeout, color, highlight, caps, spacing, sub/superscript, named character styles |
-| Paragraph style | Named/heading/custom/inherited styles, outline level, alignment, spacing, line spacing, indents, tabs, keep/widow/page-break rules |
-| Structure | Paragraphs, simple/custom/multilevel lists, page/section breaks, columns, bookmarks, links, fields and notes |
-| Images/drawings | Secure image import, sizing, rotation, borders, wrapping and floating positioning; shapes/text boxes, charts, formulas and OLE |
-| Tables | Create/fill/style, cell borders/margins, row height/column width, repeated headers, nested tables, structural edits |
-| Long documents | TOC, captions, table of figures, six cross-reference target types, footnotes/endnotes and dynamic fields |
-| Review/control | Comments, revision tracking, accept/reject all, editing restrictions, content controls, custom XML and macros |
-| Page layout | Per-section size/orientation/margins/columns, first/even headers and footers, start page number and watermark |
-| View navigation | Start/end/page, next/previous/relative page, search-to-selection, page-granular up/down scrolling |
-
-See [DOCX-CAPABILITIES.zh-CN.md](DOCX-CAPABILITIES.zh-CN.md) for the D01-D70
-status and the exact public-API limitations that are intentionally not
-advertised as supported.
-
-`word_scroll` deliberately uses document pages rather than synthetic browser
-mouse events. The Office API exposes stable page navigation and selection
-movement, but not a cross-version pixel-wheel contract. Page-granular scrolling
-therefore remains deterministic and does not create an undo entry.
-
-### Slides and Sheets capability coverage
-
-| Area | Supported operations |
-| --- | --- |
-| PPT read | Slide text plus all drawings; object ID/index/name, kind, position, size, rotation, flips, shape geometry/text/fill/line, native SmartArt preset/nodes, chart summary, and optional raw Office JSON |
-| PPT slides | Add, duplicate, delete, and set native solid/gradient/pattern/image backgrounds or follow layout/master |
-| PPT shapes | Add any preset geometry; update text, geometry, name, position, size, rotation, flips, padding, text style, fill, and line; delete any drawing |
-| PPT structure/theme | Slide CRUD/order/visibility/size; themes, theme colors/fonts, masters, layouts, placeholders, native image backgrounds, and template-object CRUD |
-| PPT text/tables | Rich paragraphs and multilevel lists, WordArt, math, notes, comments, tables with row/column edits and cell merge/split |
-| PPT images | Add imported PNG/JPEG/GIF/WebP/SVG; contain/stretch sizing, position, rotation, flips, borders, safe SVG normalization, and preset-shape crops |
-| PPT SmartArt | Inspect, asynchronously create, update, and delete 151 native ONLYOFFICE 9.4 presets; stable node IDs, rich node text, fills/lines, data-model synchronization, and layout refit |
-| PPT charts | Inspect, add, update, and delete; data/categories, series and points, axes, bold titles, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
-| PPT animation/show | Slide transitions including Morph, object entrance/emphasis/exit/path effects, ordering/timing/interactive triggers, loop and live slideshow control |
-| XLSX workbook/cells | Strict JSON scalar values and exact-shape matrices, formulas/arrays/dynamic arrays, names, rich text, ranges, sheets, workbook properties, recalculation, and formatting |
-| XLSX data | Sort, filter, capability-gated structured tables, ordinary `rangeStyle` regions, conditional formats, complete validation readback/drop-downs, and pivot tables |
-| XLSX objects/view | Images, shapes, text boxes, OLE, links, comments, freeze panes, protected ranges, and documented page-layout properties |
-| XLSX charts | Capability-gated inspect, add, update, and delete; source/category/series ranges, series and points, axes, legend, labels, gridlines, number formats, fills, lines, style, position, and size |
-| Fill model | None, solid, linear gradient, radial gradient, pattern, and lossless `raw` Office JSON replay |
-
-`sheets_set_formula` accepts either one formula string or a two-dimensional
-formula matrix matching the target range. A scalar is rejected for a multi-cell
-target; use a matrix or an anchor plus `fillDown` / `fillRight` when relative
-references must advance. `sheets_set_values` follows the same exact-shape rule.
-`sheets_inspect_range` can include cell format, conditional-format, and complete
-data-validation readback.
-Screen view flags (`displayGridlines`, `displayHeadings`) are separate from
-print flags (`printGridlines`, `printHeadings`) and are verified against the
-worksheet model before save. Freeze-pane mutations likewise wait for
-`GetLocation()` readback and return normalized row/column counts.
-
-Gradient stops use `position: 0..100`; `angleDeg` is in degrees. Object and
-chart indexes are zero-based. All physical dimensions use millimetres and line
-widths use points. `inspectObjects` and `inspectCharts` can return the exact
-`raw` JSON accepted by later `fill: { raw }` or `line: { raw }` updates.
-The ready state publishes read-only runtime facts under
-`capabilities.runtime` and `capabilities.features.sheets`. Callers must use
-those facts instead of assuming that an API exists because its tool is present
-in the static contract. Unknown advanced capabilities are treated as
-unsupported. For example, `nativeTables.create: false` forbids structured-table
-creation, while `rangeStyleTables.create: true` permits ordinary header, border,
-alignment, fill, and optional-filter formatting without creating a ListObject.
-Likewise, unsupported chart deletion is removed from `capabilities.tools` and
-is rejected before mutation if a caller bypasses discovery.
-
-For a real exported-file regression, open a fresh localhost XLSX capability page
-and run:
+## Tests
 
 ```bash
-AI_BRIDGE_LIVE_FILE=<uuid>.xlsx \
-  python3 plugins/ai-bridge/test_sheets_ooxml_integration.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+  test_copilot_server.py test_contract_generation.py
+node --test \
+  test_bridge_protocol.js \
+  test_slides_sheets_bridges.js \
+  test_sheets_advanced_bridge.js
 ```
 
-The dedicated live test requires `AI_BRIDGE_LIVE_FILE` and fails rather than
-silently skipping when it is absent. It checks persisted OOXML fills,
-differential styles, conditional formatting, formulas, validation XML, screen
-gridlines, frozen panes, page orientation, strict values, and the `rangeStyle`
-result.
-
-## Persistence service
-
-Mutating commands create a checkpoint, edit the live document, call
-`Api.Save()`, and then force-save the current document back to the bundled
-example storage. These same-origin endpoints are used:
-
-- `POST /copilot-api/checkpoint`
-- `POST /copilot-api/forcesave`
-- `POST /copilot-api/history`
-- `POST /copilot-api/undo`
-- `POST /copilot-api/redo`
-- `POST /copilot-api/images/import`
-- `GET /copilot-api/images/<asset>?token=<signature>`
-
-`copilot_server.py` implements the endpoints for the example application. In a
-production integration, persist ONLYOFFICE callback statuses `6` and `2` in
-your own storage service. A successful force-save does not reload the live
-editor: the WebSocket session already contains the saved version, so the
-current page, selection, and scroll position remain intact. Undo and redo still
-reload because they replace the canonical file with another stored version.
-
-Every save result includes `persistence.status`: `saved` confirms a new file
-version, `no_changes` confirms that the editor had nothing pending, and
-`failed` is the only persistence failure. The legacy `persisted` boolean is
-retained for one compatibility cycle. CommandService error `4` is reported as
-`no_changes` only when the editor and storage state confirm that there was
-nothing to save.
-
-Imported assets are content-addressed under the example file directory's
-private `.ai-bridge-images` folder. Download signatures bind the asset,
-document identity, and expiry; URLs last 15 minutes and files are retained for
-24 hours. DOCX/PPTX insertion embeds the media into the document package, so
-the saved file does not depend on the temporary URL.
-
-## document-hub HTTPX Relay
-
-Production v1 exposes these document-scoped endpoints from `document-hub`:
-
-- `GET /api/v1/documents/{documentId}/ai/session`
-- `POST /api/v1/documents/{documentId}/ai/validate`
-- `POST /api/v1/documents/{documentId}/ai/execute`
-- `POST /api/v1/documents/{documentId}/ai/commit`
-
-Authentication is owned by `document-hub`. In normal mode all endpoints use
-`Authorization: Bearer <user-jwt>`. When `ANONYMOUS_ACCESS_ENABLED=true`, the
-same endpoints require no caller credential and every request runs as the fixed
-`Platform` principal. There is no public attach or binding endpoint. The
-`/bridge/internal/*` endpoints in this Relay remain an implementation detail,
-accept only the private `AI_RELAY_INTERNAL_SECRET`, and must not be exposed by
-Nginx.
-
-Word arguments are normalized before validation and idempotency fingerprinting.
-The machine-readable policy is `inputNormalization.word` in `public-api.json`;
-canonical fields win over deprecated aliases, and known enum spelling/case
-variants are converted to the contract value. Responses may include
-`argumentNormalizations` with paths and conversion kinds only. Unknown fields,
-implicit string-to-number/boolean coercion, suspicious twips-as-points values,
-and targetless destructive or pagination operations remain errors.
-
-The real document-hub editor page must remain open with its Relay fully ready.
-`GET ai/session` returns a short-lived signed `sessionLease` only after document
-ready, plugin capability probing, and save readiness are confirmed. Callers put
-that value in `X-AI-Session-Lease` for validate, execute, and commit. Those
-requests are pinned to the exact editor and Relay session; they never select a
-newer page. Page reload, Relay reconnect, contract change, or document-hub
-restart makes the lease stale before mutation. Stable `requestId` values
-deduplicate retries. A persistence failure after a possible mutation returns a
-`mutationReceipt`; commit retries only force-save and never replays the tool
-call.
-
-`host-bridge.js` enables this HTTP Relay by default only on loopback hosts.
-A non-loopback editor must set `window.aiBridgeOptions.httpRelay = true` before
-loading `host-bridge.js`, and the page must use HTTPS. The bundled first-party
-`editor-shell.js` performs this explicit opt-in while preserving any existing
-`aiBridgeOptions`; setting `httpRelay = false` still disables the Relay.
-
-The Relay writes one sanitized `[bridge-command]` JSON line for the first
-completion, failure, or timeout of each request. It reports the queue wait,
-editor round trip, total duration, method, and tool count. Editor registration
-also writes `[bridge-startup]` with relative host, iframe, app-ready,
-document-ready, and bridge-ready milestones. Neither log contains tool
-arguments, document content, results, credentials, Relay keys, or error bodies.
-Startup diagnostics remain private to the local page-to-Relay protocol and are
-not exposed by `getState()` or the sessions response.
-
-## Local run
-
-The production-style v1 stack is started from the sibling repository and brings
-up both `document-hub` and this DocumentServer image/configuration:
-
-```bash
-cd /Users/linlay/Project/document-hub
-docker compose --env-file .env -f deploy/compose.yml up -d --build
-```
-
-This publishes the portal on host loopback port 8090 and DocumentServer on 8091.
-The internal Relay is exposed only to the private Docker network on port 3001.
-Create and open documents through the portal; the old unauthenticated
-`/new-docx`, `/new-xlsx`, `/new-pptx`, UUID editor, and Basic Auth admin routes
-are disabled.
-
-For isolated plugin development only, `docker-compose.copilot.yml` can start the
-DocumentServer container by itself on `127.0.0.1:8091`:
-
-```bash
-docker compose -f docker-compose.copilot.yml up -d
-```
-
-That isolated service intentionally has no document business UI; use it only as
-a target for integration tests or connect it to `document-hub`.
-
-## Files
-
-- `config.json`: headless plugin registration.
-- `index.html`: script-only plugin entry point.
-- `plugin.js`: handshake, validation, command queue, save controls.
-- `host-bridge.js`: API exposed to the external Copilot page.
-- `local-guest.js`: stable browser-local guest identity and re-signing helper.
-- `client-sdk.js`: optional cross-origin iframe/popup client.
-- `public-api.d.ts`: TypeScript API declarations.
-- `public-api.json`: machine-readable API and tool contract.
-- `INTEGRATION.zh-CN.md`: complete external-project integration guide.
-- `PPTX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge P01-P77 capability matrix.
-- `XLSX-CAPABILITIES.zh-CN.md`: ONLYOFFICE 9.4 and ai-bridge X01-X78 capability matrix.
-- `bridges/*.js`: editor-specific Office API implementations.
-- `editor-shell.js`: first-party editor bootstrap and failure UI.
-- `copilot_server.py`: planning API, editor config, document storage, callbacks,
-  and version service.
-- `nginx-document-app.conf`: public editor routes and private storage routing.
-- `../../docker-compose.copilot.yml`: local deployment.
+Run document-hub's Go tests and frontend build for cross-repository changes.

@@ -76,6 +76,12 @@ function createHarness(options = {}) {
   const servicePaths = [];
   const serviceRequests = [];
   const hostRelayPaths = [];
+  const imageBaseUrl = Object.prototype.hasOwnProperty.call(options, "imageBaseUrl")
+    ? options.imageBaseUrl
+    : "/api/v1/editor-relay/images";
+  const persistenceBaseUrl = Object.prototype.hasOwnProperty.call(options, "persistenceBaseUrl")
+    ? options.persistenceBaseUrl
+    : "/api/v1/editor-relay/persistence";
   let reloadCount = 0;
   const documentElement = { dataset: {} };
   const sessionValues = new Map(Object.entries(options.sessionValues || {}));
@@ -112,18 +118,41 @@ function createHarness(options = {}) {
       getEditorConfig: () => editorConfig,
       clientOrigins: options.clientOrigins || [],
       httpRelay: options.httpRelay,
-      imageBaseUrl: options.imageBaseUrl,
-      persistenceBaseUrl: options.persistenceBaseUrl,
+      relayBaseUrl: options.relayBaseUrl,
+      imageBaseUrl,
+      persistenceBaseUrl,
       editorSessionId: options.editorSessionId,
       documentId: options.optionsDocumentId,
     },
   });
-  if (typeof options.hostFetch === "function") {
-    hostWindow.fetch = async (requestPath, requestOptions) => {
+  hostWindow.fetch = async (requestPath, requestOptions) => {
+    if (
+      options.interceptPersistence !== true
+      && persistenceBaseUrl
+      && requestPath.startsWith(`${persistenceBaseUrl}/`)
+    ) {
+      servicePaths.push(requestPath);
+      serviceRequests.push({ path: requestPath, requestOptions });
+      const configured = typeof options.serviceResponse === "function"
+        ? options.serviceResponse(requestPath)
+        : options.serviceResponse;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => configured || {
+          ok: true,
+          accepted: true,
+          persisted: true,
+          status: "saved",
+        },
+      };
+    }
+    if (typeof options.hostFetch === "function") {
       hostRelayPaths.push(requestPath);
       return options.hostFetch(requestPath, requestOptions);
-    };
-  }
+    }
+    throw new Error(`unexpected host request: ${requestPath}`);
+  };
 
   const pluginWindow = eventTarget({
     location: {
@@ -338,7 +367,7 @@ function importedImageResponse(overrides = {}) {
     ok: true,
     asset: {
       assetId,
-      path: `/copilot-api/images/${assetId}?token=signed-token`,
+      path: `/api/v1/editor-relay/images/${assetId}?token=signed-token`,
       mimeType: "image/png",
       widthPx: 400,
       heightPx: 200,
@@ -1177,6 +1206,8 @@ test("local Relay reports private startup timings and preserves editor event cal
 
   const harness = createHarness({
     hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     editorEvents: {
       onAppReady(event) {
         callbackCalls.push(["app", this, event]);
@@ -1248,6 +1279,7 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
     hostname: "office.test",
     protocol: "https:",
     httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     hostFetch: async requestPath => {
       if (requestPath.endsWith("/register")) {
         registerCalls += 1;
@@ -1293,6 +1325,7 @@ test("contract mismatch is terminal and reports one Relay state without register
   const harness = createHarness({
     hostname: "localhost",
     httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     dropPluginHello: true,
     pluginSetInterval: () => 0,
     pluginClearInterval: () => {},
@@ -1343,14 +1376,15 @@ test("contract mismatch is terminal and reports one Relay state without register
 test("Relay contract version mismatch is terminal and preserves server diagnostics", async () => {
   let registerCalls = 0;
   const mismatchDetails = {
-    expectedContractVersion: "0.2.1",
+    expectedContractVersion: "0.2.2",
     expectedContractSha256: "a".repeat(64),
-    receivedContractVersion: "0.2.1",
+    receivedContractVersion: "0.2.2",
     receivedContractSha256: "b".repeat(64),
   };
   const harness = createHarness({
     hostname: "localhost",
     httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     hostFetch: async requestPath => {
       assert.ok(requestPath.endsWith("/register"));
       registerCalls += 1;
@@ -1391,13 +1425,13 @@ test("Relay contract version mismatch is terminal and preserves server diagnosti
   );
 });
 
-test("explicit HTTP opt-in does not start Relay on a public host", async () => {
+test("HTTP Relay does not start without an explicit base path", async () => {
   const harness = createHarness({
     hostname: "office.test",
     protocol: "http:",
     httpRelay: true,
     hostFetch: async () => {
-      throw new Error("public HTTP must not start Relay");
+      throw new Error("Relay without a configured base path must not start");
     },
   });
 
@@ -1413,6 +1447,8 @@ test("superseded HTTP Relay stops without re-registering or reloading", async ()
   let pollCalls = 0;
   const harness = createHarness({
     hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     hostFetch: async requestPath => {
       if (requestPath.endsWith("/register")) {
         registerCalls += 1;
@@ -1449,6 +1485,8 @@ test("superseded HTTP Relay stops without re-registering or reloading", async ()
 test("first Relay credential failure schedules only one page reload", async () => {
   const harness = createHarness({
     hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     hostFetch: async requestPath => {
       assert.ok(requestPath.endsWith("/register"));
       return relayResponse(401, {
@@ -1475,6 +1513,8 @@ test("first Relay credential failure schedules only one page reload", async () =
 test("repeated Relay credential failure inside the guard window becomes terminal", async () => {
   const harness = createHarness({
     hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
     localValues: {
       "aiBridgeCredentialReloadAt:demo.docx|docx|word|user-1": String(Date.now()),
     },
@@ -1763,7 +1803,7 @@ test("public contract, plugin allow-lists, and all convenience methods stay alig
     const harness = createHarness({
       editorType,
       hostFetch: async requestPath => {
-        assert.equal(requestPath, "/copilot-api/images/import");
+        assert.equal(requestPath, "/api/v1/editor-relay/images/import");
         return importedImageResponse();
       },
     });
@@ -1988,17 +2028,29 @@ test("save/history/undo/redo controls are public and use the persistence service
   await harness.hostWindow.aiBridge.redo({ timeoutMs: 1000, requestId: "control-redo" });
 
   assert.deepEqual(harness.servicePaths, [
-    "/copilot-api/forcesave",
-    "/copilot-api/history",
-    "/copilot-api/undo",
-    "/copilot-api/redo",
+    "/api/v1/editor-relay/persistence/forcesave",
+    "/api/v1/editor-relay/persistence/history",
+    "/api/v1/editor-relay/persistence/undo",
+    "/api/v1/editor-relay/persistence/redo",
   ]);
+});
+
+test("persistence controls fail explicitly when the host service is not configured", async () => {
+  const harness = createHarness({ persistenceBaseUrl: "" });
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.save({ timeoutMs: 1000, requestId: "missing-persistence" }),
+    error => error && error.code === "PERSISTENCE_NOT_AVAILABLE",
+  );
+  assert.deepEqual(harness.servicePaths, []);
 });
 
 test("document-hub mode routes persistence through the authenticated host page", async () => {
   const requests = [];
   const harness = createHarness({
     persistenceBaseUrl: "/api/v1/editor-relay/persistence",
+    interceptPersistence: true,
     editorSessionId: "editor-session-1234567890",
     hostFetch: async (requestPath, requestOptions) => {
       requests.push({ path: requestPath, options: requestOptions });
@@ -2044,7 +2096,7 @@ test("host imports an image before sending the internal source to the plugin", a
   const harness = createHarness({
     hostFetch: async (requestPath, requestOptions) => {
       imports += 1;
-      assert.equal(requestPath, "/copilot-api/images/import");
+      assert.equal(requestPath, "/api/v1/editor-relay/images/import");
       assert.equal(requestOptions.headers.Authorization, "Bearer editor-token");
       assert.deepEqual(JSON.parse(requestOptions.body), {
         source: { type: "url", url: "https://images.test/photo.png" },
@@ -2066,7 +2118,7 @@ test("host imports an image before sending the internal source to the plugin", a
   assert.equal(harness.executedToolCalls.length, 1);
   const args = harness.executedToolCalls[0].arguments;
   assert.equal(args.source, undefined);
-  assert.equal(args._image.url, `https://app.test/copilot-api/images/${"a".repeat(64)}.png?token=signed-token`);
+  assert.equal(args._image.url, `https://app.test/api/v1/editor-relay/images/${"a".repeat(64)}.png?token=signed-token`);
   assert.equal(args._image.widthPx, 400);
   assert.equal(args._image.heightPx, 200);
 });
@@ -2076,7 +2128,7 @@ test("host safely imports slide, master, and layout background images before plu
   const harness = createHarness({
     editorType: "slide",
     hostFetch: async (requestPath, requestOptions) => {
-      assert.equal(requestPath, "/copilot-api/images/import");
+      assert.equal(requestPath, "/api/v1/editor-relay/images/import");
       imports += 1;
       assert.equal(requestOptions.headers.Authorization, "Bearer editor-token");
       return importedImageResponse({
@@ -2179,7 +2231,7 @@ test("failed background image import prevents checkpoint and plugin execution", 
   const harness = createHarness({
     editorType: "slide",
     hostFetch: async requestPath => {
-      assert.equal(requestPath, "/copilot-api/images/import");
+      assert.equal(requestPath, "/api/v1/editor-relay/images/import");
       return relayResponse(400, {
         ok: false,
         error: { code: "UNSUPPORTED_IMAGE_FORMAT", message: "不支持该背景图片格式" },
@@ -2209,7 +2261,7 @@ test("non-image background modes skip optional image import and invalid image mo
   const harness = createHarness({
     editorType: "slide",
     hostFetch: async requestPath => {
-      if (requestPath === "/copilot-api/images/import") imports += 1;
+      if (requestPath === "/api/v1/editor-relay/images/import") imports += 1;
       return importedImageResponse();
     },
   });
@@ -2263,11 +2315,11 @@ test("localhost host resolves the signed asset to an internal Data URL", async (
     hostname: "localhost",
     httpRelay: false,
     hostFetch: async requestPath => {
-      if (requestPath === "/copilot-api/images/import") return importedImageResponse({
+      if (requestPath === "/api/v1/editor-relay/images/import") return importedImageResponse({
         widthPx: 1,
         heightPx: 1,
       });
-      if (requestPath.startsWith("/copilot-api/images/")) {
+      if (requestPath.startsWith("/api/v1/editor-relay/images/")) {
         return {
           ok: true,
           status: 200,
@@ -2391,8 +2443,14 @@ test("editor save failures include a safe diagnostic phase", async () => {
 test("force-save failures report persistence phase and possible document mutation", async () => {
   const harness = createHarness({
     serviceResponse(path) {
-      if (path === "/copilot-api/forcesave") {
-        return { error: "持久化服务暂时失败" };
+      if (path === "/api/v1/editor-relay/persistence/forcesave") {
+        return {
+          ok: false,
+          error: {
+            code: "PERSISTENCE_FAILED",
+            message: "持久化服务暂时失败",
+          },
+        };
       }
       return { persisted: true, path };
     },
@@ -2419,7 +2477,7 @@ test("force-save failures report persistence phase and possible document mutatio
 test("force-save failed status is normalized as PERSISTENCE_FAILED", async () => {
   const harness = createHarness({
     serviceResponse(path) {
-      if (path === "/copilot-api/forcesave") {
+      if (path === "/api/v1/editor-relay/persistence/forcesave") {
         return {
           accepted: false,
           noChanges: false,
@@ -2452,7 +2510,7 @@ test("force-save failed status is normalized as PERSISTENCE_FAILED", async () =>
 test("force-save persists without reloading the live editor", async () => {
   const harness = createHarness({
     serviceResponse(path) {
-      if (path === "/copilot-api/forcesave") {
+      if (path === "/api/v1/editor-relay/persistence/forcesave") {
         return {
           accepted: true,
           persisted: true,
@@ -2478,9 +2536,9 @@ test("force-save persists without reloading the live editor", async () => {
   assert.equal(result.persistence.status, "saved");
   assert.equal(result.persistence.editorSaved, true);
   assert.equal(result.persistence.forceSave.commandError, 0);
-  const forceSaveRequest = harness.serviceRequests.find(item => item.path === "/copilot-api/forcesave");
+  const forceSaveRequest = harness.serviceRequests.find(item => item.path === "/api/v1/editor-relay/persistence/forcesave");
   assert.ok(forceSaveRequest);
-  const forceSavePayload = JSON.parse(forceSaveRequest.requestOptions.body);
+  const forceSavePayload = JSON.parse(forceSaveRequest.requestOptions.body).payload;
   assert.equal(Number.isFinite(forceSavePayload.editorSaveConfirmedAt), true);
   assert.ok(forceSavePayload.editorSaveConfirmedAt > 0);
   assert.equal(harness.reloadCount, 0);
@@ -2491,7 +2549,7 @@ test("force-save persists without reloading the live editor", async () => {
 test("explicit save persists without reloading the live editor", async () => {
   const harness = createHarness({
     serviceResponse(path) {
-      if (path === "/copilot-api/forcesave") {
+      if (path === "/api/v1/editor-relay/persistence/forcesave") {
         return {
           accepted: true,
           persisted: true,
@@ -2523,7 +2581,7 @@ test("explicit save persists without reloading the live editor", async () => {
 test("explicit save treats CommandService no-changes as persisted", async () => {
   const harness = createHarness({
     serviceResponse(path) {
-      if (path === "/copilot-api/forcesave") {
+      if (path === "/api/v1/editor-relay/persistence/forcesave") {
         return {
           accepted: false,
           noChanges: true,
@@ -4381,7 +4439,7 @@ test("word bridge inserts a proportional image at the current cursor", async () 
     name: "word_add_image",
     arguments: {
       _image: {
-        url: "https://app.test/copilot-api/images/asset.png?token=signed",
+        url: "https://app.test/api/v1/editor-relay/images/asset.png?token=signed",
         assetId: "asset.png",
         widthPx: 800,
         heightPx: 400,
@@ -4408,7 +4466,7 @@ test("word bridge targets a paragraph by index or searched occurrence", async ()
     paragraphs: ["说明", "目标 A", "目标 B"],
   });
   const image = {
-    url: "https://app.test/copilot-api/images/asset.png?token=signed",
+    url: "https://app.test/api/v1/editor-relay/images/asset.png?token=signed",
     assetId: "asset.png",
     widthPx: 300,
     heightPx: 600,
@@ -4436,7 +4494,7 @@ test("word bridge targets a paragraph by index or searched occurrence", async ()
 test("word bridge rejects conflicting or missing image targets without mutation", async () => {
   const harness = createWordBridgeHarness({ paragraphs: ["Alpha", "Beta"] });
   const image = {
-    url: "https://app.test/copilot-api/images/asset.png?token=signed",
+    url: "https://app.test/api/v1/editor-relay/images/asset.png?token=signed",
     widthPx: 100,
     heightPx: 100,
   };

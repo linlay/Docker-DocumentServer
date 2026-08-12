@@ -26,13 +26,10 @@ HOST_PATH = BRIDGE_ROOT / "host-bridge.js"
 CLIENT_PATH = BRIDGE_ROOT / "client-sdk.js"
 CONFIG_PATH = BRIDGE_ROOT / "config.json"
 INDEX_PATH = BRIDGE_ROOT / "index.html"
-COPILOT_SERVER_PATH = BRIDGE_ROOT / "copilot_server.py"
 STATIC_RUNTIME_PATHS = (
     BRIDGE_ROOT / "bridges" / "word-bridge.js",
     BRIDGE_ROOT / "bridges" / "slides-bridge.js",
     BRIDGE_ROOT / "bridges" / "sheets-bridge.js",
-    BRIDGE_ROOT / "editor-shell.js",
-    BRIDGE_ROOT / "local-guest.js",
 )
 ASSET_REVISION_PLACEHOLDER = "__AI_BRIDGE_ASSET_REVISION__"
 TYPE_START = "// <ai-bridge-generated:tool-arguments>"
@@ -276,18 +273,6 @@ def runtime_asset_sources(
         }
     )
     return sources
-
-
-def replace_editor_asset_revision(source: str, revision: str) -> str:
-    rendered, count = re.subn(
-        r'^EDITOR_ASSET_REVISION = "[^"]+"$',
-        f'EDITOR_ASSET_REVISION = "{revision}"',
-        source,
-        flags=re.MULTILINE,
-    )
-    if count != 1:
-        raise ValueError("copilot_server.py must define one EDITOR_ASSET_REVISION")
-    return rendered
 
 
 def json_literal(value: Any) -> str:
@@ -1551,10 +1536,6 @@ def build_artifacts(
         ASSET_REVISION_PLACEHOLDER,
         asset_revision,
     )
-    artifacts[COPILOT_SERVER_PATH] = replace_editor_asset_revision(
-        COPILOT_SERVER_PATH.read_text(encoding="utf-8"),
-        asset_revision,
-    )
     if zenmind_root is None:
         return artifacts
     if not zenmind_root.is_dir():
@@ -1657,10 +1638,36 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.1":
-        raise ValueError("public-api.json version must be 0.2.1")
+    if contract.get("version") != "0.2.2":
+        raise ValueError("public-api.json version must be 0.2.2")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
+    http_relay = (contract.get("transport") or {}).get("httpRelay") or {}
+    expected_transport = {
+        "externalBasePath": "/api/v1/editor-relay",
+        "internalBasePath": "/copilot-api/bridge/internal",
+        "imageBasePath": "/api/v1/editor-relay/images",
+        "persistenceBasePath": "/api/v1/editor-relay/persistence",
+        "requiresExplicitConfiguration": True,
+    }
+    if any(http_relay.get(key) != value for key, value in expected_transport.items()):
+        raise ValueError("public-api.json must describe the document-hub v1 Relay boundary")
+    if "httpRelaySchemas" in contract:
+        raise ValueError("public-api.json must not expose legacy HTTP Relay schemas")
+    errors = set(contract.get("errors") or [])
+    required_runtime_errors = {
+        "CONTRACT_MISMATCH",
+        "HTTP_RELAY_INVALID_RESPONSE",
+        "HTTP_RELAY_NETWORK_ERROR",
+        "MESSAGE_NOT_SUPPORTED",
+        "PERSISTENCE_NOT_AVAILABLE",
+        "PERSISTENCE_INVALID_RESPONSE",
+        "PERSISTENCE_TIMEOUT",
+    }
+    if not required_runtime_errors.issubset(errors):
+        raise ValueError("public-api.json must expose current browser runtime errors")
+    if {"MULTIPLE_ACTIVE_EDITORS", "SESSION_NOT_FOUND"} & errors:
+        raise ValueError("public-api.json still exposes legacy Relay errors")
     naming = contract.get("toolNaming") or {}
     expected_prefixes = {
         editor: config["prefix"]

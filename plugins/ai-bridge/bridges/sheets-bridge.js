@@ -197,17 +197,6 @@
     return number;
   }
 
-  function a1ColumnName(number) {
-    let remaining = Math.max(1, Number(number) || 1);
-    let result = "";
-    while (remaining > 0) {
-      const remainder = (remaining - 1) % 26;
-      result = String.fromCharCode(65 + remainder) + result;
-      remaining = Math.floor((remaining - 1) / 26);
-    }
-    return result;
-  }
-
   function a1LastCell(address) {
     const localAddress = String(address || "")
       .split("!")
@@ -219,30 +208,6 @@
     return {
       column: a1ColumnNumber(matched[1]),
       row: Number(matched[2]),
-    };
-  }
-
-  function freezeStateFromAddress(address) {
-    const lastCell = a1LastCell(address);
-    if (!lastCell) {
-      return {
-        locationAddress: null,
-        frozenRows: 0,
-        frozenColumns: 0,
-        topLeftCell: null,
-      };
-    }
-    const frozenRows = lastCell.column >= 16384 ? lastCell.row : (
-      lastCell.row >= 1048576 ? 0 : lastCell.row
-    );
-    const frozenColumns = lastCell.row >= 1048576 ? lastCell.column : (
-      lastCell.column >= 16384 ? 0 : lastCell.column
-    );
-    return {
-      locationAddress: String(address),
-      frozenRows: frozenRows,
-      frozenColumns: frozenColumns,
-      topLeftCell: a1ColumnName(frozenColumns + 1) + String(frozenRows + 1),
     };
   }
 
