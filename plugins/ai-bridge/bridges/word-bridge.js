@@ -47,6 +47,7 @@
     "appearance",
     "contentMode",
     "direction",
+    "displayMode",
     "format",
     "insertAt",
     "kind",
@@ -84,13 +85,13 @@
     "endnote", "even", "evenPage", "exact", "first", "footer", "footnote",
     "forms", "header", "heading", "hidden", "image", "inFront", "inline",
     "insertAttribute", "insertElement", "landscape", "latex", "left",
-    "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
+    "final", "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
     "number", "numbered", "numbering", "oddPage", "office", "oleObject",
     "page", "paragraph", "picture", "portrait", "previous", "protect",
-    "readOnly", "rejectAll", "relative", "remove", "removeAll",
+    "original", "readOnly", "rejectAll", "relative", "remove", "removeAll",
     "removeColumn", "removeRow", "reopen", "replace", "reply", "resolve",
     "right", "search", "set", "setImage", "setText", "shape", "smartArt",
-    "splitCell", "square", "start", "stop", "string", "subscript",
+    "setDisplay", "simple", "splitCell", "square", "start", "stop", "string", "subscript",
     "superscript", "table", "through", "tight", "top", "topAndBottom",
     "unicode", "unprotect", "up", "update", "updateAll", "updateAttribute",
     "updateElement", "updateTableOfFigures", "updateToc", "vba",
@@ -399,6 +400,20 @@
 
       if (name === "word_add_table" || name === "word_add_nested_table") {
         collectTableDataValidationErrors(index, name, args.data, add);
+      }
+
+      if (name === "word_manage_revisions") {
+        const action = String(args.action || "");
+        const displayMode = args.displayMode;
+        if (action === "setDisplay" && displayMode === undefined) {
+          add(index, name, "displayMode", "displayMode is required when action is setDisplay", "required");
+        }
+        if (
+          displayMode !== undefined
+          && ["edit", "simple", "final", "original"].indexOf(String(displayMode)) === -1
+        ) {
+          add(index, name, "displayMode", "displayMode has an unsupported value", "enum");
+        }
       }
 
       if (name === "word_manage_section" && String(args.action || "configure") === "create") {
@@ -740,6 +755,110 @@
         restriction: mode,
       }],
     };
+  }
+
+  function inspectRevisionTracking() {
+    return new Promise(function (resolve, reject) {
+      Asc.plugin.callCommand(
+        function () {
+          try {
+            var doc = Api.GetDocument();
+            return JSON.stringify({
+              ok: true,
+              tracking: typeof doc.IsTrackRevisions === "function"
+                ? Boolean(doc.IsTrackRevisions())
+                : undefined,
+            });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              error: error && error.message ? error.message : String(error),
+            });
+          }
+        },
+        false,
+        false,
+        function (rawResult) {
+          try {
+            resolve(parseResult(rawResult).tracking);
+          } catch (error) {
+            reject(error);
+          }
+        },
+      );
+    });
+  }
+
+  function applyRevisionDisplayMode(displayMode) {
+    return new Promise(function (resolve, reject) {
+      if (!window.Asc || !Asc.plugin || typeof Asc.plugin.executeMethod !== "function") {
+        reject(new Error("当前 ONLYOFFICE 版本不支持设置审阅显示模式"));
+        return;
+      }
+      try {
+        const accepted = Asc.plugin.executeMethod("SetDisplayModeInReview", [displayMode], function (result) {
+          if (
+            result === false
+            || (result && typeof result === "object" && (result.error || result.success === false))
+          ) {
+            reject(new Error(
+              result && result.error
+                ? String(result.error)
+                : "ONLYOFFICE 无法设置审阅显示模式",
+            ));
+            return;
+          }
+          resolve();
+        });
+        if (accepted === false) reject(new Error("ONLYOFFICE 拒绝设置审阅显示模式"));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  async function executeManageRevisions(call) {
+    const args = getArgs(call);
+    const action = String(args.action || "");
+    const supportedActions = new Set(["start", "stop", "acceptAll", "rejectAll", "setDisplay"]);
+    const supportedDisplayModes = new Set(["edit", "simple", "final", "original"]);
+    if (!supportedActions.has(action)) {
+      throw new Error("word_manage_revisions.action 不受支持");
+    }
+    const hasDisplayMode = args.displayMode !== undefined;
+    const displayMode = hasDisplayMode ? String(args.displayMode) : "";
+    if (action === "setDisplay" && !hasDisplayMode) {
+      throw new Error("setDisplay.displayMode 不能为空");
+    }
+    if (hasDisplayMode && !supportedDisplayModes.has(displayMode)) {
+      throw new Error("word_manage_revisions.displayMode 必须是 edit、simple、final 或 original");
+    }
+
+    let result;
+    if (action === "setDisplay") {
+      result = {
+        ok: true,
+        editorType: "word",
+        changed: 0,
+        needsSave: false,
+        results: [{
+          name: call.name,
+          action,
+          tracking: await inspectRevisionTracking(),
+        }],
+      };
+    } else {
+      result = await executeCallCommand([{
+        name: call.name,
+        arguments: { action },
+      }]);
+    }
+
+    if (hasDisplayMode) {
+      await applyRevisionDisplayMode(displayMode);
+      result.results[0].displayModeApplied = displayMode;
+    }
+    return result;
   }
 
   function executeMacroTool(call) {
@@ -4985,6 +5104,9 @@
         } else if (call && call.name === "word_set_protection") {
           await flushCallCommandBatch();
           mergeExecutionResult(aggregate, await executeEditingRestrictions(call));
+        } else if (call && call.name === "word_manage_revisions") {
+          await flushCallCommandBatch();
+          mergeExecutionResult(aggregate, await executeManageRevisions(call));
         } else if (call && (call.name === "word_inspect_macros" || call.name === "word_set_macros")) {
           await flushCallCommandBatch();
           mergeExecutionResult(aggregate, await executeMacroTool(call));
@@ -5006,6 +5128,10 @@
           && (
             call.name === "word_replace_text"
             || call.name === "word_set_protection"
+            || (
+              call.name === "word_manage_revisions"
+              && String(getArgs(call).action || "") !== "setDisplay"
+            )
             || call.name === "word_set_macros"
           )
         );

@@ -42,6 +42,7 @@ EDITOR_CONFIG = {
         "toml": "online-docx-bridge.toml",
         "site": "online-docx-bridge",
         "fileType": "docx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "prefix": "word_",
         "label": "Word",
         "sessionAction": "session",
@@ -53,6 +54,7 @@ EDITOR_CONFIG = {
         "toml": "online-pptx-bridge.toml",
         "site": "online-pptx-bridge",
         "fileType": "pptx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "prefix": "slides_",
         "label": "Slides",
         "sessionAction": "session",
@@ -64,6 +66,7 @@ EDITOR_CONFIG = {
         "toml": "online-xlsx-bridge.toml",
         "site": "online-xlsx-bridge",
         "fileType": "xlsx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "prefix": "sheets_",
         "label": "Sheets",
         "sessionAction": "session",
@@ -1174,6 +1177,17 @@ def document_path_source(action: str) -> str:
     return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
 
 
+def document_download_path_source() -> str:
+    command = (
+        "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
+        "case \"$document_id\" in "
+        "????????-????-4???-[89ab]???-????????????) ;; *) exit 64 ;; esac; "
+        "case \"$document_id\" in *[!0-9a-f-]*) exit 64 ;; esac; "
+        'printf "%s" "/api/v1/documents/$document_id/download"'
+    )
+    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
+
+
 def local_image_data_url_source() -> str:
     command = (
         'image_path=$PPTX_IMAGE_PATH; '
@@ -1222,6 +1236,7 @@ def render_toml(
 ) -> str:
     config = EDITOR_CONFIG[editor]
     file_type = config["fileType"]
+    mime_type = config["mimeType"]
     label = config["label"]
     session_action = config["sessionAction"]
     base_url = normalize_httpx_base_url(httpx_base_url)
@@ -1272,6 +1287,46 @@ def render_toml(
                 f'editorUrl:("{base_url}/documents/" + .id)}}'
                 "'''"
             ),
+            "",
+            "[actions.upload]",
+            f'description = "上传本地 {file_type.upper()}，返回真实文档 UUID 和编辑器地址"',
+            'method = "POST"',
+            'path = "/api/v1/documents/upload"',
+            "retries = 0",
+            "multipart = [",
+            '  { name = "title", value = { from = "param", key = "title", default = "" } },',
+            (
+                '  { name = "file", file = { from = "param", key = "file_path" }, '
+                f'content_type = "{mime_type}", max_bytes = 209715200 }}'
+            ),
+            "]",
+            "expect_status = 201",
+            "params = [",
+            f'  {{ name = "file_path", type = "string", required = true, description = "本地 {file_type.upper()} 绝对路径" }},',
+            f'  {{ name = "title", type = "string", required = false, description = "上传后的 {file_type.upper()} 文档标题；省略时使用文件名" }}',
+            "]",
+            'extract_type = "jq"',
+            (
+                "extract_expr = '''.body | "
+                f'{{documentId:.id,fileName:(.id + ".{file_type}"),'
+                f'editorUrl:("{base_url}/documents/" + .id)}}'
+                "'''"
+            ),
+            "",
+            "[actions.download]",
+            f'description = "把当前持久化 {file_type.upper()} 版本安全下载到本地；默认不覆盖"',
+            'method = "GET"',
+            f"path = {document_download_path_source()}",
+            "expect_status = 200",
+            (
+                'download = { path = { from = "param", key = "output_path" }, '
+                'overwrite = { from = "param", key = "overwrite", default = false }, '
+                "max_bytes = 209715200 }"
+            ),
+            "params = [",
+            f'  {{ name = "output_path", type = "string", required = true, description = "本地 {file_type.upper()} 输出路径；父目录必须已存在" }},',
+            '  { name = "overwrite", type = "boolean", required = false, description = "显式允许原子替换已有文件", example = false }',
+            "]",
             "",
         ]
     )
@@ -1638,8 +1693,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.2":
-        raise ValueError("public-api.json version must be 0.2.2")
+    if contract.get("version") != "0.2.3":
+        raise ValueError("public-api.json version must be 0.2.3")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}

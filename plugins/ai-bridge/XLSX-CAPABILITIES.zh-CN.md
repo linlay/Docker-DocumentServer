@@ -3,7 +3,7 @@
 适用版本：
 
 - ONLYOFFICE DocumentServer `9.4.0-129`
-- ai-bridge `0.2.2`
+- ai-bridge `0.2.3`
 - Spreadsheet API 以 ONLYOFFICE 9.4 官方 Office JavaScript API 为稳定执行边界
 
 状态说明：
@@ -18,7 +18,7 @@
 
 ## 工作簿与工作表
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X01 | 工作簿创建、打开、保存 | ✅ | 🟨 | `save()` 保存当前工作簿；创建、打开和切换文件属于宿主文档服务，不由当前文档内插件完成 |
 | X02 | 工作表创建、删除、复制、重命名 | ✅ | ✅ | `addSheet`、`deleteSheet`、`renameSheet`、`manageSheet({action:"copy"})` |
@@ -29,7 +29,7 @@
 
 ## 单元格与区域
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X07 | 单元格文本 | ✅ | ✅ | `setValues`、`inspectRange` |
 | X08 | 整数和小数 | ✅ | ✅ | `setValues` |
@@ -46,7 +46,7 @@
 
 ## 单元格样式
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X19 | 字体、字号、颜色 | ✅ | ✅ | `formatRange`；单元格颜色统一使用 `ApiColor`，可通过 `inspectRange({includeFormat:true})` 读回 |
 | X20 | 粗体、斜体、下划线 | ✅ | ✅ | `formatRange`；同时支持删除线 |
@@ -62,7 +62,7 @@
 
 ## 计算功能
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X30 | 公式 | ✅ | ✅ | `setFormula` 标量只允许单格；多格必须使用与目标区域严格同尺寸的二维公式矩阵，或显式 `fillDown` / `fillRight` |
 | X31 | 函数 | ✅ | ✅ | 通过公式调用 ONLYOFFICE 支持的工作表函数 |
@@ -77,7 +77,7 @@
 
 ## 数据组织
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X40 | 排序 | ✅ | ✅ | `sort`，最多三个排序键 |
 | X41 | 自动筛选 | ✅ | ✅ | `filter` 的 `set`、`showAll`、`reapply` |
@@ -89,7 +89,7 @@
 
 ## 数据规则
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X47 | 条件格式 | ✅ | ✅ | `manageConditionalFormat`；公共别名如 `lessThan` 会严格归一化为 ONLYOFFICE 的 `xlLess`，可读回规则 |
 | X48 | 数据验证 | ✅ | ✅ | `manageValidation` 严格校验类型/公式，并由 `inspectRange({includeValidation:true})` 读回完整 getter 结果 |
@@ -99,7 +99,7 @@
 
 ## 数据分析
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X52 | 数据透视表 | ✅ | ✅ | `inspectPivots`、`managePivot` 支持创建、字段、值字段、样式、刷新和清空 |
 | X53 | 数据透视图 | 🟨 | 🟨 | 可对透视结果区域创建普通图表；无独立 PivotChart 对象 API |
@@ -110,7 +110,7 @@
 
 ## 图形与对象
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X58 | 图片 | ✅ | ✅ | `manageDrawing({action:"addImage"})`；HTTPS/Data URL 先由宿主页安全导入 |
 | X59 | 图表 | ✅ | 🟨 | `inspectCharts`、`addChart`、`updateChart`；`deleteChart` 和创建时追加独立系列按 `features.sheets.charts` 动态公布，默认 CE 基线不假定可用 |
@@ -123,7 +123,7 @@
 
 ## 窗口与打印
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X66 | 冻结窗格 | ✅ | ✅ | `inspectFreezePanes`、`manageFreezePanes`；`freezeRows(count)` / `freezeColumns(count)` 冻结前 N 行/列，`freezeAt(range)` 的 range 表示实际冻结区域；变更会等待 `GetLocation()` 异步读回并返回 `verified:true` |
 | X67 | 拆分窗口 | ⛔ | ⛔ | ONLYOFFICE 9.4 无 Excel 拆分窗口等价能力 |
@@ -142,15 +142,15 @@
 
 ## 安全与扩展
 
-| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.2 | Bridge 入口与说明 |
+| ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
 | X76 | 工作表保护 | ✅ | 🟨 | `inspectProtectedRanges`、`manageProtectedRanges` 支持协作受保护区域和用户权限；不等同于带密码的整表保护 |
 | X77 | 工作簿保护 | 🟨 | ⚪ | 9.4 文档化 Spreadsheet API 无工作簿结构/窗口保护方法；文件级访问控制应由宿主服务负责 |
 | X78 | 宏 | 🟨 | 🟨 | `inspectMacros`、`setMacros` 管理 ONLYOFFICE JavaScript 宏；可读取 VBA 源信息，但 ONLYOFFICE 不执行 VBA |
 
-## ai-bridge 0.2.2 Sheets 能力域
+## ai-bridge 0.2.3 Sheets 能力域
 
-除原有值、公式、格式、工作表和图表工具外，0.2.2 新增：
+0.2.2 已新增下列 Sheets 能力，0.2.3 继续保持兼容：
 
 - 区域深度检查、数组公式、行列/区域操作、富文本。
 - 工作表复制/顺序/可见性、定义名称、公式与透视表重算。
@@ -163,7 +163,7 @@
 运行时会检查目标方法是否真实存在。社区版或特定许可缺少的方法会返回明确错误，
 不会把“方法不存在”“返回 `false`”或“对象未创建”报告为成功。
 
-0.2.2 在 attach/ready 结果中发布运行时版本与 Sheets 功能开关，按实际能力过滤工具；
+0.2.3 在 attach/ready 结果中发布运行时版本与 Sheets 功能开关，按实际能力过滤工具；
 将普通区域样式与原生 ListObject 明确分离，移除 `FormatAsTable` 降级；增加条件格式
 运行时不兼容、图表部分写入和保存三态结果，并保留 Sheets 批次结构化失败详情。
 `POST /copilot-api/bridge/validate` 会在投递编辑器命令之前完成 schema 与语义预检。

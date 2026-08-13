@@ -81,7 +81,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.2";
+  contractVersion?: "0.2.3";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -104,10 +104,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.2";
+  version: "0.2.3";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.2";
+  contractVersion: "0.2.3";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -155,7 +155,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.2";
+  contractVersion: "0.2.3";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -2625,8 +2625,9 @@ export type AiBridgeGeneratedWordManageCommentsArgs = {
   userId?: string;
 };
 export type AiBridgeGeneratedWordManageRevisionsArgs = {
-  action: "start" | "stop" | "acceptAll" | "rejectAll";
-};
+  action: "start" | "stop" | "acceptAll" | "rejectAll" | "setDisplay";
+  displayMode?: "edit" | "simple" | "final" | "original";
+} & ({ action: "setDisplay"; displayMode: "edit" | "simple" | "final" | "original"; } | { action?: Exclude<"start" | "stop" | "acceptAll" | "rejectAll" | "setDisplay", "setDisplay">; });
 export type AiBridgeGeneratedWordSetProtectionArgs = {
   action: "protect" | "unprotect";
   mode?: "readOnly" | "comments" | "forms";
@@ -8741,7 +8742,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.2";
+  readonly version: "0.2.3";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

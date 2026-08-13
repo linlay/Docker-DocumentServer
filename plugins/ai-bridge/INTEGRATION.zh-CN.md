@@ -41,9 +41,15 @@ const state = await window.aiBridge.getState();
 const inspected = await window.aiBridge.word.inspect({ maxChars: 5000 });
 
 await window.aiBridge.executeBatch([
+  { name: "manage_revisions", arguments: { action: "start", displayMode: "edit" } },
   { name: "replace_text", arguments: { search: "旧文本", replace: "新文本" } },
 ]);
 ```
+
+审阅工作流默认先调用 `manage_revisions({action:"start", displayMode:"edit"})`：
+`start/stop` 只控制是否记录修订，`setDisplay` 只控制 `edit/simple/final/original`
+显示。Bridge 会等待 ONLYOFFICE 显示模式回调成功后才执行同批后续修改；显示失败时
+整批立即停止。AI 修改完成后不自动调用 `stop`。
 
 公开批量工具名称不带 `word_`、`slides_`、`sheets_` 前缀。兼容字段
 `args`、`action` 和别名 `window.onlyofficeAI` 继续保留。

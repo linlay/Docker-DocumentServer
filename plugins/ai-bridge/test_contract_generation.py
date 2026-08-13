@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.2")
+        self.assertEqual(self.contract["version"], "0.2.3")
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -459,21 +459,21 @@ class ContractGenerationTests(unittest.TestCase):
 
     def test_asset_revision_is_content_addressed_and_order_independent(self) -> None:
         first = sync_contract.compute_asset_revision(
-            "0.2.2",
+            "0.2.3",
             {"b.js": "second\n", "a.js": "first\n"},
         )
         reordered = sync_contract.compute_asset_revision(
-            "0.2.2",
+            "0.2.3",
             {"a.js": "first\n", "b.js": "second\n"},
         )
         changed = sync_contract.compute_asset_revision(
-            "0.2.2",
+            "0.2.3",
             {"a.js": "first\n", "b.js": "changed\n"},
         )
 
         self.assertEqual(first, reordered)
         self.assertNotEqual(first, changed)
-        self.assertRegex(first, r"^0\.2\.2-[0-9a-f]{64}$")
+        self.assertRegex(first, r"^0\.2\.3-[0-9a-f]{64}$")
 
     def test_runtime_asset_revision_covers_every_browser_bridge(self) -> None:
         artifacts = sync_contract.build_artifacts(self.contract, None)
@@ -484,7 +484,7 @@ class ContractGenerationTests(unittest.TestCase):
             artifacts[sync_contract.INDEX_PATH],
         )
         self.assertEqual(index_revisions, [revision] * 4)
-        self.assertRegex(revision, r"^0\.2\.2-[0-9a-f]{64}$")
+        self.assertRegex(revision, r"^0\.2\.3-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
             artifacts[sync_contract.CONFIG_PATH],
@@ -557,6 +557,18 @@ class ContractGenerationTests(unittest.TestCase):
                 )
                 self.assertIn(f"[actions.{session_action}]", rendered)
                 self.assertIn("[actions.create]", rendered)
+                self.assertIn("[actions.upload]", rendered)
+                self.assertIn("[actions.download]", rendered)
+                self.assertIn('path = "/api/v1/documents/upload"', rendered)
+                self.assertIn("multipart = [", rendered)
+                self.assertIn("max_bytes = 209715200", rendered)
+                self.assertIn("/api/v1/documents/$document_id/download", rendered)
+                download_action = rendered.split("[actions.download]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                self.assertIn('key = "output_path"', download_action)
+                self.assertIn('key = "overwrite", default = false', download_action)
+                self.assertNotIn("extract_type", download_action)
                 self.assertIn("[actions.validate_batch]", rendered)
                 self.assertIn("[actions.execute_batch]", rendered)
                 self.assertIn('key = "arguments_json"', rendered)
@@ -714,7 +726,7 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(skill_path, artifacts)
                 self.assertIn(toml_path, artifacts)
                 self.assertIn(
-                    '  version: "0.2.2"',
+                    '  version: "0.2.3"',
                     artifacts[skill_path],
                 )
                 self.assertIn(
@@ -736,6 +748,8 @@ class ContractGenerationTests(unittest.TestCase):
                 expected_actions = {
                     "health",
                     "create",
+                    "upload",
+                    "download",
                     "session",
                     "get_state",
                     "validate_batch",

@@ -50,9 +50,16 @@ must be explicit same-origin paths.
 await window.aiBridge.ready();
 const result = await window.aiBridge.word.inspect({ maxChars: 5000 });
 await window.aiBridge.executeBatch([
+  { name: "manage_revisions", arguments: { action: "start", displayMode: "edit" } },
   { name: "replace_text", arguments: { search: "old", replace: "new" } },
 ]);
 ```
+
+`word.manageRevisions` / public `manage_revisions` keeps revision tracking and
+review display independent. `start` and `stop` toggle tracking; `setDisplay`
+changes only `edit`, `simple`, `final`, or `original` display. When a display
+mode is supplied, the bridge waits for `SetDisplayModeInReview` before running
+the next tool call. Existing calls without `displayMode` keep their old behavior.
 
 Tool names are unprefixed on public Relay and batch envelopes. Direct
 editor-specific methods remain grouped under `word`, `slides`, and `sheets`.

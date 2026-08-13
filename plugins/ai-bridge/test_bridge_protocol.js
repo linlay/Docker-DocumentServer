@@ -424,10 +424,12 @@ function createWordBridgeHarness(options = {}) {
   const createdSectionParagraphs = [];
   const appliedStyles = [];
   const fieldInstructions = [];
+  const revisionEvents = [];
   const scope = {};
   const styles = new Map();
   const internalStyles = [];
   let historyPoints = 0;
+  let revisionTracking = Boolean(options.revisionTracking);
 
   const coreFields = [
     "Title", "Subject", "Creator", "Description", "Keywords", "Category",
@@ -903,6 +905,27 @@ function createWordBridgeHarness(options = {}) {
       historyPoints += 1;
       return true;
     },
+    SetAssistantTrackRevisions(value) {
+      if (options.setTrackRevisionsAccepted === false) return false;
+      revisionTracking = Boolean(value);
+      revisionEvents.push({ type: "tracking", value: revisionTracking });
+      return true;
+    },
+    SetTrackRevisions(value) {
+      if (options.setTrackRevisionsAccepted === false) return false;
+      revisionTracking = Boolean(value);
+      revisionEvents.push({ type: "tracking", value: revisionTracking });
+      return true;
+    },
+    IsTrackRevisions() { return revisionTracking; },
+    AcceptAllRevisionChanges() {
+      revisionEvents.push({ type: "acceptAll" });
+      return options.acceptAllRevisionsAccepted !== false;
+    },
+    RejectAllRevisionChanges() {
+      revisionEvents.push({ type: "rejectAll" });
+      return options.rejectAllRevisionsAccepted !== false;
+    },
   };
   if (options.nativeSearchAndReplace) {
     document.SearchAndReplace = function (properties) {
@@ -976,12 +999,19 @@ function createWordBridgeHarness(options = {}) {
       },
       executeMethod(name, args, callback) {
         executeMethodCalls.push({ name, args: JSON.parse(JSON.stringify(args)) });
-        if (options.executeMethodAccepted === false) return false;
+        const acceptedByName = options.executeMethodAcceptedByName || {};
+        if (
+          options.executeMethodAccepted === false
+          || acceptedByName[name] === false
+        ) return false;
         if (name === "SearchAndReplace") {
           for (const paragraph of documentParagraphs) {
             paragraph.text = replaceLiteral(paragraph.text, args[0]);
           }
           syncDocumentText();
+        }
+        if (name === "SetDisplayModeInReview") {
+          revisionEvents.push({ type: "display", value: args[0] });
         }
         const responses = options.executeMethodResponses || {};
         queueMicrotask(() => callback(Object.prototype.hasOwnProperty.call(responses, name) ? responses[name] : undefined));
@@ -1010,6 +1040,7 @@ function createWordBridgeHarness(options = {}) {
     createdStyles,
     appliedStyles,
     fieldInstructions,
+    revisionEvents,
     get text() { return documentText; },
     get paragraphs() { return documentParagraphs.map(paragraph => paragraph.text); },
     get paragraphObjects() { return documentParagraphs; },
@@ -4673,4 +4704,111 @@ test("word bridge rejects conflicting or missing image targets without mutation"
 
   assert.equal(harness.createdImages.length, 0);
   assert.ok(harness.paragraphObjects.every(paragraph => paragraph.drawings.length === 0));
+});
+
+test("word revision control keeps tracking and display mode independent in batch order", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["旧术语"] });
+  const result = await harness.bridge.execute([
+    {
+      name: "word_manage_revisions",
+      arguments: { action: "start", displayMode: "edit" },
+    },
+    {
+      name: "word_set_paragraph_text",
+      arguments: { paragraphIndex: 1, text: "新术语" },
+    },
+  ]);
+
+  assert.equal(result.changed, 2);
+  assert.equal(result.needsSave, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.results[0])), {
+    name: "word_manage_revisions",
+    action: "start",
+    tracking: true,
+    displayModeApplied: "edit",
+  });
+  assert.deepEqual(harness.revisionEvents, [
+    { type: "tracking", value: true },
+    { type: "display", value: "edit" },
+  ]);
+  assert.equal(harness.paragraphs[0], "新术语");
+  assert.equal(harness.executeMethodCalls[0].name, "SetDisplayModeInReview");
+  assert.deepEqual(harness.executeMethodCalls[0].args, ["edit"]);
+  const tracking = await harness.bridge.execute([{
+    name: "word_manage_revisions",
+    arguments: { action: "setDisplay", displayMode: "simple" },
+  }]);
+  assert.equal(tracking.changed, 0);
+  assert.equal(tracking.needsSave, false);
+  assert.equal(tracking.results[0].tracking, true);
+  assert.equal(tracking.results[0].displayModeApplied, "simple");
+});
+
+test("word revision display supports every mode and old start/stop calls stay compatible", async () => {
+  const harness = createWordBridgeHarness();
+  const started = await harness.bridge.execute([{
+    name: "word_manage_revisions",
+    arguments: { action: "start" },
+  }]);
+  assert.equal(started.results[0].tracking, true);
+  assert.equal(started.results[0].displayModeApplied, undefined);
+
+  for (const displayMode of ["edit", "simple", "final", "original"]) {
+    const displayed = await harness.bridge.execute([{
+      name: "word_manage_revisions",
+      arguments: { action: "setDisplay", displayMode },
+    }]);
+    assert.equal(displayed.results[0].displayModeApplied, displayMode);
+    assert.equal(displayed.results[0].tracking, true);
+  }
+
+  const stopped = await harness.bridge.execute([{
+    name: "word_manage_revisions",
+    arguments: { action: "stop" },
+  }]);
+  assert.equal(stopped.results[0].tracking, false);
+  assert.equal(stopped.results[0].displayModeApplied, undefined);
+});
+
+test("word revision display validation and callback rejection stop following edits", async () => {
+  const invalidHarness = createWordBridgeHarness({ paragraphs: ["未修改"] });
+  await assert.rejects(
+    invalidHarness.bridge.execute([{
+      name: "word_manage_revisions",
+      arguments: { action: "setDisplay" },
+    }]),
+    error => error.code === "INVALID_TOOL_ARGUMENTS"
+      && error.details.partialMutationPossible === false,
+  );
+  await assert.rejects(
+    invalidHarness.bridge.execute([{
+      name: "word_manage_revisions",
+      arguments: { action: "start", displayMode: "markup" },
+    }]),
+    error => error.code === "INVALID_TOOL_ARGUMENTS"
+      && error.details.partialMutationPossible === false,
+  );
+
+  const rejectedHarness = createWordBridgeHarness({
+    paragraphs: ["未修改"],
+    executeMethodResponses: {
+      SetDisplayModeInReview: { success: false, error: "display callback failed" },
+    },
+  });
+  await assert.rejects(
+    rejectedHarness.bridge.execute([
+      {
+        name: "word_manage_revisions",
+        arguments: { action: "start", displayMode: "edit" },
+      },
+      {
+        name: "word_set_paragraph_text",
+        arguments: { paragraphIndex: 1, text: "不应修改" },
+      },
+    ]),
+    error => /display callback failed/.test(error.message)
+      && error.details.toolCallIndex === 0
+      && error.details.partialMutationPossible === true,
+  );
+  assert.equal(rejectedHarness.paragraphs[0], "未修改");
 });

@@ -177,7 +177,7 @@ class ContractAlignmentTests(unittest.TestCase):
         config_revision = plugin_config["variations"][0]["url"].split("?v=", 1)[1]
 
         self.assertEqual(revisions, [config_revision] * 4)
-        self.assertRegex(config_revision, r"^0\.2\.2-[0-9a-f]{64}$")
+        self.assertRegex(config_revision, r"^0\.2\.3-[0-9a-f]{64}$")
         for relative_path in ("README.md", "INTEGRATION.zh-CN.md"):
             with self.subTest(path=relative_path):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
@@ -255,6 +255,24 @@ class ContractAlignmentTests(unittest.TestCase):
         self.assertEqual(
             copilot_server.validate_editor_tool_calls("slide", valid_slide_calls),
             [],
+        )
+        self.assertEqual(
+            copilot_server.validate_editor_tool_calls(
+                "word",
+                [{
+                    "name": "word_manage_revisions",
+                    "arguments": {"action": "setDisplay", "displayMode": "edit"},
+                }],
+            ),
+            [],
+        )
+        revision_errors = copilot_server.validate_editor_tool_calls(
+            "word",
+            [{"name": "word_manage_revisions", "arguments": {"action": "setDisplay"}}],
+        )
+        self.assertEqual(
+            [(error["path"], error["keyword"]) for error in revision_errors],
+            [("arguments.displayMode", "required")],
         )
 
         compatibility_and_invalid_calls = [

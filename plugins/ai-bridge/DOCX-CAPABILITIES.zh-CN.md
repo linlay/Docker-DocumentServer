@@ -114,7 +114,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 | 编号 | 功能 | 状态 | ai-bridge 实现与边界 |
 |---|---|---|---|
 | D61 | 批注（高级） | 待导出验收 | 添加后即时检查 `GetQuoteText()` 并返回 `anchored/quoteText`；管理操作支持回复、编辑、删除、全部删除、解决和重新打开。最终还需导出 OOXML 同时存在 range start/end/reference。 |
-| D62 | 修订记录（高级） | 已实现 | 开启/停止 AI 修订跟踪，并通过 `word_inspect_advanced` 读取 review report。 |
+| D62 | 修订记录（高级） | 已实现 | `word_manage_revisions` 的 `start`/`stop` 独立控制是否记录修订；可选 `displayMode=edit/simple/final/original` 通过稳定插件方法等待应用审阅显示，`setDisplay` 可只改变显示而不改变跟踪状态。默认 AI 审阅工作流使用 `start + edit`，修改后保持跟踪开启，并通过 `word_inspect_advanced` 读取 review report。 |
 | D63 | 接受、拒绝修订（高级） | 有限实现 | 支持接受全部或拒绝全部；公开 API 没有按单条 revision ID 接受/拒绝的方法。 |
 | D64 | 文档保护（高级） | 有限实现 | `word_set_protection` 支持 readOnly、comments、forms 和解除限制；公开插件方法不支持设置密码。 |
 | D65 | 内容控件、复选框（高级） | 已实现 | 支持块级、行内、复选框、组合框、下拉列表、日期、图片内容控件，以及列表默认值、日期/格式、外观、更新、锁定、勾选、清空和删除。 |
@@ -131,7 +131,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 
 ## 对外 Word 工具
 
-0.2.1 的 Bridge 内部 Word 工具共 50 个（Skill/HTTPX 公共 action 使用无前缀名称）：
+0.2.3 的 Bridge 内部 Word 工具共 50 个（Skill/HTTPX 公共 action 使用无前缀名称）：
 
 ```text
 word_inspect                    word_replace_text

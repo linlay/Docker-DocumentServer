@@ -4,14 +4,14 @@
     "zh": "ai-bridge"
   },
   "guid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "variations": [
     {
       "description": "Headless execution bridge for an external AI copilot.",
       "descriptionLocale": {
         "zh": "供外部 Copilot 调用的无界面文档执行桥。"
       },
-      "url": "index.html?v=0.2.2-b4b072d126c7e5ce7c4193dbc93c89072f762a505b453d61bc9b389f65e57f54",
+      "url": "index.html?v=0.2.3-ddbef6ef8f7a194f3d9589df6662d9dc7159866830b38a91a90c08102b27ca05",
       "icons": [
         "resources/icon.svg"
       ],
