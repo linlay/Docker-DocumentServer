@@ -1115,7 +1115,7 @@
               var paragraphs = allParagraphs();
               if (hasImageParagraphTarget) {
                 var imageTargetEntries = selectParagraphEntries(args, false);
-                if (imageTargetEntries.length !== 1) throw new Error("图片段落目标必须唯一匹配");
+                requireUniqueParagraphEntry(imageTargetEntries, args, "图片段落目标");
                 return {
                   mode: "paragraph",
                   paragraph: imageTargetEntries[0].paragraph,
@@ -1388,31 +1388,100 @@
               };
             }
 
+            function paragraphLocatorKind(args) {
+              var kinds = [];
+              if (args.paragraphId !== undefined) kinds.push("paragraphId");
+              if (args.internalId !== undefined) kinds.push("internalId");
+              if (args.paragraphIndex !== undefined) kinds.push("paragraphIndex");
+              if (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length) kinds.push("paragraphIndexes");
+              if (args.search !== undefined) kinds.push("search");
+              if (args.all === true) kinds.push("all");
+              if (args.current === true) kinds.push("current");
+              return kinds.length === 1 ? kinds[0] : (kinds.length ? "multiple" : "none");
+            }
+
+            function paragraphLocatorDetails(args, matchCount) {
+              var details = {
+                partialMutationPossible: false,
+                locator: paragraphLocatorKind(args),
+              };
+              if (args.search !== undefined) details.matchMode = String(args.matchMode || "contains");
+              if (args.occurrence !== undefined && isFinite(Number(args.occurrence))) {
+                details.occurrence = Math.floor(Number(args.occurrence));
+              }
+              if (matchCount !== undefined && isFinite(Number(matchCount))) {
+                details.matchCount = Math.max(0, Math.floor(Number(matchCount)));
+              }
+              return details;
+            }
+
+            function paragraphLocatorInteger(value, label, args) {
+              var number = Number(value);
+              if (!isFinite(number)) {
+                commandError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  label + " 必须是有限数字",
+                  paragraphLocatorDetails(args),
+                );
+              }
+              return Math.floor(number);
+            }
+
+            function requireUniqueParagraphEntry(entries, args, label) {
+              if (entries.length !== 1) {
+                commandError(
+                  "INVALID_TARGET",
+                  label + "必须唯一匹配一个段落，实际匹配 " + entries.length + " 个",
+                  paragraphLocatorDetails(args, entries.length),
+                );
+              }
+              return entries[0];
+            }
+
             function selectParagraphEntries(args, allowCurrent) {
               var paragraphs = allParagraphs();
               var selected = [];
               var seen = {};
               var indexes = Array.isArray(args.paragraphIndexes) ? args.paragraphIndexes : [];
+              var searchAttempt = null;
 
-              function add(index) {
-                if (index < 0 || index >= paragraphs.length) throw new Error("paragraphIndexes 包含超出范围的段落序号");
+              function add(index, locator) {
+                if (index < 0 || index >= paragraphs.length) {
+                  commandError(
+                    "INVALID_TARGET",
+                    locator + " 指向的段落不存在；文档共有 " + paragraphs.length + " 个段落",
+                    paragraphLocatorDetails(args, 0),
+                  );
+                }
                 if (seen[index]) return;
                 seen[index] = true;
                 selected.push({ paragraph: paragraphs[index], index: index });
               }
 
               if (args.all === true) {
-                for (var allIndex = 0; allIndex < paragraphs.length; allIndex += 1) add(allIndex);
+                for (var allIndex = 0; allIndex < paragraphs.length; allIndex += 1) add(allIndex, "all");
               }
               for (var indexPosition = 0; indexPosition < indexes.length; indexPosition += 1) {
-                var oneBasedIndex = Math.floor(finiteNumber(indexes[indexPosition], "paragraphIndexes"));
-                if (oneBasedIndex < 1) throw new Error("paragraphIndexes 必须从 1 开始");
-                add(oneBasedIndex - 1);
+                var oneBasedIndex = paragraphLocatorInteger(indexes[indexPosition], "paragraphIndexes", args);
+                if (oneBasedIndex < 1) {
+                  commandError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "paragraphIndexes 必须从 1 开始",
+                    paragraphLocatorDetails(args),
+                  );
+                }
+                add(oneBasedIndex - 1, "paragraphIndexes");
               }
               if (args.paragraphIndex !== undefined) {
-                var singularIndex = Math.floor(finiteNumber(args.paragraphIndex, "paragraphIndex"));
-                if (singularIndex < 1) throw new Error("paragraphIndex 必须从 1 开始");
-                add(singularIndex - 1);
+                var singularIndex = paragraphLocatorInteger(args.paragraphIndex, "paragraphIndex", args);
+                if (singularIndex < 1) {
+                  commandError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "paragraphIndex 必须从 1 开始",
+                    paragraphLocatorDetails(args),
+                  );
+                }
+                add(singularIndex - 1, "paragraphIndex");
               }
               if (args.paragraphId !== undefined || args.internalId !== undefined) {
                 var identityField = args.paragraphId !== undefined ? "paragraphId" : "internalId";
@@ -1425,14 +1494,32 @@
                   }
                 }
                 if (identityMatches.length !== 1) {
-                  throw new Error(identityField + " 必须唯一匹配一个段落，实际匹配 " + identityMatches.length + " 个");
+                  commandError(
+                    "INVALID_TARGET",
+                    identityField + " 必须唯一匹配一个段落，实际匹配 " + identityMatches.length + " 个",
+                    paragraphLocatorDetails(args, identityMatches.length),
+                  );
                 }
-                add(identityMatches[0]);
+                add(identityMatches[0], identityField);
               }
-              if (args.search !== undefined && String(args.search) !== "") {
+              if (args.search !== undefined) {
                 var search = String(args.search);
+                if (!search) {
+                  commandError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "search 不能为空",
+                    paragraphLocatorDetails(args),
+                  );
+                }
                 var matchCase = Boolean(args.matchCase);
                 var matchMode = String(args.matchMode || "contains");
+                if (matchMode !== "contains" && matchMode !== "exact") {
+                  commandError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "matchMode 必须是 contains 或 exact",
+                    paragraphLocatorDetails(args),
+                  );
+                }
                 var needle = matchCase ? search : search.toLowerCase();
                 var matchingIndexes = [];
                 for (var paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
@@ -1443,14 +1530,28 @@
                     matchingIndexes.push(paragraphIndex);
                   }
                 }
+                searchAttempt = { matchMode: matchMode, matchCount: matchingIndexes.length };
                 if (args.occurrence !== undefined) {
-                  var occurrence = Math.floor(finiteNumber(args.occurrence, "occurrence"));
-                  if (occurrence < 1) throw new Error("occurrence 必须从 1 开始");
-                  if (matchingIndexes[occurrence - 1] !== undefined) add(matchingIndexes[occurrence - 1]);
+                  var occurrence = paragraphLocatorInteger(args.occurrence, "occurrence", args);
+                  if (occurrence < 1) {
+                    commandError(
+                      "INVALID_TOOL_ARGUMENTS",
+                      "occurrence 必须从 1 开始",
+                      paragraphLocatorDetails(args, matchingIndexes.length),
+                    );
+                  }
+                  if (matchingIndexes[occurrence - 1] === undefined) {
+                    commandError(
+                      "INVALID_TARGET",
+                      "search 的 occurrence=" + occurrence + " 不存在；实际匹配 " + matchingIndexes.length + " 个段落",
+                      paragraphLocatorDetails(args, matchingIndexes.length),
+                    );
+                  }
+                  add(matchingIndexes[occurrence - 1], "search");
                 } else {
                   var maxParagraphs = Math.min(500, Math.max(1, Math.floor(Number(args.maxParagraphs) || 500)));
                   for (var matchIndex = 0; matchIndex < Math.min(maxParagraphs, matchingIndexes.length); matchIndex += 1) {
-                    add(matchingIndexes[matchIndex]);
+                    add(matchingIndexes[matchIndex], "search");
                   }
                 }
               }
@@ -1459,7 +1560,34 @@
                 if (current) selected.push({ paragraph: current, index: -1 });
               }
               if (!selected.length) {
-                throw new Error("必须使用 paragraphId、internalId、paragraphIndex、paragraphIndexes、search、all=true" + (allowCurrent ? " 或 current=true" : "") + " 指定段落");
+                if (searchAttempt) {
+                  commandError(
+                    "INVALID_TARGET",
+                    searchAttempt.matchMode === "exact"
+                      ? "search 未匹配任何段落；matchMode=exact 匹配完整段落文本，查找段落中的子串请使用 contains"
+                      : "search 未匹配任何段落",
+                    paragraphLocatorDetails(args, searchAttempt.matchCount),
+                  );
+                }
+                if (args.all === true) {
+                  commandError(
+                    "INVALID_TARGET",
+                    "文档中没有可定位的段落",
+                    paragraphLocatorDetails(args, 0),
+                  );
+                }
+                if (allowCurrent && args.current === true) {
+                  commandError(
+                    "INVALID_TARGET",
+                    "ONLYOFFICE 未返回当前段落",
+                    paragraphLocatorDetails(args, 0),
+                  );
+                }
+                commandError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  "必须使用 paragraphId、internalId、paragraphIndex、paragraphIndexes、search、all=true" + (allowCurrent ? " 或 current=true" : "") + " 指定段落",
+                  paragraphLocatorDetails(args),
+                );
               }
               return selected;
             }
@@ -1630,7 +1758,7 @@
               var anchorCollectionIndex;
               if (hasParagraphAnchor) {
                 var paragraphAnchors = selectParagraphEntries(args, false);
-                if (paragraphAnchors.length !== 1) throw new Error("表格段落锚点必须唯一匹配");
+                requireUniqueParagraphEntry(paragraphAnchors, args, "表格段落锚点");
                 var paragraphAnchor = paragraphAnchors[0];
                 anchorElement = paragraphAnchor.paragraph;
                 anchor = { type: "paragraph", paragraphIndex: paragraphAnchor.index + 1 };
@@ -1785,7 +1913,7 @@
                 || args.search !== undefined
               ) {
                 var insertionEntries = selectParagraphEntries(args, false);
-                if (insertionEntries.length !== 1) throw new Error("插入目标必须唯一匹配一个段落");
+                requireUniqueParagraphEntry(insertionEntries, args, "插入目标");
                 return insertionEntries[0];
               }
               if (args.current === true && typeof doc.GetCurrentParagraph === "function") {
@@ -2072,7 +2200,7 @@
               var target;
               if (hasParagraphTarget) {
                 var inlineParagraphTargets = selectParagraphEntries(args, false);
-                if (inlineParagraphTargets.length !== 1) throw new Error("inline 内容控件段落目标必须唯一匹配");
+                requireUniqueParagraphEntry(inlineParagraphTargets, args, "inline 内容控件段落目标");
                 paragraphTarget = inlineParagraphTargets[0];
                 target = { type: "paragraph", paragraphIndex: paragraphTarget.index + 1 };
               } else if (args.current === true) {
@@ -2156,7 +2284,7 @@
                   || args.internalId !== undefined || args.search !== undefined
                 ) {
                   var selectedTargets = selectParagraphEntries(args, false);
-                  if (selectedTargets.length !== 1) throw new Error("内容控件段落目标必须唯一匹配");
+                  requireUniqueParagraphEntry(selectedTargets, args, "内容控件段落目标");
                   var selectedTarget = selectedTargets[0];
                   if (typeof selectedTarget.paragraph.Select === "function") selectedTarget.paragraph.Select();
                 }
@@ -2293,7 +2421,7 @@
                     || validationArgs.search !== undefined;
                   if (validationLongAction === "addToc" && hasValidationTocTarget) {
                     var validationTocTargets = selectParagraphEntries(validationArgs, false);
-                    if (validationTocTargets.length !== 1) throw new Error("目录段落目标必须唯一匹配");
+                    requireUniqueParagraphEntry(validationTocTargets, validationArgs, "目录段落目标");
                     var validationTocTarget = validationTocTargets[0];
                     if (String(validationArgs.insertAt || "replaceEmpty") === "replaceEmpty" && paragraphText(validationTocTarget.paragraph).trim()) {
                       commandError("INVALID_TOOL_ARGUMENTS", "addToc 默认只允许替换空段落；请显式使用 insertAt=before 或 after", { partialMutationPossible: false });
@@ -3089,7 +3217,7 @@
                     if (args.boundary) {
                       boundaryPosition = String(args.boundary.position || "after");
                       var boundaryEntries = selectParagraphEntries(args.boundary, false);
-                      if (boundaryEntries.length !== 1) throw new Error("分节边界必须唯一匹配一个段落");
+                      requireUniqueParagraphEntry(boundaryEntries, args.boundary, "分节边界");
                       var requestedBoundary = boundaryEntries[0];
                       if (boundaryPosition === "after") {
                         sectionParagraph = requestedBoundary;
@@ -3255,7 +3383,7 @@
                     for (var assignmentIndex = 0; assignmentIndex < args.assignments.length; assignmentIndex += 1) {
                       var assignment = args.assignments[assignmentIndex] || {};
                       var assignmentEntries = selectParagraphEntries(assignment, false);
-                      if (assignmentEntries.length !== 1) throw new Error("assignments 中的段落目标必须唯一");
+                      requireUniqueParagraphEntry(assignmentEntries, assignment, "assignments 中的段落目标");
                       numberingAssignments.push({
                         entry: assignmentEntries[0],
                         level: Math.min(8, Math.max(0, Math.floor(finiteNumber(assignment.level, "assignments.level")))),
@@ -3272,7 +3400,7 @@
                   var continuedFrom = null;
                   if (args.continueFrom) {
                     var continueEntries = selectParagraphEntries(args.continueFrom, false);
-                    if (continueEntries.length !== 1) throw new Error("continueFrom 必须唯一匹配一个已编号段落");
+                    requireUniqueParagraphEntry(continueEntries, args.continueFrom, "continueFrom");
                     var continueNumPr = safeCall(continueEntries[0].paragraph, "GetNumPr", [], null);
                     customNumbering = safeCall(continueNumPr, "GetNumbering", [], null);
                     if (!customNumbering) throw new Error("continueFrom 指向的段落没有可复用的编号定义");
@@ -4147,7 +4275,7 @@
                     || args.search !== undefined;
                   if (hasLongParagraphTarget) {
                     var longTargets = selectParagraphEntries(args, false);
-                    if (longTargets.length !== 1) throw new Error("长文档段落目标必须唯一匹配");
+                    requireUniqueParagraphEntry(longTargets, args, "长文档段落目标");
                     var longTarget = longTargets[0];
                     if (typeof longTarget.paragraph.Select === "function") longTarget.paragraph.Select();
                   }
@@ -4156,7 +4284,7 @@
                     var tocTargetIndex = null;
                     if (hasLongParagraphTarget) {
                       var tocTargetEntries = selectParagraphEntries(args, false);
-                      if (tocTargetEntries.length !== 1) throw new Error("目录段落目标必须唯一匹配");
+                      requireUniqueParagraphEntry(tocTargetEntries, args, "目录段落目标");
                       var tocTargetEntry = tocTargetEntries[0];
                       tocTargetIndex = tocTargetEntry.index + 1;
                       if (tocInsertAt === "replaceEmpty") {
@@ -5003,6 +5131,13 @@
             };
             if (failedCall && failedCall.name) details.tool = String(failedCall.name);
             if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
+            var locatorDetailNames = ["locator", "matchMode", "matchCount", "occurrence"];
+            for (var locatorDetailIndex = 0; locatorDetailIndex < locatorDetailNames.length; locatorDetailIndex += 1) {
+              var locatorDetailName = locatorDetailNames[locatorDetailIndex];
+              if (error && error.details && error.details[locatorDetailName] !== undefined) {
+                details[locatorDetailName] = error.details[locatorDetailName];
+              }
+            }
             return JSON.stringify({
               ok: false,
               code: error && error.code ? error.code : undefined,
@@ -5064,6 +5199,11 @@
           || priorMutationPossible
         ),
       };
+      for (const detailName of ["locator", "matchMode", "matchCount", "occurrence"]) {
+        if (existingDetails[detailName] !== undefined) {
+          contextualError.details[detailName] = existingDetails[detailName];
+        }
+      }
       return contextualError;
     }
 

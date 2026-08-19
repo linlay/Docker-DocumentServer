@@ -3459,6 +3459,162 @@ test("word bridge classifies the observed page-break and table argument failures
   assert.equal(tableHarness.historyPoints, 0);
 });
 
+test("word bridge reports exact footnote locator misses without possible mutation", async () => {
+  const harness = createWordBridgeHarness({
+    paragraphs: ["恢复时间目标(RTO)应不超过四小时"],
+  });
+  const originalParagraphs = [...harness.paragraphs];
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_manage_long_document",
+      arguments: {
+        action: "addFootnote",
+        search: "恢复时间目标(RTO)",
+        matchMode: "exact",
+        noteText: "RTO 定义",
+      },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_TARGET");
+      assert.match(error.message, /完整段落文本/);
+      assert.match(error.message, /contains/);
+      assert.equal(error.details.tool, "word_manage_long_document");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(error.details.locator, "search");
+      assert.equal(error.details.matchMode, "exact");
+      assert.equal(error.details.matchCount, 0);
+      assert.equal(Object.prototype.hasOwnProperty.call(error.details, "search"), false);
+      assert.doesNotMatch(JSON.stringify(error.details), /恢复时间目标/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(harness.paragraphs, originalParagraphs);
+});
+
+test("word bridge classifies shared paragraph locator failures before mutation", async () => {
+  const cases = [
+    {
+      name: "endnote search miss",
+      tool: {
+        name: "word_manage_long_document",
+        arguments: { action: "addEndnote", search: "不存在", noteText: "说明" },
+      },
+      code: "INVALID_TARGET",
+      locator: "search",
+    },
+    {
+      name: "searched occurrence out of range",
+      tool: {
+        name: "word_manage_long_document",
+        arguments: { action: "addFootnote", search: "正文", occurrence: 2, noteText: "说明" },
+      },
+      code: "INVALID_TARGET",
+      locator: "search",
+      occurrence: 2,
+      matchCount: 1,
+    },
+    {
+      name: "page break index out of range",
+      tool: {
+        name: "word_insert_page_break",
+        arguments: { paragraphIndex: 9, position: "after" },
+      },
+      code: "INVALID_TARGET",
+      locator: "paragraphIndex",
+    },
+    {
+      name: "numbering paragraph id missing",
+      tool: {
+        name: "word_set_numbering",
+        arguments: {
+          assignments: [{ paragraphId: "missing-paragraph", level: 0 }],
+        },
+      },
+      code: "INVALID_TARGET",
+      locator: "paragraphId",
+    },
+    {
+      name: "invalid paragraph index",
+      tool: {
+        name: "word_insert_page_break",
+        arguments: { paragraphIndex: 0, position: "after" },
+      },
+      code: "INVALID_TOOL_ARGUMENTS",
+      locator: undefined,
+      schemaValidation: true,
+    },
+  ];
+
+  for (const scenario of cases) {
+    const harness = createWordBridgeHarness({ paragraphs: ["正文"] });
+    await assert.rejects(
+      harness.bridge.execute([scenario.tool]),
+      error => {
+        assert.equal(error.code, scenario.code, scenario.name);
+        assert.equal(error.details.completedToolCalls, 0, scenario.name);
+        assert.equal(error.details.partialMutationPossible, false, scenario.name);
+        if (!scenario.schemaValidation) {
+          assert.equal(error.details.locator, scenario.locator, scenario.name);
+        }
+        if (scenario.occurrence !== undefined) {
+          assert.equal(error.details.occurrence, scenario.occurrence, scenario.name);
+        }
+        if (scenario.matchCount !== undefined) {
+          assert.equal(error.details.matchCount, scenario.matchCount, scenario.name);
+        }
+        return true;
+      },
+    );
+    assert.deepEqual(harness.paragraphs, ["正文"], scenario.name);
+  }
+});
+
+test("word bridge reports ambiguous footnote targets without possible mutation", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["RTO 说明一", "RTO 说明二"] });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_manage_long_document",
+      arguments: { action: "addFootnote", search: "RTO", noteText: "说明" },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_TARGET");
+      assert.match(error.message, /实际匹配 2 个/);
+      assert.equal(error.details.matchCount, 2);
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    },
+  );
+
+  assert.deepEqual(harness.paragraphs, ["RTO 说明一", "RTO 说明二"]);
+});
+
+test("word bridge keeps possible mutation true after an earlier completed write", async () => {
+  const harness = createWordBridgeHarness({ paragraphs: ["原正文"] });
+
+  await assert.rejects(
+    harness.bridge.execute([
+      { name: "word_append_paragraph", arguments: { text: "已写入" } },
+      {
+        name: "word_manage_long_document",
+        arguments: { action: "addFootnote", search: "不存在", noteText: "说明" },
+      },
+    ]),
+    error => {
+      assert.equal(error.code, "INVALID_TARGET");
+      assert.equal(error.details.toolCallIndex, 1);
+      assert.equal(error.details.completedToolCalls, 1);
+      assert.equal(error.details.partialMutationPossible, true);
+      return true;
+    },
+  );
+
+  assert.deepEqual(harness.paragraphs, ["原正文", "已写入"]);
+});
+
 test("word bridge exact paragraph targets ignore the terminal paragraph mark", async () => {
   const harness = createWordBridgeHarness({
     paragraphs: ["内部测试材料\r\n", "下一页"],
