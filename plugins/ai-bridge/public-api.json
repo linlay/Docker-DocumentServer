@@ -5813,7 +5813,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "设置或删除 Word 默认、首页或偶数页的页眉页脚",
+        "description": "设置或删除 Word 默认、首页或偶数页的页眉页脚；首页无页眉时只设置 set_page_layout.titlePage=true，不要用 type=first、text=\"\" 创建空页眉",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": [

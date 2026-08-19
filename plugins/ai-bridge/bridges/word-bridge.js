@@ -525,6 +525,26 @@
         if (!contentFields.some(function (field) { return args[field] !== undefined; })) {
           add(index, name, "action", "set requires text, a page field, fields, or formatting");
         }
+        const hasDynamicContent = (
+          args.pageNumber === true
+          || args.pagesCount === true
+          || (
+            Array.isArray(args.fields)
+            && args.fields.some(function (field) {
+              return typeof field === "string" && field.length > 0;
+            })
+          )
+        );
+        // A blank first page is a section setting; creating empty first-page content can return null in ONLYOFFICE.
+        if (String(args.type || "default") === "first" && args.text === "" && !hasDynamicContent) {
+          add(
+            index,
+            name,
+            "text",
+            "empty first-page header/footer content is invalid; use set_page_layout with titlePage=true, or action=remove to delete existing content",
+            "semantic",
+          );
+        }
       }
     }
     return errors;
@@ -5008,6 +5028,24 @@
                     var content = kind === "header"
                       ? section.GetHeader(headerFooterType, true)
                       : section.GetFooter(headerFooterType, true);
+                    if (!content) {
+                      var targetSectionIndex = args.sectionIndex === undefined
+                        ? sectionPosition + 1
+                        : Math.floor(Number(args.sectionIndex));
+                      commandError(
+                        "WORD_API_UNSUPPORTED",
+                        "ONLYOFFICE 未返回请求的页眉页脚内容；首页无页眉时请只用 word_set_page_layout 设置 titlePage=true",
+                        {
+                          partialMutationPossible: true,
+                          headerFooter: {
+                            kind: kind,
+                            type: headerFooterType,
+                            sectionIndex: targetSectionIndex,
+                            remediation: "Use word_set_page_layout with titlePage=true for an empty first page, or create non-empty first-page content after enabling titlePage.",
+                          },
+                        },
+                      );
+                    }
                     if (args.text !== undefined && args.replace !== false && typeof content.SetText === "function") {
                       content.SetText(String(args.text));
                     }
@@ -5131,6 +5169,9 @@
             };
             if (failedCall && failedCall.name) details.tool = String(failedCall.name);
             if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
+            if (error && error.details && error.details.headerFooter) {
+              details.headerFooter = error.details.headerFooter;
+            }
             var locatorDetailNames = ["locator", "matchMode", "matchCount", "occurrence"];
             for (var locatorDetailIndex = 0; locatorDetailIndex < locatorDetailNames.length; locatorDetailIndex += 1) {
               var locatorDetailName = locatorDetailNames[locatorDetailIndex];
@@ -5199,6 +5240,9 @@
           || priorMutationPossible
         ),
       };
+      if (existingDetails.headerFooter) {
+        contextualError.details.headerFooter = existingDetails.headerFooter;
+      }
       for (const detailName of ["locator", "matchMode", "matchCount", "occurrence"]) {
         if (existingDetails[detailName] !== undefined) {
           contextualError.details[detailName] = existingDetails[detailName];

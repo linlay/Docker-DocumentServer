@@ -647,6 +647,21 @@ class ContractGenerationTests(unittest.TestCase):
                 )
                 self.assertIn(f"EDITOR_SESSION_UNAVAILABLE: {site}", rendered)
 
+    def test_word_header_footer_httpx_description_rejects_empty_first_page_content(
+        self,
+    ) -> None:
+        rendered = sync_contract.render_toml(
+            self.contract,
+            "word",
+            sync_contract.contract_sha256(self.contract),
+            "https://office.example.test",
+        )
+        action = rendered.split("[actions.set_header_footer]", 1)[1].split(
+            "\n[actions.", 1
+        )[0]
+        self.assertIn("set_page_layout.titlePage=true", action)
+        self.assertIn('type=first、text=\\"\\"', action)
+
     def test_skill_version_projection_preserves_frontmatter_and_body(self) -> None:
         source = (
             "---\n"

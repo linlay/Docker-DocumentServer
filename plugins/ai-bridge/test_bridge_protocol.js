@@ -3459,6 +3459,79 @@ test("word bridge classifies the observed page-break and table argument failures
   assert.equal(tableHarness.historyPoints, 0);
 });
 
+test("word bridge rejects an empty first-page header before entering ONLYOFFICE", async () => {
+  let getHeaderCalls = 0;
+  const harness = createWordBridgeHarness({
+    sections: [{
+      GetHeader() {
+        getHeaderCalls += 1;
+        return null;
+      },
+    }],
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_set_header_footer",
+      arguments: { kind: "header", type: "first", text: "" },
+    }]),
+    error => {
+      assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+      assert.equal(error.details.completedToolCalls, 0);
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(error.details.validationErrors.length, 1);
+      assert.equal(error.details.validationErrors[0].path, "arguments.text");
+      assert.equal(error.details.validationErrors[0].keyword, "semantic");
+      assert.match(error.details.validationErrors[0].message, /titlePage=true/);
+      assert.match(error.details.validationErrors[0].message, /action=remove/);
+      return true;
+    },
+  );
+
+  assert.equal(harness.historyPoints, 0);
+  assert.equal(harness.callCommandCalls.length, 0);
+  assert.equal(getHeaderCalls, 0);
+});
+
+test("word bridge reports null header and footer content without dereferencing it", async () => {
+  for (const kind of ["header", "footer"]) {
+    let contentCalls = 0;
+    const section = {
+      GetHeader() {
+        contentCalls += 1;
+        return null;
+      },
+      GetFooter() {
+        contentCalls += 1;
+        return null;
+      },
+    };
+    const harness = createWordBridgeHarness({ sections: [section] });
+
+    await assert.rejects(
+      harness.bridge.execute([{
+        name: "word_set_header_footer",
+        arguments: { kind, type: "first", text: "首页内容" },
+      }]),
+      error => {
+        assert.equal(error.code, "WORD_API_UNSUPPORTED");
+        assert.doesNotMatch(error.message, /Cannot read properties of null/);
+        assert.match(error.message, /titlePage=true/);
+        assert.equal(error.details.partialMutationPossible, true);
+        assert.deepEqual(error.details.headerFooter, {
+          kind,
+          type: "first",
+          sectionIndex: 1,
+          remediation: "Use word_set_page_layout with titlePage=true for an empty first page, or create non-empty first-page content after enabling titlePage.",
+        });
+        return true;
+      },
+    );
+
+    assert.equal(contentCalls, 1);
+  }
+});
+
 test("word bridge reports exact footnote locator misses without possible mutation", async () => {
   const harness = createWordBridgeHarness({
     paragraphs: ["恢复时间目标(RTO)应不超过四小时"],
@@ -3613,6 +3686,56 @@ test("word bridge keeps possible mutation true after an earlier completed write"
   );
 
   assert.deepEqual(harness.paragraphs, ["原正文", "已写入"]);
+});
+
+test("word bridge keeps title-page, non-empty header, page fields, and removal paths compatible", async () => {
+  const calls = [];
+  const paragraph = {
+    AddText(value) { calls.push(["appendText", value]); },
+    AddPageNumber() { calls.push(["pageNumber"]); },
+    AddPagesCount() { calls.push(["pagesCount"]); },
+  };
+  const content = {
+    SetText(value) { calls.push(["setText", value]); },
+    GetElement(index) { return index === 0 ? paragraph : null; },
+    Push(value) { calls.push(["push", value]); },
+  };
+  const section = {
+    SetTitlePage(value) { calls.push(["titlePage", value]); },
+    GetHeader(type, create) { calls.push(["getHeader", type, create]); return content; },
+    GetFooter(type, create) { calls.push(["getFooter", type, create]); return content; },
+    RemoveHeader(type) { calls.push(["removeHeader", type]); },
+  };
+  const harness = createWordBridgeHarness({ sections: [section] });
+
+  await harness.bridge.execute([{
+    name: "word_set_page_layout",
+    arguments: { titlePage: true },
+  }]);
+  assert.deepEqual(calls, [["titlePage", true]]);
+
+  await harness.bridge.execute([{
+    name: "word_set_header_footer",
+    arguments: { kind: "header", type: "first", text: "首页内容" },
+  }]);
+  await harness.bridge.execute([{
+    name: "word_set_header_footer",
+    arguments: { kind: "footer", type: "default", pageNumber: true, pagesCount: true },
+  }]);
+  await harness.bridge.execute([{
+    name: "word_set_header_footer",
+    arguments: { kind: "header", type: "first", action: "remove" },
+  }]);
+
+  assert.deepEqual(calls.slice(1), [
+    ["getHeader", "first", true],
+    ["setText", "首页内容"],
+    ["getFooter", "default", true],
+    ["pageNumber"],
+    ["appendText", " / "],
+    ["pagesCount"],
+    ["removeHeader", "first"],
+  ]);
 });
 
 test("word bridge exact paragraph targets ignore the terminal paragraph mark", async () => {
