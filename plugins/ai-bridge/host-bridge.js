@@ -1,9 +1,9 @@
 (function () {
   "use strict";
 
-  const VERSION = "0.2.3";
+  const VERSION = "0.2.4";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "2ef5deff6bcafd53bdae1f01e2b32e5067eb3801034818495184801a4e4db88c";
+  const CONTRACT_SHA256 = "c19bfc3e99f7c3086ecbe37b48e6190a42a788e6e55b685130984cb03e0dfddc";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -684,7 +684,16 @@
       return Promise.reject(bridgeError(
         "REQUEST_ID_CONFLICT",
         "相同 requestId 不能用于不同的图片命令",
-        { requestId: requestOptions.requestId },
+        {
+          requestId: requestOptions.requestId,
+          details: {
+            requestId: requestOptions.requestId,
+            retryable: false,
+            reuseAllowed: false,
+            requiredAction: "use_new_request_id",
+            partialMutationPossible: false,
+          },
+        },
       ));
     }
     const prepared = cached || {

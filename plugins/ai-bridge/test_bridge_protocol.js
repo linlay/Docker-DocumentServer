@@ -769,6 +769,7 @@ function createWordBridgeHarness(options = {}) {
     GetElementsCount() { return documentElements.length; },
     GetElement(index) { return documentElements[index] || null; },
     GetAllParagraphs() { return documentParagraphs; },
+    GetAllNumberedParagraphs() { return documentParagraphs.filter(paragraph => paragraph.numbering); },
     GetAllTables() {
       if (options.staleTableCollections) return initialDocumentTables;
       return documentElements.filter(element => (
@@ -2266,7 +2267,7 @@ test("document-hub mode routes persistence through the authenticated host page",
   }
 });
 
-test("reusing a completed requestId returns the cached response without applying an edit twice", async () => {
+test("requestId replays only the identical cached request and rejects changed parameters, tools, or controls", async () => {
   const harness = createHarness();
   await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
   const options = { timeoutMs: 1000, requestId: "stable-agent-request-1" };
@@ -2277,6 +2278,27 @@ test("reusing a completed requestId returns the cached response without applying
   assert.equal(first.results[0].name, "word_append_paragraph");
   assert.equal(second.results[0].name, "word_append_paragraph");
   assert.equal(harness.executedToolCalls.length, 1);
+  const persistenceCallCount = harness.servicePaths.length;
+
+  for (const invoke of [
+    () => harness.hostWindow.aiBridge.word.appendParagraph({ text: "changed" }, options),
+    () => harness.hostWindow.aiBridge.word.replaceText({ search: "old", replace: "new" }, options),
+    () => harness.hostWindow.aiBridge.save(options),
+  ]) {
+    await assert.rejects(invoke(), error => {
+      assert.equal(error.code, "REQUEST_ID_CONFLICT");
+      assert.equal(error.requestId, options.requestId);
+      assert.equal(error.details.requestId, options.requestId);
+      assert.equal(error.details.retryable, false);
+      assert.equal(error.details.reuseAllowed, false);
+      assert.equal(error.details.requiredAction, "use_new_request_id");
+      assert.equal(error.details.partialMutationPossible, false);
+      return true;
+    });
+  }
+
+  assert.equal(harness.executedToolCalls.length, 1);
+  assert.equal(harness.servicePaths.length, persistenceCallCount);
 });
 
 test("host imports an image before sending the internal source to the plugin", async () => {
@@ -3851,7 +3873,7 @@ test("word bridge preflight normalizes and aggregates without creating history",
   assert.equal(harness.historyPoints, 0);
 });
 
-test("word bridge uses ONLYOFFICE zero-based placeholders for multilevel numbering", async () => {
+test("word bridge uses ONLYOFFICE one-based placeholders for multilevel numbering", async () => {
   const customTypes = [];
   const levels = Array.from({ length: 9 }, (_, index) => ({
     index,
@@ -3883,8 +3905,95 @@ test("word bridge uses ONLYOFFICE zero-based placeholders for multilevel numberi
   }]);
 
   assert.equal(result.changed, 2);
-  assert.deepEqual(customTypes.map(entry => entry.text), ["%0.", "%0.%1."]);
+  assert.deepEqual(customTypes.map(entry => entry.text), ["%1.", "%1.%2."]);
   assert.ok(harness.paragraphObjects.every(paragraph => paragraph.numbering === levels[1]));
+});
+
+test("word bridge normalizes compatible numbering fields and applies level paragraph indents", async () => {
+  const customTypes = [];
+  const restarts = [];
+  const indents = [];
+  const levels = Array.from({ length: 9 }, (_, index) => ({
+    index,
+    SetCustomType(format, text, align) { customTypes.push({ index, format, text, align }); },
+    SetStart() {},
+    SetRestart(value) { restarts.push({ index, value }); },
+    GetParaPr() {
+      return {
+        SetIndLeft(value) { indents.push({ index, field: "left", value }); },
+        SetIndFirstLine(value) { indents.push({ index, field: "firstLine", value }); },
+      };
+    },
+  }));
+  const numbering = {
+    GetInternalId() { return "normalized-list"; },
+    GetLevel(index) { return levels[index]; },
+  };
+  const harness = createWordBridgeHarness({
+    paragraphs: ["一级", "二级"],
+    createNumbering() { return numbering; },
+  });
+  const call = {
+    name: "word_set_numbering",
+    arguments: {
+      kind: "multilevel",
+      levels: [
+        { numberFormat: "lowerRoman", hangingIndentPt: 18, leftIndentPt: 36, restart: 1 },
+        { level: 1, format: "decimal", numberFormat: "upperLetter", firstLineIndentPt: -12, hangingIndentPt: 20 },
+      ],
+      assignments: [
+        { paragraphIndex: 1, level: 0 },
+        { paragraphIndex: 2, level: 1 },
+      ],
+    },
+  };
+
+  const preflight = harness.bridge.preflight([call]);
+  assert.equal(preflight.validationErrors.length, 0);
+  assert.equal(preflight.toolCalls[0].arguments.levels[0].level, 0);
+  assert.equal(preflight.toolCalls[0].arguments.levels[0].format, "lowerRoman");
+  assert.equal(preflight.toolCalls[0].arguments.levels[0].firstLineIndentPt, -18);
+  assert.equal(preflight.toolCalls[0].arguments.levels[0].restart, true);
+  assert.equal(preflight.toolCalls[0].arguments.levels[1].format, "decimal");
+  assert.equal(preflight.toolCalls[0].arguments.levels[1].numberFormat, undefined);
+  assert.equal(preflight.toolCalls[0].arguments.levels[1].hangingIndentPt, undefined);
+  assert.ok(preflight.argumentNormalizations.some(item => item.kind === "canonicalWins"));
+
+  const result = await harness.bridge.execute([call]);
+  assert.equal(result.results[0].listGroupId, "normalized-list");
+  assert.deepEqual(customTypes.map(item => [item.format, item.text]), [
+    ["lowerRoman", "%1."],
+    ["decimal", "%1.%2."],
+  ]);
+  assert.deepEqual(restarts, [{ index: 0, value: true }]);
+  assert.deepEqual(indents, [
+    { index: 0, field: "firstLine", value: -360 },
+    { index: 0, field: "left", value: 720 },
+    { index: 1, field: "firstLine", value: -240 },
+  ]);
+});
+
+test("word bridge rejects invalid numbering targets and duplicate levels before history", async () => {
+  for (const argumentsValue of [
+    {},
+    {
+      levels: [{ level: 0 }, { level: 0 }],
+      assignments: [{ paragraphIndex: 1, level: 0 }],
+    },
+    {
+      assignments: [{ paragraphIndexes: [1, 2], level: 0 }],
+    },
+    {
+      assignments: [{ paragraphIndex: 1, search: "一级", level: 0 }],
+    },
+  ]) {
+    const harness = createWordBridgeHarness({ paragraphs: ["一级", "二级"] });
+    await assert.rejects(
+      harness.bridge.execute([{ name: "word_set_numbering", arguments: argumentsValue }]),
+      error => error.code === "INVALID_TOOL_ARGUMENTS" && error.details.partialMutationPossible === false,
+    );
+    assert.equal(harness.historyPoints, 0);
+  }
 });
 
 test("word bridge applies multilevel assignments through one shared numbering instance and can continue it", async () => {
@@ -3932,6 +4041,79 @@ test("word bridge applies multilevel assignments through one shared numbering in
   assert.equal(created.results[0].listGroupId, "list-shared");
   assert.equal(continued.results[0].listGroupId, "list-shared");
   assert.equal(continued.results[0].continuedFromParagraphIndex, 4);
+});
+
+test("word advanced inspection groups fresh ApiNumbering wrappers by their shared internal numbering id", async () => {
+  const internalNumbering = {
+    Id: "num-shared-internal",
+    GetId() { return this.Id; },
+  };
+  const levels = [0, 1].map(index => ({
+    index,
+    GetLevelIndex() { return this.index; },
+    GetNumbering() { return { Num: internalNumbering }; },
+  }));
+  const numbering = {
+    Num: internalNumbering,
+    GetLevel(index) { return levels[index]; },
+  };
+  const harness = createWordBridgeHarness({
+    paragraphs: ["父级一", "子级一", "父级二"],
+    createNumbering() { return numbering; },
+  });
+
+  const updated = await harness.bridge.execute([{
+    name: "word_set_numbering",
+    arguments: {
+      kind: "multilevel",
+      assignments: [
+        { paragraphIndex: 1, level: 0 },
+        { paragraphIndex: 2, level: 1 },
+        { paragraphIndex: 3, level: 0 },
+      ],
+    },
+  }]);
+  const inspected = await harness.bridge.execute([{
+    name: "word_inspect_advanced",
+    arguments: { includeNumbering: true },
+  }]);
+
+  assert.equal(updated.results[0].listGroupId, "num-shared-internal");
+  assert.deepEqual(inspected.results[0].numbering.map(item => item.listGroup), [1, 1, 1]);
+  assert.deepEqual(inspected.results[0].numbering.map(item => item.listGroupId), [
+    "num-shared-internal", "num-shared-internal", "num-shared-internal",
+  ]);
+  assert.deepEqual(inspected.results[0].numbering.map(item => item.level), [0, 1, 0]);
+});
+
+test("word set_list reports a distinct listGroupId for every independent call", async () => {
+  let created = 0;
+  const harness = createWordBridgeHarness({
+    paragraphs: ["第一项", "第二项"],
+    createNumbering() {
+      created += 1;
+      const id = "set-list-" + created;
+      const level = { index: 0 };
+      return {
+        GetInternalId() { return id; },
+        GetLevel() { return level; },
+      };
+    },
+  });
+
+  const first = await harness.bridge.execute([{
+    name: "word_set_list",
+    arguments: { listType: "numbered", paragraphIndex: 1 },
+  }]);
+  const second = await harness.bridge.execute([{
+    name: "word_set_list",
+    arguments: { listType: "numbered", paragraphIndex: 2 },
+  }]);
+
+  assert.equal(first.results[0].listGroupId, "set-list-1");
+  assert.equal(second.results[0].listGroupId, "set-list-2");
+  assert.equal(first.results[0].independentPerCall, true);
+  assert.notEqual(first.results[0].listGroupId, second.results[0].listGroupId);
 });
 
 test("word bridge applies cell paragraph styles to every table cell and rejects table-style type mixing", async () => {

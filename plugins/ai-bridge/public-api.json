@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "toolNaming": {
@@ -967,7 +967,7 @@
         "matchMode": { "enum": ["contains", "exact"] }
       },
       "additionalProperties": false,
-      "description": "One paragraph and its level in a shared multilevel numbering instance."
+      "description": "One paragraph and its level in a shared multilevel numbering instance. Exactly one of paragraphId, internalId, paragraphIndex, or search is allowed; paragraphIndexes is invalid here."
     },
     "wordSectionBoundary": {
       "type": "object",
@@ -2998,6 +2998,38 @@
       },
       "word_set_numbering": {
         "type": "object",
+        "examples": [
+          {
+            "kind": "multilevel",
+            "levels": [
+              {
+                "level": 0,
+                "format": "decimal",
+                "text": "%1.",
+                "leftIndentPt": 36,
+                "firstLineIndentPt": -18
+              },
+              {
+                "level": 1,
+                "format": "decimal",
+                "text": "%1.%2.",
+                "leftIndentPt": 54,
+                "firstLineIndentPt": -18,
+                "restart": true
+              }
+            ],
+            "assignments": [
+              {
+                "paragraphIndex": 12,
+                "level": 0
+              },
+              {
+                "paragraphIndex": 13,
+                "level": 1
+              }
+            ]
+          }
+        ],
         "properties": {
           "kind": {
             "enum": [
@@ -3020,20 +3052,44 @@
             "maxItems": 9,
             "items": {
               "type": "object",
-              "required": [
-                "level"
-              ],
               "properties": {
                 "level": {
                   "type": "integer",
                   "minimum": 0,
-                  "maximum": 8
+                  "maximum": 8,
+                  "description": "Zero-based numbering level. When omitted, the levels[] array index is used."
                 },
                 "format": {
-                  "type": "string"
+                  "enum": [
+                    "none",
+                    "bullet",
+                    "decimal",
+                    "lowerRoman",
+                    "upperRoman",
+                    "lowerLetter",
+                    "upperLetter",
+                    "decimalZero"
+                  ],
+                  "description": "ONLYOFFICE ApiNumberingLevel.SetCustomType format."
+                },
+                "numberFormat": {
+                  "enum": [
+                    "none",
+                    "bullet",
+                    "decimal",
+                    "lowerRoman",
+                    "upperRoman",
+                    "lowerLetter",
+                    "upperLetter",
+                    "decimalZero"
+                  ],
+                  "deprecated": true,
+                  "x-canonicalProperty": "format",
+                  "description": "Compatibility alias for format; format wins when both are present."
                 },
                 "text": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "Numbering text using ONLYOFFICE one-based placeholders %1 through %9."
                 },
                 "start": {
                   "type": "integer",
@@ -3047,9 +3103,32 @@
                   ]
                 },
                 "restart": {
-                  "type": "integer",
+                  "oneOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "integer",
+                      "enum": [0, 1],
+                      "deprecated": true
+                    }
+                  ],
+                  "description": "Whether this level restarts after the preceding level. Legacy 0/1 values are normalized to booleans."
+                },
+                "leftIndentPt": {
+                  "type": "number",
                   "minimum": 0,
-                  "maximum": 8
+                  "description": "Numbering level left indent in points."
+                },
+                "firstLineIndentPt": {
+                  "type": "number",
+                  "description": "Numbering level first-line indent in points; use a negative value for a hanging indent."
+                },
+                "hangingIndentPt": {
+                  "type": "number",
+                  "minimum": 0,
+                  "deprecated": true,
+                  "description": "Compatibility alias normalized to a negative firstLineIndentPt; firstLineIndentPt wins when both are present."
                 }
               },
               "additionalProperties": false
@@ -3120,11 +3199,23 @@
             "type": "boolean"
           }
         },
+        "anyOf": [
+          { "required": ["assignments"] },
+          { "required": ["paragraphIndex"] },
+          { "required": ["paragraphId"] },
+          { "required": ["internalId"] },
+          { "required": ["paragraphIndexes"] },
+          { "required": ["search"] },
+          { "required": ["all"] },
+          { "required": ["current"] }
+        ],
         "additionalProperties": false,
-        "description": "创建或延续一个 Word 编号定义，并把同一实例的不同层级应用到多个段落",
+        "description": "创建或延续一个 Word 编号定义，并把同一实例的不同层级应用到多个段落。真正的连续多级编号必须在一次 assignments[] 调用中完成。",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
-        "x-semanticValidators": []
+        "x-semanticValidators": [
+          "word.numberingDefinition"
+        ]
       },
       "word_format_table_advanced": {
         "type": "object",
@@ -4931,7 +5022,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "把指定段落设置为项目符号或编号列表",
+        "description": "把指定段落设置为项目符号或编号列表，并返回 listGroupId。每次调用都会创建一个独立编号实例，不能替代一次 set_numbering(assignments[]) 的连续多级编号。",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []

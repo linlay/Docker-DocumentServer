@@ -81,7 +81,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.3";
+  contractVersion?: "0.2.4";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -104,10 +104,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.3";
+  version: "0.2.4";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.3";
+  contractVersion: "0.2.4";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -155,7 +155,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.3";
+  contractVersion: "0.2.4";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -2314,12 +2314,16 @@ export type AiBridgeGeneratedWordSetNumberingArgs = {
   level?: number;
   restartAt?: number;
   levels?: Array<{
-    level: number;
-    format?: string;
+    level?: number;
+    format?: "none" | "bullet" | "decimal" | "lowerRoman" | "upperRoman" | "lowerLetter" | "upperLetter" | "decimalZero";
+    numberFormat?: "none" | "bullet" | "decimal" | "lowerRoman" | "upperRoman" | "lowerLetter" | "upperLetter" | "decimalZero";
     text?: string;
     start?: number;
     align?: "left" | "center" | "right";
-    restart?: number;
+    restart?: (boolean | 0 | 1);
+    leftIndentPt?: number;
+    firstLineIndentPt?: number;
+    hangingIndentPt?: number;
   }>;
   assignments?: Array<{
     level: number;
@@ -2351,7 +2355,16 @@ export type AiBridgeGeneratedWordSetNumberingArgs = {
   maxParagraphs?: number;
   all?: boolean;
   current?: boolean;
-};
+} & ({ assignments: Array<{
+  level: number;
+  paragraphId?: string | number;
+  internalId?: string | number;
+  paragraphIndex?: number;
+  search?: string;
+  occurrence?: number;
+  matchCase?: boolean;
+  matchMode?: "contains" | "exact";
+}>; } | { paragraphIndex: number; } | { paragraphId: string | number; } | { internalId: string | number; } | { paragraphIndexes: Array<number>; } | { search: string; } | { all: boolean; } | { current: boolean; });
 export type AiBridgeGeneratedWordFormatTableAdvancedArgs = {
   tableIndex: number;
   row?: number;
@@ -8742,7 +8755,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.3";
+  readonly version: "0.2.4";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

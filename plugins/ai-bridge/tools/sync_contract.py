@@ -32,6 +32,14 @@ STATIC_RUNTIME_PATHS = (
     BRIDGE_ROOT / "bridges" / "sheets-bridge.js",
 )
 ASSET_REVISION_PLACEHOLDER = "__AI_BRIDGE_ASSET_REVISION__"
+REQUEST_ID_DESCRIPTION = (
+    "不可变幂等 ID；仅在结果未知且 action、参数、timeout 完全不变时原样复用。"
+    "修改任一字段必须使用新 ID；request_id_conflict/REQUEST_ID_CONFLICT 不可用旧 ID 重试"
+)
+DOCUMENT_ID_PATTERN = (
+    "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    "[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 TYPE_START = "// <ai-bridge-generated:tool-arguments>"
 TYPE_END = "// </ai-bridge-generated:tool-arguments>"
 PLUGIN_START = "  // <ai-bridge-generated:contract-runtime>"
@@ -1000,6 +1008,18 @@ def render_markdown(
                 )
         else:
             lines.append("- 枚举：无")
+        examples = schema.get("examples")
+        if isinstance(examples, list) and examples:
+            lines.extend(
+                [
+                    "",
+                    "示例：",
+                    "",
+                    "```json",
+                    json.dumps(examples[0], ensure_ascii=False, indent=2),
+                    "```",
+                ]
+            )
         if include_full_schema:
             lines.extend(
                 [
@@ -1059,6 +1079,9 @@ def schema_has_required_business_fields(schema: dict[str, Any]) -> bool:
 def minimal_schema_example(schema: Any, definitions: dict[str, Any]) -> Any:
     if not isinstance(schema, dict):
         return None
+    examples = schema.get("examples")
+    if isinstance(examples, list) and examples:
+        return copy.deepcopy(examples[0])
     if "$ref" in schema:
         ref = str(schema["$ref"])
         prefix = "#/$defs/"
@@ -1141,7 +1164,9 @@ def action_params(
             + ', description = "业务参数 JSON；字段与枚举以生成契约为准", example = '
             + toml_string(arguments_example)
             + " },",
-            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID；写操作重试必须复用", example = '
+            '  { name = "request_id", type = "string", required = true, description = '
+            + toml_string(REQUEST_ID_DESCRIPTION)
+            + ', example = '
             + toml_string(request_example)
             + " },",
             '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
@@ -1151,13 +1176,17 @@ def action_params(
             '  { name = "tool_calls_json", type = "json array string", required = true, description = "工具调用数组；标准字段为 name，action 仅作兼容别名", example = '
             + toml_string('[{"name":"set_size","arguments":{"preset":"wide"}}]')
             + " },",
-            '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID", example = '
+            '  { name = "request_id", type = "string", required = true, description = '
+            + toml_string(REQUEST_ID_DESCRIPTION)
+            + ', example = '
             + toml_string(request_example)
             + " },",
             '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
         ]
     return [
-        '  { name = "request_id", type = "string", required = true, description = "稳定幂等 ID", example = '
+        '  { name = "request_id", type = "string", required = true, description = '
+        + toml_string(REQUEST_ID_DESCRIPTION)
+        + ', example = '
         + toml_string(request_example)
         + " },",
         '  { name = "timeout_ms", type = "integer", required = false, description = "等待页面响应的毫秒数" }',
@@ -1167,45 +1196,30 @@ def action_params(
 def document_path_source(action: str) -> str:
     if action not in {"session", "validate", "execute", "commit", "qa", "images/import"}:
         raise ValueError(f"unsupported document action: {action}")
-    command = (
-        "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
-        "case \"$document_id\" in "
-        "????????-????-4???-[89ab]???-????????????) ;; *) exit 64 ;; esac; "
-        "case \"$document_id\" in *[!0-9a-f-]*) exit 64 ;; esac; "
-        f"printf \"%s\" \"/api/v1/documents/$document_id/ai/{action}\""
+    template = f"/api/v1/documents/{{{{value}}}}/ai/{action}"
+    return (
+        '{ from = "env", key = "DOCUMENT_HUB_DOCUMENT_ID", trim = true, '
+        f"pattern = {toml_string(DOCUMENT_ID_PATTERN)}, "
+        f"output_template = {toml_string(template)} }}"
     )
-    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
 
 
 def document_download_path_source() -> str:
-    command = (
-        "document_id=$DOCUMENT_HUB_DOCUMENT_ID; "
-        "case \"$document_id\" in "
-        "????????-????-4???-[89ab]???-????????????) ;; *) exit 64 ;; esac; "
-        "case \"$document_id\" in *[!0-9a-f-]*) exit 64 ;; esac; "
-        'printf "%s" "/api/v1/documents/$document_id/download"'
+    return (
+        '{ from = "env", key = "DOCUMENT_HUB_DOCUMENT_ID", trim = true, '
+        f"pattern = {toml_string(DOCUMENT_ID_PATTERN)}, "
+        'output_template = "/api/v1/documents/{{value}}/download" }'
     )
-    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 1000, trim = true }"
 
 
 def local_image_data_url_source() -> str:
-    command = (
-        'image_path=$PPTX_IMAGE_PATH; '
-        'case "$image_path" in /*) ;; *) exit 64 ;; esac; '
-        'test -f "$image_path" -a -r "$image_path" || exit 66; '
-        'image_size=$(wc -c < "$image_path"); '
-        'test "$image_size" -gt 0 -a "$image_size" -le 8388608 || exit 65; '
-        'case "$image_path" in '
-        '*.png|*.PNG) image_mime=image/png ;; '
-        '*.jpg|*.JPG|*.jpeg|*.JPEG) image_mime=image/jpeg ;; '
-        '*.gif|*.GIF) image_mime=image/gif ;; '
-        '*.webp|*.WEBP) image_mime=image/webp ;; '
-        '*.svg|*.SVG) image_mime=image/svg+xml ;; '
-        '*) exit 65 ;; esac; '
-        'printf "data:%s;base64," "$image_mime"; '
-        '/usr/bin/base64 < "$image_path" | tr -d "\\n\\r"'
+    return (
+        '{ from = "file_data_url", '
+        'path = { from = "env", key = "PPTX_IMAGE_PATH", trim = true }, '
+        'max_bytes = 8388608, '
+        'allowed_media_types = ["image/png", "image/jpeg", "image/gif", '
+        '"image/webp", "image/svg+xml"] }'
     )
-    return "{ from = \"shell\", cmd = '''" + command + "''', timeout_ms = 15000, trim = true }"
 
 
 def normalize_httpx_base_url(value: str | None) -> str:
@@ -1446,7 +1460,12 @@ def render_toml(
         lines.extend(
             [
                 f"[actions.{action_name}]",
-                f'description = "{label} 批量{"预检" if kind == "validate" else "执行"}"',
+                "description = "
+                + toml_string(
+                    f"{label} 批量{'预检' if kind == 'validate' else '执行'}；"
+                    "inspect、validate、execute 必须使用相同 request_id 和逐字相同的 JSON；"
+                    "预检失败后只要修改 JSON，就换用 -r1 等新 ID 并重新执行完整链路"
+                ),
                 'method = "POST"',
                 f"path = {document_path_source(document_action)}",
                 'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
@@ -1488,7 +1507,7 @@ def render_toml(
                 'body = { qaJson = { from = "param", key = "qa_json" } }',
                 "expect_status = 200",
                 "params = [",
-                '  { name = "qa_json", type = "json object string", required = true, description = "QA 要求 JSON；支持 requiredStyles、numberingSequences、requireSeq、requireRef、requireCommentAnchors、allowedBlankPages" }',
+                '  { name = "qa_json", type = "json object string", required = true, description = "QA 要求 JSON；支持 requiredStyles、numberingSequences、requireSeq、requireRef、requireCommentAnchors、allowedBlankPages；多级编号的 numberingSequences 可提供与 paragraphIndexes 等长的 levels" }',
                 "]",
                 'extract_type = "jq"',
                 'extract_expr = ".body"',
@@ -1517,7 +1536,12 @@ def render_toml(
                 "",
             ]
         )
-    return "\n".join(lines).rstrip() + "\n"
+    rendered = "\n".join(lines).rstrip() + "\n"
+    if 'from = "shell"' in rendered:
+        raise ValueError(
+            f"generated {config['site']} HTTPX site must remain shell-free"
+        )
+    return rendered
 
 
 def build_artifacts(
@@ -1611,10 +1635,9 @@ def build_artifacts(
         )
         references = skill_root / "references"
         skill_path = skill_root / "SKILL.md"
-        artifacts[skill_path] = render_skill_version(
-            skill_path.read_text(encoding="utf-8"),
-            contract["version"],
-        )
+        # Skill releases are independent from the bridge contract. Keep the
+        # authored SKILL.md byte-for-byte instead of projecting contract.version.
+        artifacts[skill_path] = skill_path.read_text(encoding="utf-8")
         contract_groups = EDITOR_CONTRACT_GROUPS[editor]
         grouped_names = [
             name
@@ -1693,8 +1716,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.3":
-        raise ValueError("public-api.json version must be 0.2.3")
+    if contract.get("version") != "0.2.4":
+        raise ValueError("public-api.json version must be 0.2.4")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}

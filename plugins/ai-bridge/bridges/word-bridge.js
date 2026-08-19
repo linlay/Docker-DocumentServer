@@ -81,11 +81,12 @@
     "clearForms", "comboBox", "comments", "configure", "contains", "content",
     "continuous", "control", "create", "current", "custom", "date",
     "datePicker", "decimal", "default", "delete", "deleteAttribute",
+    "decimalZero",
     "deleteBookmark", "deleteElement", "down", "dropDown", "edit", "end",
     "endnote", "even", "evenPage", "exact", "first", "footer", "footnote",
     "forms", "header", "heading", "hidden", "image", "inFront", "inline",
     "insertAttribute", "insertElement", "landscape", "latex", "left",
-    "final", "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
+    "final", "lowerLetter", "lowerRoman", "mathml", "mergeCells", "multilevel", "next", "nextPage", "none",
     "number", "numbered", "numbering", "oddPage", "office", "oleObject",
     "page", "paragraph", "picture", "portrait", "previous", "protect",
     "original", "readOnly", "rejectAll", "relative", "remove", "removeAll",
@@ -93,7 +94,7 @@
     "right", "search", "set", "setImage", "setText", "shape", "smartArt",
     "setDisplay", "simple", "splitCell", "square", "start", "stop", "string", "subscript",
     "superscript", "table", "through", "tight", "top", "topAndBottom",
-    "unicode", "unprotect", "up", "update", "updateAll", "updateAttribute",
+    "unicode", "unprotect", "up", "upperLetter", "upperRoman", "update", "updateAll", "updateAttribute",
     "updateElement", "updateTableOfFigures", "updateToc", "vba",
   ];
   const WORD_ENUM_CANONICAL_BY_TOKEN = WORD_CANONICAL_ENUM_VALUES.reduce(
@@ -225,6 +226,33 @@
       }
       if (toolName === "word_manage_section") {
         aliasProperty(args, "paragraphIndex", "endParagraphIndex", "arguments", index);
+      }
+      if (toolName === "word_set_numbering" && Array.isArray(args.levels)) {
+        for (let levelIndex = 0; levelIndex < args.levels.length; levelIndex += 1) {
+          const level = args.levels[levelIndex];
+          if (!level || typeof level !== "object" || Array.isArray(level)) continue;
+          const levelPath = "arguments.levels[" + levelIndex + "]";
+          if (!Object.prototype.hasOwnProperty.call(level, "level")) {
+            level.level = levelIndex;
+            notice(index, levelPath + ".level", levelPath + ".level", "implicitDefault");
+          }
+          aliasProperty(level, "numberFormat", "format", levelPath, index);
+          if (Object.prototype.hasOwnProperty.call(level, "hangingIndentPt")) {
+            const canonicalWins = Object.prototype.hasOwnProperty.call(level, "firstLineIndentPt");
+            if (canonicalWins) {
+              delete level.hangingIndentPt;
+              notice(index, levelPath + ".hangingIndentPt", levelPath + ".firstLineIndentPt", "canonicalWins");
+            } else if (typeof level.hangingIndentPt === "number" && Number.isFinite(level.hangingIndentPt)) {
+              level.firstLineIndentPt = -Math.abs(level.hangingIndentPt);
+              delete level.hangingIndentPt;
+              notice(index, levelPath + ".hangingIndentPt", levelPath + ".firstLineIndentPt", "propertyAlias");
+            }
+          }
+          if (level.restart === 0 || level.restart === 1) {
+            level.restart = Boolean(level.restart);
+            notice(index, levelPath + ".restart", levelPath + ".restart", "typeAlias");
+          }
+        }
       }
       if (WORD_POINT_ALIAS_TOOLS.has(toolName)) {
         for (const alias of Object.keys(WORD_PROPERTY_ALIASES)) {
@@ -422,25 +450,64 @@
         }
       }
 
-      if (name === "word_set_numbering" && Array.isArray(args.assignments)) {
-        if (!args.assignments.length) {
-          add(index, name, "assignments", "assignments must contain at least one paragraph target");
+      if (name === "word_set_numbering") {
+        const hasLegacyTarget = (
+          args.all === true
+          || args.current === true
+          || args.paragraphIndex !== undefined
+          || args.paragraphId !== undefined
+          || args.internalId !== undefined
+          || (Array.isArray(args.paragraphIndexes) && args.paragraphIndexes.length > 0)
+          || (typeof args.search === "string" && args.search.length > 0)
+        );
+        if ((!Array.isArray(args.assignments) || !args.assignments.length) && !hasLegacyTarget) {
+          add(
+            index,
+            name,
+            "target",
+            "set_numbering requires assignments[] or one legacy top-level paragraph target; use one assignments[] call for a continuous multilevel list",
+            "required",
+          );
         }
-        for (let assignmentIndex = 0; assignmentIndex < args.assignments.length; assignmentIndex += 1) {
-          const assignment = args.assignments[assignmentIndex] || {};
-          const targetCount = [
-            assignment.paragraphId,
-            assignment.internalId,
-            assignment.paragraphIndex,
-            assignment.search,
-          ].filter(value => value !== undefined && value !== "").length;
-          if (targetCount !== 1) {
-            add(
-              index,
-              name,
-              "assignments[" + assignmentIndex + "]",
-              "each assignment must identify exactly one paragraph",
-            );
+        if (Array.isArray(args.assignments)) {
+          if (!args.assignments.length) {
+            add(index, name, "assignments", "assignments must contain at least one paragraph target");
+          }
+          for (let assignmentIndex = 0; assignmentIndex < args.assignments.length; assignmentIndex += 1) {
+            const assignment = args.assignments[assignmentIndex] || {};
+            if (Object.prototype.hasOwnProperty.call(assignment, "paragraphIndexes")) {
+              add(
+                index,
+                name,
+                "assignments[" + assignmentIndex + "].paragraphIndexes",
+                "paragraphIndexes is not allowed inside an assignment; split it into one assignment per paragraph and keep all assignments in the same set_numbering call",
+                "additionalProperties",
+              );
+            }
+            const targetCount = [
+              assignment.paragraphId,
+              assignment.internalId,
+              assignment.paragraphIndex,
+              assignment.search,
+            ].filter(value => value !== undefined && value !== "").length;
+            if (targetCount !== 1) {
+              add(
+                index,
+                name,
+                "assignments[" + assignmentIndex + "]",
+                "each assignment must contain exactly one of paragraphId, internalId, paragraphIndex, or search; split multiple paragraph targets into separate assignments",
+              );
+            }
+          }
+        }
+        if (Array.isArray(args.levels)) {
+          const seenLevels = new Set();
+          for (let levelIndex = 0; levelIndex < args.levels.length; levelIndex += 1) {
+            const configuredLevel = args.levels[levelIndex] || {};
+            if (seenLevels.has(configuredLevel.level)) {
+              add(index, name, "levels[" + levelIndex + "].level", "each numbering level may be configured only once", "uniqueItems");
+            }
+            seenLevels.add(configuredLevel.level);
           }
         }
       }
@@ -1900,6 +1967,36 @@
               }
             }
 
+            function numberingDefinitionStableId(numberingDefinition) {
+              if (!numberingDefinition) return null;
+              var internalDefinition = numberingDefinition.Num || numberingDefinition;
+              var candidates = [numberingDefinition];
+              if (internalDefinition !== numberingDefinition) candidates.push(internalDefinition);
+              for (var candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+                var candidate = candidates[candidateIndex];
+                var candidateId = safeCall(candidate, "GetInternalId", [], null);
+                if (candidateId === null || candidateId === undefined) {
+                  candidateId = safeCall(candidate, "GetId", [], null);
+                }
+                if (candidateId === null || candidateId === undefined) {
+                  candidateId = safeCall(candidate, "Get_Id", [], null);
+                }
+                if ((candidateId === null || candidateId === undefined) && candidate.Id !== undefined) {
+                  candidateId = candidate.Id;
+                }
+                if (candidateId !== null && candidateId !== undefined) return candidateId;
+              }
+              return null;
+            }
+
+            function numberingDefinitionGroupKey(numberingDefinition) {
+              var stableId = numberingDefinitionStableId(numberingDefinition);
+              if (stableId !== null && stableId !== undefined) return "id:" + String(stableId);
+              return numberingDefinition && numberingDefinition.Num
+                ? numberingDefinition.Num
+                : numberingDefinition;
+            }
+
             function documentSections() {
               var sections = typeof doc.GetSections === "function" ? doc.GetSections() || [] : [];
               if (!sections.length && typeof doc.GetFinalSection === "function") {
@@ -2760,9 +2857,10 @@
                       var numberedIdentity = paragraphIdentity(numberedParagraph);
                       var numberedLevel = safeCall(numberedParagraph, "GetNumPr", [], null);
                       var numberedDefinition = safeCall(numberedLevel, "GetNumbering", [], null);
-                      var numberingGroupIndex = numberingGroups.indexOf(numberedDefinition);
+                      var numberingGroupKey = numberingDefinitionGroupKey(numberedDefinition);
+                      var numberingGroupIndex = numberingGroups.indexOf(numberingGroupKey);
                       if (numberingGroupIndex < 0) {
-                        numberingGroups.push(numberedDefinition);
+                        numberingGroups.push(numberingGroupKey);
                         numberingGroupIndex = numberingGroups.length - 1;
                       }
                       advanced.numbering.push({
@@ -2772,6 +2870,7 @@
                         text: paragraphText(numberedParagraph).slice(0, 500),
                         level: safeCall(numberedLevel, "GetLevelIndex", [], safeCall(numberedLevel, "GetLvl", [], null)),
                         listGroup: numberingGroupIndex + 1,
+                        listGroupId: numberingDefinitionStableId(numberedDefinition),
                       });
                     }
                   }
@@ -3438,19 +3537,40 @@
                       if (typeof levelObject.SetCustomType !== "function") commandError("WORD_API_UNSUPPORTED", "当前 ONLYOFFICE 版本不支持自定义编号格式");
                       var defaultNumberingText = "";
                       for (var defaultLevelIndex = 0; defaultLevelIndex <= levelIndex; defaultLevelIndex += 1) {
-                        defaultNumberingText += "%" + defaultLevelIndex + ".";
+                        defaultNumberingText += "%" + (defaultLevelIndex + 1) + ".";
                       }
                       levelObject.SetCustomType(
                         String(configuredLevel.format || "decimal"),
-                        String(configuredLevel.text || defaultNumberingText),
+                        String(configuredLevel.text === undefined ? defaultNumberingText : configuredLevel.text),
                         String(configuredLevel.align || "left"),
                       );
+                    }
+                    if (configuredLevel.leftIndentPt !== undefined || configuredLevel.firstLineIndentPt !== undefined) {
+                      if (typeof levelObject.GetParaPr !== "function") {
+                        commandError(
+                          "WORD_API_UNSUPPORTED",
+                          "当前 ONLYOFFICE 版本不支持通过 ApiNumberingLevel.GetParaPr 设置编号层级缩进",
+                          { partialMutationPossible: false },
+                        );
+                      }
+                      var numberingLevelParaPr = levelObject.GetParaPr();
+                      if (!numberingLevelParaPr) {
+                        commandError(
+                          "WORD_API_UNSUPPORTED",
+                          "ONLYOFFICE 未返回编号层级段落属性",
+                          { partialMutationPossible: false },
+                        );
+                      }
+                      applyParagraphFormat(numberingLevelParaPr, {
+                        leftIndentPt: configuredLevel.leftIndentPt,
+                        firstLineIndentPt: configuredLevel.firstLineIndentPt,
+                      });
                     }
                     if (configuredLevel.start !== undefined && typeof levelObject.SetStart === "function") {
                       levelObject.SetStart(Math.floor(finiteNumber(configuredLevel.start, "levels.start")));
                     }
                     if (configuredLevel.restart !== undefined && typeof levelObject.SetRestart === "function") {
-                      levelObject.SetRestart(Math.floor(finiteNumber(configuredLevel.restart, "levels.restart")));
+                      levelObject.SetRestart(Boolean(configuredLevel.restart));
                     }
                   }
                   var assignmentResults = [];
@@ -3469,7 +3589,7 @@
                       level: numberingAssignment.level,
                     });
                   }
-                  var listGroupId = safeCall(customNumbering, "GetInternalId", [], safeCall(customNumbering, "GetId", [], null));
+                  var listGroupId = numberingDefinitionStableId(customNumbering);
                   if (listGroupId === null || listGroupId === undefined) listGroupId = continuedFrom === null ? "created" : "continued";
                   changed += numberingAssignments.length;
                   results.push({
@@ -3540,8 +3660,17 @@
                       listEntries[listIndex].paragraph.SetContextualSpacing(Boolean(args.contextualSpacing));
                     }
                   }
+                  var setListGroupId = numberingDefinitionStableId(numbering);
+                  if (setListGroupId === null || setListGroupId === undefined) setListGroupId = "created";
                   changed += listEntries.length;
-                  results.push({ name: call.name, listType: listType, level: listLevel, paragraphs: listEntries.length });
+                  results.push({
+                    name: call.name,
+                    listType: listType,
+                    level: listLevel,
+                    paragraphs: listEntries.length,
+                    listGroupId: setListGroupId,
+                    independentPerCall: true,
+                  });
                   break;
                 }
 

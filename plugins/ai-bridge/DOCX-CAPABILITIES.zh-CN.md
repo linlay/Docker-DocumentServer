@@ -50,7 +50,7 @@ TypeScript 参数以 `public-api.d.ts` 为准。
 |---|---|---|---|
 | D21 | 项目符号列表 | 已实现 | `word_set_list`、`word_set_numbering`。 |
 | D22 | 编号列表 | 已实现 | `word_set_list`、`word_set_numbering`。 |
-| D23 | 多级列表（高级） | 待导出验收 | `word_set_numbering.levels` 支持 0–8 级；一次调用的 `assignments[]` 共用同一编号实例，`continueFrom` 复用已有定义。旧 `paragraphIndexes + level` 每次调用仍是独立列表，不可用于跨层级连续编号。最终以导出 OOXML 的共享 `numId` 为准。 |
+| D23 | 多级列表（高级） | 已实现 | `word_set_numbering.levels` 支持 0–8 级；一次调用的 `assignments[]` 共用同一编号实例，`continueFrom` 复用已有定义。`inspect_advanced` 按 ONLYOFFICE 内部编号 ID 返回稳定 `listGroup`。旧 `paragraphIndexes + level` 每次调用仍是独立列表，不可用于跨层级连续编号。已通过 6 个父级、24 个子级的 ONLYOFFICE 9.4 导出验收，目标段落共享一个 OOXML `numId`。 |
 | D24 | 自定义编号规则（高级） | 已实现 | 支持每级编号格式、格式文本、起始值、对齐、重启规则。 |
 
 ## 表格

@@ -174,10 +174,15 @@ class ContractAlignmentTests(unittest.TestCase):
         )
         with open(os.path.join(base_dir, "config.json"), encoding="utf-8") as stream:
             plugin_config = json.load(stream)
+        with open(os.path.join(base_dir, "public-api.json"), encoding="utf-8") as stream:
+            public_contract = json.load(stream)
         config_revision = plugin_config["variations"][0]["url"].split("?v=", 1)[1]
 
         self.assertEqual(revisions, [config_revision] * 4)
-        self.assertRegex(config_revision, r"^0\.2\.3-[0-9a-f]{64}$")
+        self.assertRegex(
+            config_revision,
+            rf"^{re.escape(public_contract['version'])}-[0-9a-f]{{64}}$",
+        )
         for relative_path in ("README.md", "INTEGRATION.zh-CN.md"):
             with self.subTest(path=relative_path):
                 with open(os.path.join(base_dir, relative_path), encoding="utf-8") as stream:
@@ -332,6 +337,94 @@ class ContractAlignmentTests(unittest.TestCase):
             [(error["tool"], error["path"]) for error in slide_errors],
             [("slides_add_table", "arguments.data[0][0].text")],
         )
+
+    def test_word_numbering_contract_normalizes_compatibility_fields_and_rejects_ambiguous_shapes(self):
+        raw_calls = [{
+            "name": "word_set_numbering",
+            "arguments": {
+                "kind": "multilevel",
+                "levels": [
+                    {
+                        "numberFormat": "lowerRoman",
+                        "hangingIndentPt": 18,
+                        "leftIndentPt": 36,
+                        "restart": 1,
+                    },
+                    {
+                        "level": 1,
+                        "format": "decimal",
+                        "numberFormat": "upperLetter",
+                        "firstLineIndentPt": -12,
+                        "hangingIndentPt": 20,
+                    },
+                ],
+                "assignments": [
+                    {"paragraphIndex": 1, "level": 0},
+                    {"paragraphIndex": 2, "level": 1},
+                ],
+            },
+        }]
+        normalized_calls, normalizations = copilot_server.normalize_editor_tool_calls(
+            "word",
+            raw_calls,
+        )
+        levels = normalized_calls[0]["arguments"]["levels"]
+        self.assertEqual(
+            levels,
+            [
+                {
+                    "level": 0,
+                    "format": "lowerRoman",
+                    "firstLineIndentPt": -18,
+                    "leftIndentPt": 36,
+                    "restart": True,
+                },
+                {
+                    "level": 1,
+                    "format": "decimal",
+                    "firstLineIndentPt": -12,
+                },
+            ],
+        )
+        self.assertEqual(
+            {normalization["kind"] for normalization in normalizations},
+            {"implicitDefault", "propertyAlias", "canonicalWins", "typeAlias"},
+        )
+        self.assertEqual(
+            copilot_server.validate_editor_tool_calls("word", normalized_calls),
+            [],
+        )
+
+        for arguments, expected_path in [
+            ({}, "arguments.target"),
+            (
+                {
+                    "levels": [{"level": 0}, {"level": 0}],
+                    "assignments": [{"paragraphIndex": 1, "level": 0}],
+                },
+                "arguments.levels[1].level",
+            ),
+            (
+                {"assignments": [{"paragraphIndexes": [1, 2], "level": 0}]},
+                "arguments.assignments[0].paragraphIndexes",
+            ),
+            (
+                {
+                    "assignments": [{
+                        "paragraphIndex": 1,
+                        "search": "一级",
+                        "level": 0,
+                    }],
+                },
+                "arguments.assignments[0]",
+            ),
+        ]:
+            normalized, _ = copilot_server.normalize_editor_tool_calls(
+                "word",
+                [{"name": "word_set_numbering", "arguments": arguments}],
+            )
+            errors = copilot_server.validate_editor_tool_calls("word", normalized)
+            self.assertIn(expected_path, [error["path"] for error in errors])
 
 
 class ImageImportTests(unittest.TestCase):
@@ -2336,6 +2429,17 @@ class HttpRelayTests(unittest.TestCase):
             copilot_server.bridge_execute(conflicting, claims)
         self.assertEqual(raised.exception.code, "REQUEST_ID_CONFLICT")
         self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(
+            raised.exception.details,
+            {
+                "requestId": request["requestId"],
+                "sessionId": "http-session:test",
+                "retryable": False,
+                "reuseAllowed": False,
+                "requiredAction": "use_new_request_id",
+                "partialMutationPossible": False,
+            },
+        )
 
         self.register("http-session:next", "document-key-v2")
         cached_after_handoff = copilot_server.bridge_execute(request, claims)

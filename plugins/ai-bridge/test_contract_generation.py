@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.3")
+        self.assertEqual(self.contract["version"], "0.2.4")
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -484,7 +484,7 @@ class ContractGenerationTests(unittest.TestCase):
             artifacts[sync_contract.INDEX_PATH],
         )
         self.assertEqual(index_revisions, [revision] * 4)
-        self.assertRegex(revision, r"^0\.2\.3-[0-9a-f]{64}$")
+        self.assertRegex(revision, r"^0\.2\.4-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
             artifacts[sync_contract.CONFIG_PATH],
@@ -562,7 +562,10 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn('path = "/api/v1/documents/upload"', rendered)
                 self.assertIn("multipart = [", rendered)
                 self.assertIn("max_bytes = 209715200", rendered)
-                self.assertIn("/api/v1/documents/$document_id/download", rendered)
+                self.assertIn(
+                    'output_template = "/api/v1/documents/{{value}}/download"',
+                    rendered,
+                )
                 download_action = rendered.split("[actions.download]", 1)[1].split(
                     "\n[actions.", 1
                 )[0]
@@ -613,8 +616,38 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertNotIn("Authorization", rendered)
                 self.assertNotIn("AP_ACCESS_TOKEN", rendered)
                 self.assertNotIn("X-HTTPX-Direct-Secret", rendered)
-                self.assertIn("document_id=$DOCUMENT_HUB_DOCUMENT_ID", rendered)
+                self.assertIn('from = "env", key = "DOCUMENT_HUB_DOCUMENT_ID"', rendered)
+                self.assertIn('pattern = "^[0-9a-f]', rendered)
+                self.assertNotIn('from = "shell"', rendered)
+                self.assertIn(sync_contract.REQUEST_ID_DESCRIPTION, rendered)
+                validate_action = rendered.split("[actions.validate_batch]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                execute_action = rendered.split("[actions.execute_batch]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                control_action = rendered.split("[actions.save]", 1)[1].split(
+                    "\n[actions.", 1
+                )[0]
+                for request_action in (inspect_action, validate_action, execute_action, control_action):
+                    self.assertIn(sync_contract.REQUEST_ID_DESCRIPTION, request_action)
+                    self.assertIn("expect_status = 200", request_action)
+                self.assertIn("inspect、validate、execute 必须使用相同 request_id", validate_action)
+                self.assertIn("换用 -r1 等新 ID", validate_action)
                 self.assertIn('path = "/api/v1/documents"', rendered)
+                if editor == "word":
+                    numbering_action = rendered.split("[actions.set_numbering]", 1)[1].split(
+                        "\n[actions.", 1
+                    )[0]
+                    numbering_example = sync_contract.canonical_json(
+                        self.contract["tools"]["word"]["word_set_numbering"]["examples"][0]
+                    )
+                    self.assertIn(
+                        "example = " + sync_contract.toml_string(numbering_example),
+                        numbering_action,
+                    )
+                    self.assertNotIn('example = "{}"', numbering_action)
+                    self.assertIn("%1.%2.", numbering_action)
                 self.assertIn("/ai/session", rendered)
                 self.assertIn("/ai/validate", rendered)
                 self.assertIn("/ai/execute", rendered)
@@ -638,6 +671,7 @@ class ContractGenerationTests(unittest.TestCase):
                     self.assertNotIn("[actions.qa]", rendered)
                     self.assertNotIn("/ai/qa", rendered)
                 self.assertNotIn("/copilot-api/bridge/attach", rendered)
+
                 self.assertNotIn("auth.bridge", rendered)
                 self.assertNotIn("bindingToken", rendered)
                 site = sync_contract.EDITOR_CONFIG[editor]["site"]
@@ -712,6 +746,8 @@ class ContractGenerationTests(unittest.TestCase):
                     "---\n"
                     f'name: {config["skill"]}\n'
                     "description: Example\n"
+                    "metadata:\n"
+                    '  version: "7.8.9"\n'
                     "---\n\n"
                     "# Body\n\n"
                     "`DocumentServerPublicOrigin` 是内部实现细节，不得用 `curl` 探测。\n"
@@ -741,7 +777,7 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertIn(skill_path, artifacts)
                 self.assertIn(toml_path, artifacts)
                 self.assertIn(
-                    '  version: "0.2.3"',
+                    '  version: "7.8.9"',
                     artifacts[skill_path],
                 )
                 self.assertIn(

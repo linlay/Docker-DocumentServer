@@ -752,6 +752,69 @@ def normalize_editor_tool_calls(
             enum_aliases,
             match_enum_tokens,
         )
+        if editor == "word" and name == "word_set_numbering":
+            levels = call["arguments"].get("levels")
+            if not isinstance(levels, list):
+                continue
+            for level_index, level in enumerate(levels):
+                if not isinstance(level, dict):
+                    continue
+                level_path = f"arguments.levels[{level_index}]"
+                if "level" not in level:
+                    level["level"] = level_index
+                    normalizations.append(
+                        {
+                            "toolCallIndex": index,
+                            "path": f"{level_path}.level",
+                            "canonicalPath": f"{level_path}.level",
+                            "kind": "implicitDefault",
+                        }
+                    )
+                if "numberFormat" in level:
+                    canonical_wins = "format" in level
+                    if not canonical_wins:
+                        level["format"] = level["numberFormat"]
+                    del level["numberFormat"]
+                    normalizations.append(
+                        {
+                            "toolCallIndex": index,
+                            "path": f"{level_path}.numberFormat",
+                            "canonicalPath": f"{level_path}.format",
+                            "kind": "canonicalWins" if canonical_wins else "propertyAlias",
+                        }
+                    )
+                if "hangingIndentPt" in level:
+                    canonical_wins = "firstLineIndentPt" in level
+                    hanging_indent = level["hangingIndentPt"]
+                    if canonical_wins:
+                        del level["hangingIndentPt"]
+                    elif (
+                        isinstance(hanging_indent, (int, float))
+                        and not isinstance(hanging_indent, bool)
+                        and math.isfinite(hanging_indent)
+                    ):
+                        level["firstLineIndentPt"] = -abs(hanging_indent)
+                        del level["hangingIndentPt"]
+                    else:
+                        continue
+                    normalizations.append(
+                        {
+                            "toolCallIndex": index,
+                            "path": f"{level_path}.hangingIndentPt",
+                            "canonicalPath": f"{level_path}.firstLineIndentPt",
+                            "kind": "canonicalWins" if canonical_wins else "propertyAlias",
+                        }
+                    )
+                if type(level.get("restart")) is int and level["restart"] in (0, 1):
+                    level["restart"] = bool(level["restart"])
+                    normalizations.append(
+                        {
+                            "toolCallIndex": index,
+                            "path": f"{level_path}.restart",
+                            "canonicalPath": f"{level_path}.restart",
+                            "kind": "typeAlias",
+                        }
+                    )
     return normalized_calls, normalizations
 
 
@@ -1184,6 +1247,65 @@ def validate_word_semantics(
                 "set requires text, a page field, fields, or formatting",
             )
 
+    if name == "word_set_numbering":
+        assignments = arguments.get("assignments")
+        has_legacy_target = (
+            arguments.get("all") is True
+            or arguments.get("current") is True
+            or "paragraphIndex" in arguments
+            or "paragraphId" in arguments
+            or "internalId" in arguments
+            or (
+                isinstance(arguments.get("paragraphIndexes"), list)
+                and bool(arguments["paragraphIndexes"])
+            )
+            or (
+                isinstance(arguments.get("search"), str)
+                and bool(arguments["search"])
+            )
+        )
+        if (not isinstance(assignments, list) or not assignments) and not has_legacy_target:
+            semantic_error(
+                "target",
+                "set_numbering requires assignments[] or one legacy top-level paragraph target; use one assignments[] call for a continuous multilevel list",
+            )
+        if isinstance(assignments, list):
+            for index, assignment in enumerate(assignments):
+                if not isinstance(assignment, dict):
+                    continue
+                if "paragraphIndexes" in assignment:
+                    semantic_error(
+                        f"assignments[{index}].paragraphIndexes",
+                        "paragraphIndexes is not allowed inside an assignment; split it into one assignment per paragraph in the same call",
+                    )
+                target_count = sum(
+                    assignment.get(field) not in (None, "")
+                    for field in (
+                        "paragraphId",
+                        "internalId",
+                        "paragraphIndex",
+                        "search",
+                    )
+                )
+                if target_count != 1:
+                    semantic_error(
+                        f"assignments[{index}]",
+                        "each assignment must contain exactly one paragraph locator",
+                    )
+        levels = arguments.get("levels")
+        if isinstance(levels, list):
+            seen_levels: set[Any] = set()
+            for index, level in enumerate(levels):
+                if not isinstance(level, dict):
+                    continue
+                configured_level = level.get("level", index)
+                if configured_level in seen_levels:
+                    semantic_error(
+                        f"levels[{index}].level",
+                        "each numbering level may be configured only once",
+                    )
+                seen_levels.add(configured_level)
+
 
 def validate_slide_semantics(
     name: str,
@@ -1424,6 +1546,7 @@ SEMANTIC_VALIDATORS = {
     "word.pageBreakTarget": validate_word_semantics,
     "word.tableRangeOrder": validate_word_semantics,
     "word.headerFooterContent": validate_word_semantics,
+    "word.numberingDefinition": validate_word_semantics,
     "slides.distinctOverlapPair": validate_slide_semantics,
     "sheets.a1MatrixShape": validate_sheet_semantics,
     "sheets.validationRule": validate_sheet_semantics,
@@ -3085,7 +3208,14 @@ def bridge_execute(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str,
                     409,
                     "REQUEST_ID_CONFLICT",
                     "同一 requestId 不能用于不同方法或参数",
-                    {"requestId": command_data["requestId"], "sessionId": session_id},
+                    {
+                        "requestId": command_data["requestId"],
+                        "sessionId": session_id,
+                        "retryable": False,
+                        "reuseAllowed": False,
+                        "requiredAction": "use_new_request_id",
+                        "partialMutationPossible": False,
+                    },
                 )
             if (
                 command.get("response") is None
