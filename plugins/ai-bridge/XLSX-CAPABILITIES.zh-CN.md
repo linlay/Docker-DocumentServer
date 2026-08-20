@@ -125,7 +125,7 @@
 
 | ID | 能力 | ONLYOFFICE 9.4 | ai-bridge 0.2.3 | Bridge 入口与说明 |
 | --- | --- | --- | --- | --- |
-| X66 | 冻结窗格 | ✅ | ✅ | `inspectFreezePanes`、`manageFreezePanes`；`freezeRows(count)` / `freezeColumns(count)` 冻结前 N 行/列，`freezeAt(range)` 的 range 表示实际冻结区域；变更会等待 `GetLocation()` 异步读回并返回 `verified:true` |
+| X66 | 冻结窗格 | ✅ | ✅ | `inspectFreezePanes`、`manageFreezePanes`；`freezeRows(count)` / `freezeColumns(count)` 冻结前 N 行/列，`freezeAt(range)` 的 range 是实际冻结区域而非首个可滚动单元格：`A1`=1 行+1 列、`A2`=2 行+1 列、`B2`=2 行+2 列；变更会等待 `GetLocation()` 异步读回并返回 `verified:true` |
 | X67 | 拆分窗口 | ⛔ | ⛔ | ONLYOFFICE 9.4 无 Excel 拆分窗口等价能力 |
 | X68 | 页面尺寸和方向 | ✅ | 🟨 | `managePageLayout.orientation` 支持 `portrait` / `landscape` 及原生 `xl*` 值；9.4 Spreadsheet API 无纸张尺寸方法 |
 | X69 | 页边距 | ✅ | ✅ | `managePageLayout.marginsPt`，单位为磅 |

@@ -310,12 +310,17 @@
       const resultItem = executionResult.results[check.resultIndex];
       const state = states[index];
       if (check.kind === "freeze") {
-        const existingLocation = resultItem.location && typeof resultItem.location === "object"
-          ? resultItem.location
-          : {};
-        resultItem.location = state.locationAddress
-          ? Object.assign({}, existingLocation, { address: state.locationAddress })
-          : null;
+        if (state.locationAddress) {
+          resultItem.location = { address: state.locationAddress };
+          if (state.locationRows !== undefined) {
+            resultItem.location.rows = state.locationRows;
+          }
+          if (state.locationColumns !== undefined) {
+            resultItem.location.columns = state.locationColumns;
+          }
+        } else {
+          resultItem.location = null;
+        }
         resultItem.frozenRows = state.frozenRows;
         resultItem.frozenColumns = state.frozenColumns;
         resultItem.topLeftCell = state.topLeftCell;
@@ -344,6 +349,33 @@
       expected: failedCheck.expected,
       observed: states[Math.max(0, failedIndex)] || null,
     };
+    return error;
+  }
+
+  function verificationReadError(checks, payload) {
+    const failedCheck = checks[0] || {};
+    const payloadDetails = payload
+      && payload.details
+      && typeof payload.details === "object"
+      ? payload.details
+      : {};
+    const error = new Error(
+      payload && payload.message
+        ? payload.message
+        : "无法读取 ONLYOFFICE 工作表视图状态",
+    );
+    error.code = payload && payload.code
+      ? payload.code
+      : "SHEETS_VIEW_STATE_READ_FAILED";
+    error.details = Object.assign({}, payloadDetails, {
+      phase: "sheets-view-verification",
+      tool: failedCheck.name,
+      toolCallIndex: failedCheck.resultIndex,
+      completedToolCalls: checks.length,
+      partialMutationPossible: true,
+      expected: failedCheck.expected,
+      observed: payloadDetails.location || null,
+    });
     return error;
   }
 
@@ -460,6 +492,74 @@
                 return result;
               }
 
+              function freezeDimensions(address, rows, columns) {
+                var maxRows = 1048576;
+                var maxColumns = 16384;
+                var localAddress = String(address || "")
+                  .split("!")
+                  .pop()
+                  .replace(/\$/g, "")
+                  .trim();
+                var matched = /^([1-9][0-9]*):([1-9][0-9]*)$/.exec(localAddress);
+                var frozenRows;
+                var frozenColumns;
+                if (matched) {
+                  frozenRows = Number(matched[2]);
+                  frozenColumns = 0;
+                } else {
+                  matched = /^([A-Za-z]{1,3}):([A-Za-z]{1,3})$/.exec(localAddress);
+                  if (matched) {
+                    frozenRows = 0;
+                    frozenColumns = columnNumber(matched[2]);
+                  } else {
+                    var parts = localAddress.split(":");
+                    matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
+                    if (matched) {
+                      var lastColumn = columnNumber(matched[1]);
+                      var lastRow = Number(matched[2]);
+                      frozenRows = lastColumn >= maxColumns ? lastRow : (
+                        lastRow >= maxRows ? 0 : lastRow
+                      );
+                      frozenColumns = lastRow >= maxRows ? lastColumn : (
+                        lastColumn >= maxColumns ? 0 : lastColumn
+                      );
+                    }
+                  }
+                }
+                if (frozenRows === undefined || frozenColumns === undefined) {
+                  var rowCount = Number(rows);
+                  var columnCount = Number(columns);
+                  var validRows = isFinite(rowCount) && rowCount >= 1 && Math.floor(rowCount) === rowCount;
+                  var validColumns = isFinite(columnCount) && columnCount >= 1 && Math.floor(columnCount) === columnCount;
+                  if (validRows && validColumns) {
+                    if (columnCount >= maxColumns && rowCount < maxRows) {
+                      frozenRows = rowCount;
+                      frozenColumns = 0;
+                    } else if (rowCount >= maxRows && columnCount < maxColumns) {
+                      frozenRows = 0;
+                      frozenColumns = columnCount;
+                    } else if (rowCount < maxRows && columnCount < maxColumns) {
+                      frozenRows = rowCount;
+                      frozenColumns = columnCount;
+                    }
+                  }
+                }
+                if (
+                  frozenRows === undefined
+                  || frozenColumns === undefined
+                  || frozenRows < 0
+                  || frozenColumns < 0
+                  || frozenRows >= maxRows
+                  || frozenColumns >= maxColumns
+                ) {
+                  return null;
+                }
+                return {
+                  frozenRows: frozenRows,
+                  frozenColumns: frozenColumns,
+                };
+              }
+
               function freezeState(sheet) {
                 var panes = sheet.GetFreezePanes();
                 var location = panes && typeof panes.GetLocation === "function"
@@ -474,23 +574,29 @@
                   };
                 }
                 var address = location.GetAddress(true, true, "xlA1", false);
-                var localAddress = String(address || "").split("!").pop().replace(/\$/g, "");
-                var parts = localAddress.split(":");
-                var matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
-                if (!matched) throw new Error("无法解析冻结区域：" + address);
-                var lastColumn = columnNumber(matched[1]);
-                var lastRow = Number(matched[2]);
-                var frozenRows = lastColumn >= 16384 ? lastRow : (
-                  lastRow >= 1048576 ? 0 : lastRow
-                );
-                var frozenColumns = lastRow >= 1048576 ? lastColumn : (
-                  lastColumn >= 16384 ? 0 : lastColumn
-                );
+                var rows = typeof location.GetRowsCount === "function"
+                  ? location.GetRowsCount()
+                  : null;
+                var columns = typeof location.GetColumnsCount === "function"
+                  ? location.GetColumnsCount()
+                  : null;
+                var dimensions = freezeDimensions(address, rows, columns);
+                if (!dimensions) {
+                  var parseError = new Error("无法解析 ONLYOFFICE 返回的冻结区域");
+                  parseError.code = "SHEETS_API_UNSUPPORTED";
+                  parseError.details = {
+                    location: { address: address, rows: rows, columns: columns },
+                  };
+                  throw parseError;
+                }
                 return {
                   locationAddress: address,
-                  frozenRows: frozenRows,
-                  frozenColumns: frozenColumns,
-                  topLeftCell: columnName(frozenColumns + 1) + String(frozenRows + 1),
+                  locationRows: rows,
+                  locationColumns: columns,
+                  frozenRows: dimensions.frozenRows,
+                  frozenColumns: dimensions.frozenColumns,
+                  topLeftCell: columnName(dimensions.frozenColumns + 1)
+                    + String(dimensions.frozenRows + 1),
                 };
               }
 
@@ -514,7 +620,11 @@
             } catch (error) {
               return JSON.stringify({
                 ok: false,
+                code: error && error.code ? error.code : "SHEETS_VIEW_STATE_READ_FAILED",
                 message: error && error.message ? error.message : String(error),
+                details: error && error.details && typeof error.details === "object"
+                  ? error.details
+                  : {},
               });
             }
           },
@@ -531,7 +641,7 @@
               return;
             }
             if (!payload || !payload.ok) {
-              reject(verificationError(checks, []));
+              reject(verificationReadError(checks, payload || {}));
               return;
             }
             const states = Array.isArray(payload.states) ? payload.states : [];
@@ -1705,6 +1815,74 @@
               return result;
             }
 
+            function freezeDimensions(address, rows, columns) {
+              var maxRows = 1048576;
+              var maxColumns = 16384;
+              var localAddress = String(address || "")
+                .split("!")
+                .pop()
+                .replace(/\$/g, "")
+                .trim();
+              var matched = /^([1-9][0-9]*):([1-9][0-9]*)$/.exec(localAddress);
+              var frozenRows;
+              var frozenColumns;
+              if (matched) {
+                frozenRows = Number(matched[2]);
+                frozenColumns = 0;
+              } else {
+                matched = /^([A-Za-z]{1,3}):([A-Za-z]{1,3})$/.exec(localAddress);
+                if (matched) {
+                  frozenRows = 0;
+                  frozenColumns = freezeColumnNumber(matched[2]);
+                } else {
+                  var parts = localAddress.split(":");
+                  matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
+                  if (matched) {
+                    var lastColumn = freezeColumnNumber(matched[1]);
+                    var lastRow = Number(matched[2]);
+                    frozenRows = lastColumn >= maxColumns ? lastRow : (
+                      lastRow >= maxRows ? 0 : lastRow
+                    );
+                    frozenColumns = lastRow >= maxRows ? lastColumn : (
+                      lastColumn >= maxColumns ? 0 : lastColumn
+                    );
+                  }
+                }
+              }
+              if (frozenRows === undefined || frozenColumns === undefined) {
+                var rowCount = Number(rows);
+                var columnCount = Number(columns);
+                var validRows = isFinite(rowCount) && rowCount >= 1 && Math.floor(rowCount) === rowCount;
+                var validColumns = isFinite(columnCount) && columnCount >= 1 && Math.floor(columnCount) === columnCount;
+                if (validRows && validColumns) {
+                  if (columnCount >= maxColumns && rowCount < maxRows) {
+                    frozenRows = rowCount;
+                    frozenColumns = 0;
+                  } else if (rowCount >= maxRows && columnCount < maxColumns) {
+                    frozenRows = 0;
+                    frozenColumns = columnCount;
+                  } else if (rowCount < maxRows && columnCount < maxColumns) {
+                    frozenRows = rowCount;
+                    frozenColumns = columnCount;
+                  }
+                }
+              }
+              if (
+                frozenRows === undefined
+                || frozenColumns === undefined
+                || frozenRows < 0
+                || frozenColumns < 0
+                || frozenRows >= maxRows
+                || frozenColumns >= maxColumns
+              ) {
+                return null;
+              }
+              return {
+                frozenRows: frozenRows,
+                frozenColumns: frozenColumns,
+              };
+            }
+
             function describeFreezeState(freezePanes) {
               var frozenRange = safeCall(freezePanes, "GetLocation");
               if (!frozenRange) {
@@ -1720,32 +1898,24 @@
                 rows: safeCall(frozenRange, "GetRowsCount"),
                 columns: safeCall(frozenRange, "GetColumnsCount"),
               };
-              var localAddress = String(location.address || "")
-                .split("!")
-                .pop()
-                .replace(/\$/g, "");
-              var parts = localAddress.split(":");
-              var matched = /^([A-Za-z]{1,3})([1-9][0-9]*)$/.exec(parts[parts.length - 1]);
-              if (!matched) {
+              var dimensions = freezeDimensions(
+                location.address,
+                location.rows,
+                location.columns
+              );
+              if (!dimensions) {
                 throw sheetError(
                   "SHEETS_API_UNSUPPORTED",
                   "无法解析 ONLYOFFICE 返回的冻结区域",
-                  { location: location.address, partialMutationPossible: false }
+                  { location: location, partialMutationPossible: false }
                 );
               }
-              var lastColumn = freezeColumnNumber(matched[1]);
-              var lastRow = Number(matched[2]);
-              var frozenRows = lastColumn >= 16384 ? lastRow : (
-                lastRow >= 1048576 ? 0 : lastRow
-              );
-              var frozenColumns = lastRow >= 1048576 ? lastColumn : (
-                lastColumn >= 16384 ? 0 : lastColumn
-              );
               return {
                 location: location,
-                frozenRows: frozenRows,
-                frozenColumns: frozenColumns,
-                topLeftCell: freezeColumnName(frozenColumns + 1) + String(frozenRows + 1),
+                frozenRows: dimensions.frozenRows,
+                frozenColumns: dimensions.frozenColumns,
+                topLeftCell: freezeColumnName(dimensions.frozenColumns + 1)
+                  + String(dimensions.frozenRows + 1),
               };
             }
 
@@ -4075,15 +4245,14 @@
                     );
                   }
                   changed += 1;
-                  var provisionalFreezeState = describeFreezeState(managedFreeze);
                   results.push({
                     name: call.name,
                     action: freezeAction,
                     sheet: managedFreezeSheet.GetName(),
-                    location: provisionalFreezeState.location,
-                    frozenRows: provisionalFreezeState.frozenRows,
-                    frozenColumns: provisionalFreezeState.frozenColumns,
-                    topLeftCell: provisionalFreezeState.topLeftCell,
+                    location: null,
+                    frozenRows: null,
+                    frozenColumns: null,
+                    topLeftCell: null,
                     verified: false,
                   });
                   break;

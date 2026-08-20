@@ -11345,7 +11345,7 @@
           },
           "range": {
             "$ref": "#/$defs/range",
-            "description": "Exact top-left worksheet area to freeze; the range bottom-right determines the frozen row and column counts."
+            "description": "Exact leading worksheet area to freeze, not the first scrollable/split cell; the range bottom-right determines the frozen row and column counts (A1 = 1 row + 1 column, A2 = 2 rows + 1 column, B2 = 2 rows + 2 columns)."
           },
           "count": {
             "type": "integer",
@@ -11354,7 +11354,7 @@
           }
         },
         "additionalProperties": false,
-        "description": "冻结或取消冻结 XLSX 窗格；冻结前 N 行/列使用 freezeRows/freezeColumns + 正整数 count，freezeAt.range 表示实际冻结区域；保存前异步验证 GetLocation()，成功结果返回 frozenRows、frozenColumns、topLeftCell 和 verified:true",
+        "description": "冻结或取消冻结 XLSX 窗格；冻结前 N 行/列使用 freezeRows/freezeColumns + 正整数 count，freezeAt.range 是实际冻结区域而非首个可滚动单元格（A1→1行+1列/B2，A2→2行+1列/B3，B2→2行+2列/C3）；保存前异步验证 GetLocation()，成功结果返回 frozenRows、frozenColumns、topLeftCell 和 verified:true",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
         "x-semanticValidators": []

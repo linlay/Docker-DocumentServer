@@ -19,10 +19,25 @@ function sheetsToolNames(source) {
 }
 
 function a1Shape(address) {
-  const match = String(address).match(/^\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$/i);
-  if (!match) return { rows: 1, columns: 1 };
+  const localAddress = String(address).split("!").at(-1).replace(/\$/g, "");
+  const rowMatch = localAddress.match(/^([1-9][0-9]*):([1-9][0-9]*)$/);
+  if (rowMatch) {
+    return {
+      rows: Math.abs(Number(rowMatch[2]) - Number(rowMatch[1])) + 1,
+      columns: 16384,
+    };
+  }
   const columnNumber = letters => [...letters.toUpperCase()]
     .reduce((value, letter) => (value * 26) + letter.charCodeAt(0) - 64, 0);
+  const columnMatch = localAddress.match(/^([A-Z]+):([A-Z]+)$/i);
+  if (columnMatch) {
+    return {
+      rows: 1048576,
+      columns: Math.abs(columnNumber(columnMatch[2]) - columnNumber(columnMatch[1])) + 1,
+    };
+  }
+  const match = localAddress.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+  if (!match) return { rows: 1, columns: 1 };
   const startColumn = columnNumber(match[1]);
   const endColumn = columnNumber(match[3] || match[1]);
   const startRow = Number(match[2]);
@@ -72,6 +87,8 @@ test("public Sheets contract names non-obvious units explicitly", () => {
   assert.match(pageLayout.properties.displayGridlines.description, /screen view/);
   assert.equal(freezePanes.properties.count.minimum, 1);
   assert.match(freezePanes.properties.range.description, /Exact/);
+  assert.match(freezePanes.properties.range.description, /not the first scrollable\/split cell/);
+  assert.match(freezePanes.properties.range.description, /A1 = 1 row \+ 1 column/);
   assert.match(freezePanes.description, /verified:true/);
   assert.match(
     publicContract.tools.cell.sheets_inspect_freeze_panes.description,
@@ -493,8 +510,16 @@ function createHarness(options = {}) {
         const lastCell = String(target.address).split(":").pop();
         apply(sheet.GetRange(`A1:${lastCell}`), "freeze.at", target.address);
       },
-      FreezeRows: count => apply(sheet.GetRange(`A1:XFD${count}`), "freeze.rows", count),
-      FreezeColumns: count => apply(sheet.GetRange(`A1:${columnName(count)}1048576`), "freeze.columns", count),
+      FreezeRows: count => apply(
+        freezeLocation(`$1:$${count}`),
+        "freeze.rows",
+        count,
+      ),
+      FreezeColumns: count => apply(
+        freezeLocation(`$A:$${columnName(count)}`),
+        "freeze.columns",
+        count,
+      ),
       Unfreeze: () => apply(null, "freeze.unfreeze"),
     };
 
@@ -506,6 +531,20 @@ function createHarness(options = {}) {
         remaining = Math.floor((remaining - 1) / 26);
       }
       return name;
+    }
+
+    function freezeLocation(address) {
+      if (options.freezeInvalidLocation === true) {
+        return {
+          GetAddress: () => "not-a-freeze-range",
+          GetRowsCount: () => null,
+          GetColumnsCount: () => null,
+        };
+      }
+      const qualifiedAddress = options.freezeSheetQualifiedAddress === true
+        ? `'${sheet.GetName().replace(/'/g, "''")}'!${address}`
+        : address;
+      return sheet.GetRange(qualifiedAddress);
     }
 
     function apply(location, eventName, eventValue) {
@@ -736,8 +775,8 @@ function createHarness(options = {}) {
     return value;
   }
 
-  const sheet1 = sheet("Sheet1");
-  const sheet2 = sheet("Sheet2");
+  const sheet1 = sheet(options.sheet1Name || "Sheet1");
+  const sheet2 = sheet(options.sheet2Name || "Sheet2");
   state.sheets.push(sheet1, sheet2);
   state.activeSheet = sheet1;
   for (const item of state.sheets) {
@@ -1712,18 +1751,144 @@ test("Sheets bridge waits for asynchronous freeze panes before reporting success
     },
   ]);
 
-  assert.equal(result.results[0].location.address, "A1:XFD2");
+  assert.equal(result.results[0].location.address, "$1:$2");
+  assert.equal(result.results[0].location.rows, 2);
+  assert.equal(result.results[0].location.columns, 16384);
   assert.equal(result.results[0].frozenRows, 2);
   assert.equal(result.results[0].frozenColumns, 0);
   assert.equal(result.results[0].topLeftCell, "A3");
   assert.equal(result.results[0].verified, true);
-  assert.equal(result.results[1].location.address, "A1:XFD2");
+  assert.equal(result.results[1].location.address, "$1:$2");
   assert.equal(result.results[1].frozenRows, 2);
   assert.equal(result.results[1].topLeftCell, "A3");
   assert.equal(result.results[1].verified, true);
   assert.ok(state.events.some(item => (
     item[0] === "document.modified" && item[1] === true
   )));
+});
+
+test("Sheets bridge parses whole-row, whole-column, and qualified freeze locations", async () => {
+  const rowHarness = createHarness({
+    sheet1Name: "项目进度",
+    freezeSheetQualifiedAddress: true,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 100,
+  });
+  const rowResult = await rowHarness.bridge.execute([
+    {
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeRows", sheet: "项目进度", count: 1 },
+    },
+    {
+      name: "sheets_inspect_freeze_panes",
+      arguments: { sheet: "项目进度" },
+    },
+  ]);
+  for (const item of rowResult.results) {
+    assert.equal(item.location.address, "'项目进度'!$1:$1");
+    assert.equal(item.location.rows, 1);
+    assert.equal(item.location.columns, 16384);
+    assert.equal(item.frozenRows, 1);
+    assert.equal(item.frozenColumns, 0);
+    assert.equal(item.topLeftCell, "A2");
+    assert.equal(item.verified, true);
+  }
+
+  const columnHarness = createHarness({
+    freezeSheetQualifiedAddress: true,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 100,
+  });
+  const columnResult = await columnHarness.bridge.execute([
+    {
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeColumns", sheet: "Sheet1", count: 1 },
+    },
+    {
+      name: "sheets_inspect_freeze_panes",
+      arguments: { sheet: "Sheet1" },
+    },
+  ]);
+  for (const item of columnResult.results) {
+    assert.equal(item.location.address, "'Sheet1'!$A:$A");
+    assert.equal(item.location.rows, 1048576);
+    assert.equal(item.location.columns, 1);
+    assert.equal(item.frozenRows, 0);
+    assert.equal(item.frozenColumns, 1);
+    assert.equal(item.topLeftCell, "B1");
+    assert.equal(item.verified, true);
+  }
+});
+
+test("Sheets bridge keeps freezeAt range semantics explicit", async () => {
+  for (const [range, frozenRows, frozenColumns, topLeftCell] of [
+    ["A1", 1, 1, "B2"],
+    ["A2", 2, 1, "B3"],
+    ["B2", 2, 2, "C3"],
+  ]) {
+    const { bridge } = createHarness({ verifyIntervalMs: 2, verifyTimeoutMs: 100 });
+    const result = await bridge.execute([{
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeAt", sheet: "Sheet1", range },
+    }]);
+    assert.equal(result.results[0].frozenRows, frozenRows, range);
+    assert.equal(result.results[0].frozenColumns, frozenColumns, range);
+    assert.equal(result.results[0].topLeftCell, topLeftCell, range);
+    assert.equal(result.results[0].verified, true, range);
+  }
+});
+
+test("Sheets bridge distinguishes read-only and post-mutation freeze parse failures", async () => {
+  const fallback = createHarness();
+  fallback.sheet1.freeze.location = {
+    GetAddress: () => "runtime-specific-row-range",
+    GetRowsCount: () => 1,
+    GetColumnsCount: () => 16384,
+  };
+  const fallbackResult = await fallback.bridge.execute([{
+    name: "sheets_inspect_freeze_panes",
+    arguments: { sheet: "Sheet1" },
+  }]);
+  assert.equal(fallbackResult.results[0].location.address, "runtime-specific-row-range");
+  assert.equal(fallbackResult.results[0].frozenRows, 1);
+  assert.equal(fallbackResult.results[0].frozenColumns, 0);
+  assert.equal(fallbackResult.results[0].topLeftCell, "A2");
+
+  const inspected = createHarness();
+  inspected.sheet1.freeze.location = {
+    GetAddress: () => "not-a-freeze-range",
+    GetRowsCount: () => null,
+    GetColumnsCount: () => null,
+  };
+  await assert.rejects(
+    inspected.bridge.execute([{
+      name: "sheets_inspect_freeze_panes",
+      arguments: { sheet: "Sheet1" },
+    }]),
+    error => (
+      error.code === "SHEETS_API_UNSUPPORTED"
+      && error.details.partialMutationPossible === false
+      && error.details.location.address === "not-a-freeze-range"
+    ),
+  );
+
+  const managed = createHarness({
+    freezeInvalidLocation: true,
+    verifyIntervalMs: 2,
+    verifyTimeoutMs: 100,
+  });
+  await assert.rejects(
+    managed.bridge.execute([{
+      name: "sheets_manage_freeze_panes",
+      arguments: { action: "freezeRows", sheet: "Sheet1", count: 1 },
+    }]),
+    error => (
+      error.code === "SHEETS_API_UNSUPPORTED"
+      && error.details.phase === "sheets-view-verification"
+      && error.details.partialMutationPossible === true
+      && error.details.location.address === "not-a-freeze-range"
+    ),
+  );
 });
 
 test("Sheets bridge marks verified view changes through the workbook model fallback", async () => {
