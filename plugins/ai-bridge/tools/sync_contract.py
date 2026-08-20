@@ -1067,6 +1067,29 @@ def toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def toml_value(value: Any) -> str:
+    if isinstance(value, str):
+        return toml_string(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        return (
+            "{ "
+            + ", ".join(
+                f"{toml_string(str(key))} = {toml_value(item)}"
+                for key, item in value.items()
+            )
+            + " }"
+        )
+    raise ValueError(f"unsupported TOML example value: {value!r}")
+
+
 def schema_has_required_business_fields(schema: dict[str, Any]) -> bool:
     if schema.get("required"):
         return True
@@ -1161,12 +1184,12 @@ def action_params(
             schema.get("x-effects") == "read"
             and not schema_has_required_business_fields(schema)
         )
-        arguments_example = canonical_json(minimal_schema_example(schema, definitions))
+        arguments_example = minimal_schema_example(schema, definitions)
         return [
-            '  { name = "arguments_json", type = "json object string", required = '
+            '  { name = "arguments", type = "object", required = '
             + ("false" if empty_read else "true")
-            + ', description = "业务参数 JSON；字段与枚举以生成契约为准", example = '
-            + toml_string(arguments_example)
+            + ', description = "结构化业务参数；字段与枚举以生成契约为准，使用 --param-json-file 传入", example = '
+            + toml_value(arguments_example)
             + " },",
             '  { name = "request_id", type = "string", required = true, description = '
             + toml_string(REQUEST_ID_DESCRIPTION)
@@ -1177,8 +1200,10 @@ def action_params(
         ]
     if kind in {"batch", "validate"}:
         return [
-            '  { name = "tool_calls_json", type = "json array string", required = true, description = "工具调用数组；标准字段为 name，action 仅作兼容别名", example = '
-            + toml_string('[{"name":"set_size","arguments":{"preset":"wide"}}]')
+            '  { name = "tool_calls", type = "array", required = true, description = "结构化工具调用数组；标准字段为 name，action 仅作兼容别名，使用 --param-json-file 传入", example = '
+            + toml_value(
+                [{"name": "set_size", "arguments": {"preset": "wide"}}]
+            )
             + " },",
             '  { name = "request_id", type = "string", required = true, description = '
             + toml_string(REQUEST_ID_DESCRIPTION)
@@ -1404,14 +1429,14 @@ def render_toml(
             schema.get("x-effects") == "read"
             and not schema_has_required_business_fields(schema)
         )
-        arguments_source = '{ from = "param", key = "arguments_json"'
+        arguments_source = '{ from = "param", key = "arguments"'
         if empty_read_arguments:
-            arguments_source += ', default = "{}"'
+            arguments_source += ", default = {}"
         arguments_source += " }"
         arguments_note = (
-            "无业务参数时可省略 arguments_json，默认使用空对象"
+            "无业务参数时可省略 arguments，默认使用空对象"
             if empty_read_arguments
-            else "业务参数统一通过 arguments_json"
+            else "结构化业务参数统一通过 arguments"
         )
         lines.extend(
             [
@@ -1427,7 +1452,7 @@ def render_toml(
                 'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
                 (
                     'body = { method = "executeTool", '
-                    f'name = "{name}", argumentsJson = {arguments_source}, '
+                    f'name = "{name}", arguments = {arguments_source}, '
                     'requestId = { from = "param", key = "request_id" }, '
                     'timeoutMs = { from = "param", key = "timeout_ms", default = 90000 } }'
                 ),
@@ -1456,7 +1481,7 @@ def render_toml(
             body_parts.append(f'method = "{method}"')
         body_parts.extend(
             [
-                'toolCallsJson = { from = "param", key = "tool_calls_json" }',
+                'toolCalls = { from = "param", key = "tool_calls" }',
                 'requestId = { from = "param", key = "request_id" }',
                 'timeoutMs = { from = "param", key = "timeout_ms", default = 90000 }',
             ]
@@ -1508,10 +1533,15 @@ def render_toml(
                 'method = "POST"',
                 f"path = {document_path_source('qa')}",
                 'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
-                'body = { qaJson = { from = "param", key = "qa_json" } }',
+                'body = { requiredStyles = { from = "param", key = "required_styles", default = [] }, numberingSequences = { from = "param", key = "numbering_sequences", default = [] }, requireSeq = { from = "param", key = "require_seq", default = false }, requireRef = { from = "param", key = "require_ref", default = false }, requireCommentAnchors = { from = "param", key = "require_comment_anchors", default = false }, allowedBlankPages = { from = "param", key = "allowed_blank_pages", default = [] } }',
                 "expect_status = 200",
                 "params = [",
-                '  { name = "qa_json", type = "json object string", required = true, description = "QA 要求 JSON；支持 requiredStyles、numberingSequences、requireSeq、requireRef、requireCommentAnchors、allowedBlankPages；多级编号的 numberingSequences 可提供与 paragraphIndexes 等长的 levels" }',
+                '  { name = "required_styles", type = "array", required = false, description = "必须存在并达到最小使用次数的样式要求", example = [] },',
+                '  { name = "numbering_sequences", type = "array", required = false, description = "连续编号要求；多级编号可提供与 paragraphIndexes 等长的 levels", example = [] },',
+                '  { name = "require_seq", type = "boolean", required = false, description = "要求存在 SEQ 域", example = false },',
+                '  { name = "require_ref", type = "boolean", required = false, description = "要求存在 REF 域", example = false },',
+                '  { name = "require_comment_anchors", type = "boolean", required = false, description = "要求批注具有有效锚点", example = false },',
+                '  { name = "allowed_blank_pages", type = "array", required = false, description = "允许为空白页的一基页码", example = [] }',
                 "]",
                 'extract_type = "jq"',
                 'extract_expr = ".body"',

@@ -587,28 +587,32 @@ class ContractGenerationTests(unittest.TestCase):
                 self.assertNotIn("extract_type", download_action)
                 self.assertIn("[actions.validate_batch]", rendered)
                 self.assertIn("[actions.execute_batch]", rendered)
-                self.assertIn('key = "arguments_json"', rendered)
-                self.assertIn('key = "tool_calls_json"', rendered)
-                self.assertIn('argumentsJson = { from = "param"', rendered)
-                self.assertIn('toolCallsJson = { from = "param"', rendered)
+                self.assertIn('key = "arguments"', rendered)
+                self.assertIn('key = "tool_calls"', rendered)
+                self.assertIn('arguments = { from = "param"', rendered)
+                self.assertIn('toolCalls = { from = "param"', rendered)
+                self.assertNotIn("arguments_json", rendered)
+                self.assertNotIn("tool_calls_json", rendered)
+                self.assertNotIn("argumentsJson", rendered)
+                self.assertNotIn("toolCallsJson", rendered)
                 inspect_action = rendered.split("[actions.inspect]", 1)[1].split(
                     "\n[actions.", 1
                 )[0]
                 self.assertIn(
-                    'argumentsJson = { from = "param", key = "arguments_json", default = "{}" }',
+                    'arguments = { from = "param", key = "arguments", default = {} }',
                     inspect_action,
                 )
                 self.assertIn(
-                    'name = "arguments_json", type = "json object string", required = false',
+                    'name = "arguments", type = "object", required = false',
                     inspect_action,
                 )
-                self.assertIn('example = "{}"', inspect_action)
+                self.assertIn('example = {}', inspect_action)
                 self.assertIn('example = "tool-inspect-1"', inspect_action)
                 batch_action = rendered.split("[actions.validate_batch]", 1)[1].split(
                     "\n[actions.", 1
                 )[0]
                 self.assertIn(
-                    'example = "[{\\"name\\":\\"set_size\\",\\"arguments\\":{\\"preset\\":\\"wide\\"}}]"',
+                    'example = [{ "name" = "set_size", "arguments" = { "preset" = "wide" } }]',
                     batch_action,
                 )
                 write_tool_name = {
@@ -619,9 +623,9 @@ class ContractGenerationTests(unittest.TestCase):
                 write_action = rendered.split(f"[actions.{write_tool_name}]", 1)[1].split(
                     "\n[actions.", 1
                 )[0]
-                self.assertNotIn('key = "arguments_json", default = "{}"', write_action)
+                self.assertNotIn('key = "arguments", default = {}', write_action)
                 self.assertIn(
-                    'name = "arguments_json", type = "json object string", required = true',
+                    'name = "arguments", type = "object", required = true',
                     write_action,
                 )
                 self.assertNotIn(f"[actions.new_{sync_contract.EDITOR_CONFIG[editor]['fileType']}]", rendered)
@@ -652,11 +656,11 @@ class ContractGenerationTests(unittest.TestCase):
                     numbering_action = rendered.split("[actions.set_numbering]", 1)[1].split(
                         "\n[actions.", 1
                     )[0]
-                    numbering_example = sync_contract.canonical_json(
-                        self.contract["tools"]["word"]["word_set_numbering"]["examples"][0]
-                    )
+                    numbering_example = self.contract["tools"]["word"][
+                        "word_set_numbering"
+                    ]["examples"][0]
                     self.assertIn(
-                        "example = " + sync_contract.toml_string(numbering_example),
+                        "example = " + sync_contract.toml_value(numbering_example),
                         numbering_action,
                     )
                     self.assertNotIn('example = "{}"', numbering_action)
@@ -676,10 +680,17 @@ class ContractGenerationTests(unittest.TestCase):
                 if editor == "word":
                     self.assertIn("[actions.qa]", rendered)
                     self.assertIn("/ai/qa", rendered)
-                    self.assertIn('key = "qa_json"', rendered)
                     qa_action = rendered.split("[actions.qa]", 1)[1].split("\n[actions.", 1)[0]
                     self.assertIn('"X-AI-Session-Lease"', qa_action)
                     self.assertIn('key = "session.lease"', qa_action)
+                    self.assertIn('key = "required_styles", default = []', qa_action)
+                    self.assertIn('key = "numbering_sequences", default = []', qa_action)
+                    self.assertIn('key = "require_seq", default = false', qa_action)
+                    self.assertIn('key = "require_ref", default = false', qa_action)
+                    self.assertIn('key = "require_comment_anchors", default = false', qa_action)
+                    self.assertIn('key = "allowed_blank_pages", default = []', qa_action)
+                    self.assertNotIn("qa_json", qa_action)
+                    self.assertNotIn("qaJson", qa_action)
                 else:
                     self.assertNotIn("[actions.qa]", rendered)
                     self.assertNotIn("/ai/qa", rendered)
@@ -693,6 +704,39 @@ class ContractGenerationTests(unittest.TestCase):
                     rendered,
                 )
                 self.assertIn(f"EDITOR_SESSION_UNAVAILABLE: {site}", rendered)
+
+    def test_httpx_typed_file_projection_covers_all_167_structured_actions(
+        self,
+    ) -> None:
+        sha256 = sync_contract.contract_sha256(self.contract)
+        counts = {"arguments": 0, "tool_calls": 0, "qa": 0}
+        for editor in ("word", "slide", "cell"):
+            rendered = sync_contract.render_toml(
+                self.contract,
+                editor,
+                sha256,
+                "http://127.0.0.1:8090",
+            )
+            counts["arguments"] += rendered.count(
+                'arguments = { from = "param", key = "arguments"'
+            )
+            counts["tool_calls"] += rendered.count(
+                'toolCalls = { from = "param", key = "tool_calls" }'
+            )
+            counts["qa"] += rendered.count(
+                'requiredStyles = { from = "param", key = "required_styles"'
+            )
+            for legacy in (
+                "arguments_json",
+                "tool_calls_json",
+                "qa_json",
+                "argumentsJson",
+                "toolCallsJson",
+                "qaJson",
+            ):
+                self.assertNotIn(legacy, rendered)
+        self.assertEqual(counts, {"arguments": 160, "tool_calls": 6, "qa": 1})
+        self.assertEqual(sum(counts.values()), 167)
 
     def test_word_header_footer_httpx_description_rejects_empty_first_page_content(
         self,
