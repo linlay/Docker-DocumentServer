@@ -1165,6 +1165,94 @@ class HttpRelayTests(unittest.TestCase):
         self.assertEqual(raised.exception.details["toolCallIndex"], 0)
         self.assertEqual(raised.exception.details["path"], "toolCalls[0].action")
 
+    def test_batch_endpoints_tolerate_up_to_30_calls_for_every_editor(self):
+        editors = {
+            "word": ("docx", "word_inspect"),
+            "slide": ("pptx", "slides_inspect"),
+            "cell": ("xlsx", "sheets_inspect"),
+        }
+        # 22 and 21 are the page-2/page-3 regression batch sizes.
+        accepted_counts = (20, 21, 22, 30)
+
+        for editor, (file_type, internal_name) in editors.items():
+            session = {
+                "state": {
+                    "editorType": editor,
+                    "capabilities": {"tools": [internal_name]},
+                },
+            }
+            session_id = f"http-session:batch-limit-{editor}"
+            document_key = f"batch-limit-{editor}-key"
+            file_name = f"batch-limit.{file_type}"
+            self.register(
+                session_id=session_id,
+                document_key=document_key,
+                file_name=file_name,
+                file_type=file_type,
+                editor_type=editor,
+            )
+            claims = {
+                "fileName": file_name,
+                "fileType": file_type,
+                "editorType": editor,
+                "userId": "uid-1",
+            }
+
+            for count in accepted_counts:
+                public_calls = [
+                    {"name": "inspect", "arguments": {}}
+                    for _index in range(count)
+                ]
+                with self.subTest(editor=editor, endpoint="execute", count=count):
+                    command = copilot_server.bridge_build_command(
+                        {
+                            "method": "executeBatch",
+                            "requestId": f"batch-limit-{editor}-{count}",
+                            "toolCalls": public_calls,
+                        },
+                        session,
+                    )
+                    self.assertEqual(len(command["params"]["toolCalls"]), count)
+                    self.assertTrue(all(
+                        call["name"] == internal_name
+                        for call in command["params"]["toolCalls"]
+                    ))
+
+                with self.subTest(editor=editor, endpoint="validate", count=count):
+                    validated = copilot_server.bridge_validate(
+                        {"toolCalls": public_calls},
+                        claims,
+                    )
+                    self.assertTrue(validated["valid"])
+                    self.assertEqual(validated["toolCalls"], count)
+
+            for count in (0, 31):
+                public_calls = [
+                    {"name": "inspect", "arguments": {}}
+                    for _index in range(count)
+                ]
+                with self.subTest(editor=editor, endpoint="execute", count=count):
+                    with self.assertRaises(copilot_server.BridgeError) as raised:
+                        copilot_server.bridge_build_command(
+                            {
+                                "method": "executeBatch",
+                                "requestId": f"batch-limit-{editor}-rejected-{count}",
+                                "toolCalls": public_calls,
+                            },
+                            session,
+                        )
+                    self.assertEqual(raised.exception.code, "INVALID_TOOL_CALL")
+                    self.assertIn("1 到 20", raised.exception.message)
+
+                with self.subTest(editor=editor, endpoint="validate", count=count):
+                    with self.assertRaises(copilot_server.BridgeError) as raised:
+                        copilot_server.bridge_validate(
+                            {"toolCalls": public_calls},
+                            claims,
+                        )
+                    self.assertEqual(raised.exception.code, "INVALID_TOOL_CALL")
+                    self.assertIn("1 到 20", raised.exception.message)
+
     def test_public_tool_from_another_editor_is_rejected(self):
         with self.assertRaises(copilot_server.BridgeError) as raised:
             copilot_server.bridge_build_command(

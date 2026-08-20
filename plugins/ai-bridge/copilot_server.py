@@ -183,6 +183,10 @@ PUBLIC_API_LIMITS = PUBLIC_API_CONTRACT.get("limits") or {}
 PUBLIC_TOOL_NAMING = PUBLIC_API_CONTRACT.get("toolNaming") or {}
 PREFIX_BY_EDITOR = dict(PUBLIC_TOOL_NAMING.get("internalPrefixes") or {})
 MAX_TOOL_CALLS = int(PUBLIC_API_LIMITS.get("maxToolCalls") or 0)
+# Keep the documented planning limit stable while allowing small counting
+# errors from generated batches. This value is intentionally not projected
+# into the public contract.
+MAX_ACCEPTED_TOOL_CALLS = 30
 MAX_ARGUMENTS_JSON_CHARS = int(
     PUBLIC_API_LIMITS.get("maxArgumentsJsonChars") or 0
 )
@@ -204,6 +208,8 @@ if not all(
     )
 ):
     raise RuntimeError("public-api.json 缺少必需的版本或限制")
+if MAX_ACCEPTED_TOOL_CALLS < MAX_TOOL_CALLS:
+    raise RuntimeError("内部批处理容错上限不得低于公开规划上限")
 if (
     PUBLIC_TOOL_NAMING.get("scope") != "editorType"
     or PUBLIC_TOOL_NAMING.get("publicNames") != "unprefixed"
@@ -3075,7 +3081,7 @@ def bridge_build_command(payload: dict[str, Any], session: dict[str, Any]) -> di
         params = {"name": name, "arguments": arguments}
     elif method == "executeBatch":
         public_tool_calls = bridge_parse_json_parameter(payload, "toolCalls", "toolCallsJson", list, [])
-        if not public_tool_calls or len(public_tool_calls) > MAX_TOOL_CALLS:
+        if not public_tool_calls or len(public_tool_calls) > MAX_ACCEPTED_TOOL_CALLS:
             raise BridgeError(
                 400,
                 "INVALID_TOOL_CALL",
@@ -3127,7 +3133,7 @@ def bridge_validate(payload: dict[str, Any], claims: dict[str, Any]) -> dict[str
             list,
             [],
         )
-        if not public_tool_calls or len(public_tool_calls) > MAX_TOOL_CALLS:
+        if not public_tool_calls or len(public_tool_calls) > MAX_ACCEPTED_TOOL_CALLS:
             raise BridgeError(
                 400,
                 "INVALID_TOOL_CALL",

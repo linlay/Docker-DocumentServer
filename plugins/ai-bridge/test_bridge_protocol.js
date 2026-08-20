@@ -1817,6 +1817,40 @@ test("plugin aggregates generated schema and bridge semantic errors before check
   assert.deepEqual(harness.servicePaths, []);
 });
 
+test("plugin preserves all 30 ordered calls but keeps the public 20-call error message", async () => {
+  const harness = createHarness();
+  await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+  const calls = Array.from({ length: 30 }, (_unused, index) => ({
+    name: "word_inspect",
+    arguments: { maxChars: 500 + index },
+  }));
+
+  await harness.hostWindow.aiBridge.executeBatch(calls, {
+    timeoutMs: 1000,
+    requestId: "batch-tolerance-30",
+  });
+  assert.deepEqual(
+    harness.executedToolCalls.map(({ name, arguments: args }) => ({ name, arguments: args })),
+    calls,
+  );
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.executeBatch(
+      [...calls, { name: "word_inspect", arguments: { maxChars: 530 } }],
+      { timeoutMs: 1000, requestId: "batch-tolerance-31" },
+    ),
+    error => {
+      assert.equal(error.code, "TOO_MANY_CALLS");
+      assert.match(error.message, /20/);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    harness.executedToolCalls.map(({ name, arguments: args }) => ({ name, arguments: args })),
+    calls,
+  );
+});
+
 test("public contract, plugin allow-lists, and all convenience methods stay aligned", async () => {
   const cases = {
     word: {

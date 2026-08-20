@@ -66,6 +66,19 @@ class ContractGenerationTests(unittest.TestCase):
                 )
                 self.assertIsInstance(schema["x-semanticValidators"], list)
 
+    def test_public_batch_limit_stays_20_while_runtime_accepts_30(self) -> None:
+        self.assertEqual(self.contract["limits"]["maxToolCalls"], 20)
+        self.assertEqual(copilot_server.MAX_TOOL_CALLS, 20)
+        self.assertEqual(copilot_server.MAX_ACCEPTED_TOOL_CALLS, 30)
+        self.assertEqual(sync_contract.MAX_ACCEPTED_TOOL_CALLS, 30)
+
+        rendered = sync_contract.render_plugin_region(
+            self.contract,
+            sync_contract.contract_sha256(self.contract),
+        )
+        self.assertIn("const PUBLIC_MAX_CALLS = 20;", rendered)
+        self.assertIn("const MAX_CALLS = 30;", rendered)
+
     def test_slides_add_slide_exposes_generic_title_placement(self) -> None:
         schema = self.contract["tools"]["slide"]["slides_add_slide"]
         title_placement = schema["properties"]["titlePlacement"]

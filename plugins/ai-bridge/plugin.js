@@ -7,7 +7,8 @@
   const PROTOCOL_VERSION = 1;
   const CONTRACT_SHA256 = "c19bfc3e99f7c3086ecbe37b48e6190a42a788e6e55b685130984cb03e0dfddc";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  const MAX_CALLS = 20;
+  const PUBLIC_MAX_CALLS = 20;
+  const MAX_CALLS = 30;
   const MAX_CACHED_REQUESTS = 100;
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -940,7 +941,7 @@
   function normalizeToolCalls(rawCalls) {
     if (!Array.isArray(rawCalls)) throw bridgeError("INVALID_COMMAND", "toolCalls 必须是数组");
     if (!rawCalls.length) return [];
-    if (rawCalls.length > MAX_CALLS) throw bridgeError("TOO_MANY_CALLS", `单次最多执行 ${MAX_CALLS} 个工具`);
+    if (rawCalls.length > MAX_CALLS) throw bridgeError("TOO_MANY_CALLS", `单次最多执行 ${PUBLIC_MAX_CALLS} 个工具`);
 
     const allowed = allowedToolsForCurrentRuntime();
     return rawCalls.map(function (rawCall) {

@@ -36,6 +36,9 @@ REQUEST_ID_DESCRIPTION = (
     "不可变幂等 ID；仅在结果未知且 action、参数、timeout 完全不变时原样复用。"
     "修改任一字段必须使用新 ID；request_id_conflict/REQUEST_ID_CONFLICT 不可用旧 ID 重试"
 )
+# The public contract remains a planning recommendation. The generated plugin
+# tolerates modest model counting errors without exposing this private ceiling.
+MAX_ACCEPTED_TOOL_CALLS = 30
 DOCUMENT_ID_PATTERN = (
     "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
     "[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -655,7 +658,8 @@ def render_plugin_region(contract: dict[str, Any], sha256: str) -> str:
         f"  const PROTOCOL_VERSION = {int(contract['protocolVersion'])};",
         f'  const CONTRACT_SHA256 = "{sha256}";',
         f'  const PLUGIN_GUID = "{contract["pluginGuid"]}";',
-        f"  const MAX_CALLS = {int(limits['maxToolCalls'])};",
+        f"  const PUBLIC_MAX_CALLS = {int(limits['maxToolCalls'])};",
+        f"  const MAX_CALLS = {MAX_ACCEPTED_TOOL_CALLS};",
         "  const MAX_CACHED_REQUESTS = 100;",
         (
             "  const REQUEST_ID_PATTERN = "
