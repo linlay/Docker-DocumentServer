@@ -16,14 +16,17 @@ function loadBridge(source, api) {
     plugin: {
       info: {},
       callCommand(command, _close, _calc, callback) {
+        if (typeof api.__callCommand === "function") {
+          return api.__callCommand(command, callback);
+        }
         callback(command());
       },
       executeMethod(method, params, callback) {
         if (typeof api.__executeMethod === "function") {
-          api.__executeMethod(method, params, callback);
-          return;
+          return api.__executeMethod(method, params, callback);
         }
         callback(null);
+        return true;
       },
     },
   };
@@ -52,6 +55,105 @@ function loadBridge(source, api) {
   vm.runInNewContext(source, sandbox);
   return sandbox.window.AICopilotBridges;
 }
+
+test("Slides and Sheets classify empty editor callbacks without leaking arguments", async () => {
+  for (const scenario of [
+    { name: "slides", source: slidesSource, tool: "slides_inspect" },
+    { name: "sheets", source: sheetsSource, tool: "sheets_inspect" },
+  ]) {
+    const api = {
+      __callCommand(_command, callback) { callback(""); },
+    };
+    const bridge = loadBridge(scenario.source, api)[scenario.name === "slides" ? "slide" : "cell"];
+    await assert.rejects(
+      bridge.execute([{ name: scenario.tool, arguments: { privateText: "不得泄露" } }]),
+      error => {
+        assert.equal(error.code, "EDITOR_COMMAND_FAILED");
+        assert.equal(error.details.editorType, scenario.name === "slides" ? "slide" : "cell");
+        assert.equal(error.details.reason, "empty_result");
+        assert.equal(error.details.retryable, false);
+        assert.equal(error.details.reuseAllowed, false);
+        assert.doesNotMatch(JSON.stringify(error.details), /不得泄露/);
+        return true;
+      },
+    );
+  }
+});
+
+test("Slides and Sheets classify editor command exceptions with safe context", async () => {
+  for (const scenario of [
+    {
+      name: "slides",
+      source: slidesSource,
+      tool: "slides_inspect",
+      api: { GetPresentation() { throw new Error("editor exploded"); } },
+    },
+    {
+      name: "sheets",
+      source: sheetsSource,
+      tool: "sheets_inspect",
+      api: { GetActiveSheet() { throw new Error("editor exploded"); } },
+    },
+  ]) {
+    const bridge = loadBridge(scenario.source, scenario.api)[scenario.name === "slides" ? "slide" : "cell"];
+    await assert.rejects(
+      bridge.execute([{ name: scenario.tool, arguments: { privateText: "不得泄露" } }]),
+      error => {
+        assert.equal(error.code, "EDITOR_COMMAND_FAILED");
+        assert.equal(error.details.tool, scenario.tool);
+        assert.equal(error.details.operation, scenario.tool);
+        assert.equal(error.details.reason, "exception");
+        assert.equal(error.details.completedToolCalls, 0);
+        assert.equal(error.details.partialMutationPossible, false);
+        assert.equal(error.details.requiredAction, "report_bridge_failure");
+        assert.doesNotMatch(JSON.stringify(error.details), /不得泄露/);
+        return true;
+      },
+    );
+  }
+});
+
+test("Slides and Sheets classify explicit executeMethod rejection", async () => {
+  for (const scenario of [
+    {
+      name: "slides",
+      source: slidesSource,
+      tool: "slides_set_macros",
+      arguments: { content: { macrosArray: [], current: -1 } },
+    },
+    {
+      name: "sheets",
+      source: sheetsSource,
+      tool: "sheets_set_macros",
+      arguments: { content: { macrosArray: [], current: -1 } },
+    },
+  ]) {
+    const api = {
+      __executeMethod() { return false; },
+    };
+    const bridge = loadBridge(scenario.source, api)[scenario.name === "slides" ? "slide" : "cell"];
+    await assert.rejects(
+      bridge.execute([{ name: scenario.tool, arguments: scenario.arguments }]),
+      error => {
+        assert.equal(error.code, "EDITOR_COMMAND_REJECTED");
+        assert.equal(error.details.reason, "execute_method_rejected");
+        assert.equal(error.details.requiredAction, "inspect_current_state");
+        assert.equal(error.details.partialMutationPossible, true);
+        assert.equal(error.details.reuseAllowed, false);
+        return true;
+      },
+    );
+  }
+});
+
+test("Sheets capability probe uses the conservative feature fallback", async () => {
+  const bridge = loadBridge(sheetsSource, {
+    GetActiveSheet() { throw new Error("probe unavailable"); },
+  }).cell;
+  const result = await bridge.probeCapabilities();
+  assert.equal(result.features.sheets.nativeTables.create, false);
+  assert.equal(result.features.sheets.charts.inspect, false);
+});
 
 function mockChartTitle(styleLog) {
   return {

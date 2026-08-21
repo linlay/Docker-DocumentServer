@@ -100,6 +100,19 @@ python3 tools/sync_contract.py --check
 
 Do not edit generated regions in `plugin.js` or `public-api.d.ts` manually.
 
+Release CI must check the bridge and all three authoritative Skill projections
+from the same checkout before building the immutable DocumentServer image:
+
+```bash
+make ai-bridge-release-contract-check \
+  ZENMIND_ROOT=/path/to/zenmind-env \
+  HTTPX_BASE_URL=https://documents.example.com
+```
+
+Publish/install the generated Skills and the image as one release unit. The
+generated session actions reject mismatched `contractVersion` or
+`contractSha256` before saving a lease or executing a write action.
+
 ## Private Relay endpoints
 
 document-hub is the only caller of the internal endpoints:

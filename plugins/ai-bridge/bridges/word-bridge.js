@@ -3,15 +3,59 @@
 
   window.AICopilotBridges = window.AICopilotBridges || {};
 
+  function commandFailure(code, message, details) {
+    const error = new Error(message || "Word Bridge 执行失败");
+    error.code = code;
+    error.details = {
+      ...(details && typeof details === "object" ? details : {}),
+      editorType: "word",
+      operation: details && details.operation ? details.operation : "execute_tool_calls",
+      reason: details && details.reason ? details.reason : "exception",
+      completedToolCalls: Number.isInteger(details && details.completedToolCalls)
+        ? details.completedToolCalls
+        : 0,
+      partialMutationPossible: Boolean(details && details.partialMutationPossible),
+      retryable: false,
+      reuseAllowed: false,
+      requiredAction: details && details.partialMutationPossible
+        ? "inspect_current_state"
+        : (code === "EDITOR_COMMAND_REJECTED"
+          ? "fix_or_use_supported_operation"
+          : "report_bridge_failure"),
+    };
+    return error;
+  }
+
   function parseResult(rawResult) {
-    const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
+    if (rawResult === undefined || rawResult === null || rawResult === "") {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Word Bridge 未返回有效结果",
+        { reason: "empty_result" },
+      );
+    }
+    let value;
+    try {
+      value = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
+    } catch (error) {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Word Bridge 返回了无法解析的结果",
+        { reason: "malformed_result" },
+      );
+    }
     if (!value || !value.ok) {
-      const error = new Error((value && value.error) || "Word Bridge 执行失败");
-      error.code = value && value.code ? value.code : "EXECUTION_FAILED";
+      const code = value && value.code ? value.code : "EDITOR_COMMAND_FAILED";
       const details = value && value.details && typeof value.details === "object"
         ? { ...value.details }
         : {};
       if (!details.phase) details.phase = "word-command";
+      if (!details.reason) details.reason = value ? "reported_failure" : "invalid_result";
+      if (!value || !value.code || code === "EDITOR_COMMAND_FAILED" || code === "EDITOR_COMMAND_REJECTED") {
+        throw commandFailure(code, (value && value.error) || "Word Bridge 执行失败", details);
+      }
+      const error = new Error((value && value.error) || "Word Bridge 执行失败");
+      error.code = code;
       error.details = details;
       throw error;
     }
@@ -707,9 +751,29 @@
         function (rawResult) {
           try {
             nativeSearchAndReplaceSupported = Boolean(parseResult(rawResult).supported);
+            if (
+              !nativeSearchAndReplaceSupported
+              && (!window.Asc || !Asc.plugin || typeof Asc.plugin.executeMethod !== "function")
+            ) {
+              reject(commandFailure(
+                "EDITOR_CAPABILITY_PROBE_FAILED",
+                "无法确认可用的 Word 文本替换能力",
+                { operation: "probe_search_and_replace", reason: "no_safe_fallback" },
+              ));
+              return;
+            }
             resolve(nativeSearchAndReplaceSupported);
           } catch (error) {
-            reject(error);
+            if (window.Asc && Asc.plugin && typeof Asc.plugin.executeMethod === "function") {
+              nativeSearchAndReplaceSupported = false;
+              resolve(false);
+              return;
+            }
+            reject(commandFailure(
+              "EDITOR_CAPABILITY_PROBE_FAILED",
+              "Word 文本替换能力探测失败",
+              { operation: "probe_search_and_replace", reason: "probe_failed" },
+            ));
           }
         },
       );
@@ -787,7 +851,11 @@
         const accepted = Asc.plugin.executeMethod("SearchAndReplace", [properties], function () {
           resolve();
         });
-        if (accepted === false) reject(new Error("ONLYOFFICE 拒绝执行 SearchAndReplace"));
+        if (accepted === false) reject(commandFailure(
+          "EDITOR_COMMAND_REJECTED",
+          "ONLYOFFICE 拒绝执行 SearchAndReplace",
+          { operation: "SearchAndReplace", reason: "execute_method_rejected" },
+        ));
       } catch (error) {
         reject(error);
       }
@@ -826,7 +894,11 @@
         const accepted = Asc.plugin.executeMethod("SetEditingRestrictions", [mode], function () {
           resolve();
         });
-        if (accepted === false) reject(new Error("ONLYOFFICE 拒绝设置文档编辑限制"));
+        if (accepted === false) reject(commandFailure(
+          "EDITOR_COMMAND_REJECTED",
+          "ONLYOFFICE 拒绝设置文档编辑限制",
+          { operation: "SetEditingRestrictions", reason: "execute_method_rejected" },
+        ));
       } catch (error) {
         reject(error);
       }
@@ -888,16 +960,22 @@
             result === false
             || (result && typeof result === "object" && (result.error || result.success === false))
           ) {
-            reject(new Error(
+            reject(commandFailure(
+              "EDITOR_COMMAND_REJECTED",
               result && result.error
                 ? String(result.error)
                 : "ONLYOFFICE 无法设置审阅显示模式",
+              { operation: "SetDisplayModeInReview", reason: "callback_rejected" },
             ));
             return;
           }
           resolve();
         });
-        if (accepted === false) reject(new Error("ONLYOFFICE 拒绝设置审阅显示模式"));
+        if (accepted === false) reject(commandFailure(
+          "EDITOR_COMMAND_REJECTED",
+          "ONLYOFFICE 拒绝设置审阅显示模式",
+          { operation: "SetDisplayModeInReview", reason: "execute_method_rejected" },
+        ));
       } catch (error) {
         reject(error);
       }
@@ -942,7 +1020,15 @@
     }
 
     if (hasDisplayMode) {
-      await applyRevisionDisplayMode(displayMode);
+      try {
+        await applyRevisionDisplayMode(displayMode);
+      } catch (error) {
+        if (result.changed > 0) {
+          if (!error.details || typeof error.details !== "object") error.details = {};
+          error.details.partialMutationPossible = true;
+        }
+        throw error;
+      }
       result.results[0].displayModeApplied = displayMode;
     }
     return result;
@@ -1013,7 +1099,11 @@
             }],
           });
         });
-        if (accepted === false) reject(new Error("ONLYOFFICE 拒绝执行宏方法 " + method));
+        if (accepted === false) reject(commandFailure(
+          "EDITOR_COMMAND_REJECTED",
+          "ONLYOFFICE 拒绝执行宏方法 " + method,
+          { operation: method, reason: "execute_method_rejected", partialMutationPossible: needsSave },
+        ));
       } catch (error) {
         reject(error);
       }
@@ -5292,10 +5382,22 @@
               currentMutationPossible = error.details.partialMutationPossible;
             }
             var details = {
+              editorType: "word",
               phase: "word-command",
+              operation: failedCall && failedCall.name ? String(failedCall.name) : "execute_tool_calls",
+              reason: error && error.details && error.details.reason
+                ? String(error.details.reason)
+                : "exception",
               completedToolCalls: failedCallIndex === null ? 0 : failedCallIndex,
               partialMutationPossible: priorMutationPossible || currentMutationPossible,
+              retryable: false,
+              reuseAllowed: false,
             };
+            details.requiredAction = details.partialMutationPossible
+              ? "inspect_current_state"
+              : ((error && error.code) === "EDITOR_COMMAND_REJECTED"
+                ? "fix_or_use_supported_operation"
+                : "report_bridge_failure");
             if (failedCall && failedCall.name) details.tool = String(failedCall.name);
             if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
             if (error && error.details && error.details.headerFooter) {
@@ -5310,7 +5412,7 @@
             }
             return JSON.stringify({
               ok: false,
-              code: error && error.code ? error.code : undefined,
+              code: error && error.code ? error.code : "EDITOR_COMMAND_FAILED",
               error: error && error.message ? error.message : String(error),
               details: details,
             });
@@ -5356,19 +5458,31 @@
       const contextualError = error && typeof error === "object"
         ? error
         : new Error(String(error));
+      if (!contextualError.code) contextualError.code = "EDITOR_COMMAND_FAILED";
       const existingDetails = contextualError.details && typeof contextualError.details === "object"
         ? contextualError.details
         : {};
       contextualError.details = {
+        ...existingDetails,
+        editorType: "word",
         phase: existingDetails.phase || "word-command",
         tool: call && call.name ? String(call.name) : undefined,
+        operation: existingDetails.operation || (call && call.name ? String(call.name) : "execute_tool_calls"),
+        reason: existingDetails.reason || "exception",
         toolCallIndex,
         completedToolCalls,
         partialMutationPossible: Boolean(
           existingDetails.partialMutationPossible
           || priorMutationPossible
         ),
+        retryable: false,
+        reuseAllowed: false,
       };
+      contextualError.details.requiredAction = contextualError.details.partialMutationPossible
+        ? "inspect_current_state"
+        : (contextualError.code === "EDITOR_COMMAND_REJECTED"
+          ? "fix_or_use_supported_operation"
+          : "report_bridge_failure");
       if (existingDetails.headerFooter) {
         contextualError.details.headerFooter = existingDetails.headerFooter;
       }
@@ -5448,12 +5562,17 @@
             || call.name === "word_set_macros"
           )
         );
+        const hasExplicitMutationBoundary = Boolean(
+          error
+          && error.details
+          && typeof error.details.partialMutationPossible === "boolean"
+        );
         throw addToolContext(
           error,
           call,
           toolCallIndex,
           toolCallIndex,
-          aggregate.changed > 0 || currentMutationPossible,
+          aggregate.changed > 0 || (!hasExplicitMutationBoundary && currentMutationPossible),
         );
       }
     }

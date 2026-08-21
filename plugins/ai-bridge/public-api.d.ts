@@ -62,6 +62,9 @@ export type AiBridgeErrorCode =
   | "SHEETS_CHART_CREATE_FAILED"
   | "SHEETS_RUNTIME_INCOMPATIBLE"
   | "SHEETS_CHART_PARTIAL_MUTATION"
+  | "EDITOR_CAPABILITY_PROBE_FAILED"
+  | "EDITOR_COMMAND_REJECTED"
+  | "EDITOR_COMMAND_FAILED"
   | "EXECUTION_FAILED"
   | "INVALID_LISTENER"
   | "CLIENT_DESTROYED"
@@ -90,7 +93,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.5";
+  contractVersion?: "0.2.6";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -113,10 +116,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.5";
+  version: "0.2.6";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.5";
+  contractVersion: "0.2.6";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -164,7 +167,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.5";
+  contractVersion: "0.2.6";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -189,10 +192,22 @@ export interface AiBridgeToolArgumentsErrorDetails {
   partialMutationPossible: false;
 }
 
+export interface AiBridgeEditorCommandErrorDetails {
+  editorType: AiBridgeEditorType;
+  tool?: string;
+  operation: string;
+  reason: string;
+  completedToolCalls: number;
+  partialMutationPossible: boolean;
+  retryable: boolean;
+  reuseAllowed: false;
+  requiredAction: "inspect_current_state" | "fix_or_use_supported_operation" | "report_bridge_failure";
+}
+
 export class AiBridgeError extends Error {
   readonly code: AiBridgeErrorCode;
   readonly requestId: string | null;
-  readonly details?: AiBridgeToolArgumentsErrorDetails | Record<string, unknown>;
+  readonly details?: AiBridgeToolArgumentsErrorDetails | AiBridgeEditorCommandErrorDetails | Record<string, unknown>;
 }
 
 export interface BasicTextFormat {
@@ -8764,7 +8779,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.5";
+  readonly version: "0.2.6";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

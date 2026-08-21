@@ -25,10 +25,15 @@ DOCKER_IMAGE := $(DOCKER_ORG)/4testing-$(PRODUCT_NAME)$(PRODUCT_EDITION)
 DOCKER_DUMMY := $(COMPANY_NAME_LOW)-$(PRODUCT_NAME)$(PRODUCT_EDITION)__$(DOCKER_TAG).dummy
 DOCKER_ARCH := $(COMPANY_NAME_LOW)-$(PRODUCT_NAME)_$(DOCKER_TAG).tar.gz
 
-.PHONY: all clean clean-docker image deploy docker ai-bridge-contract-check
+.PHONY: all clean clean-docker image deploy docker ai-bridge-contract-check ai-bridge-release-contract-check
 
 ai-bridge-contract-check:
 	PYTHONDONTWRITEBYTECODE=1 python3 plugins/ai-bridge/tools/sync_contract.py --check $(if $(ZENMIND_ROOT),--zenmind-root "$(ZENMIND_ROOT)" --httpx-base-url "$(HTTPX_BASE_URL)")
+
+ai-bridge-release-contract-check:
+	@test -n "$(ZENMIND_ROOT)" || (echo "ZENMIND_ROOT is required"; exit 1)
+	@test -n "$(HTTPX_BASE_URL)" || (echo "HTTPX_BASE_URL is required"; exit 1)
+	PYTHONDONTWRITEBYTECODE=1 python3 plugins/ai-bridge/tools/sync_contract.py --check --zenmind-root "$(ZENMIND_ROOT)" --httpx-base-url "$(HTTPX_BASE_URL)"
 
 $(DOCKER_DUMMY):
 	docker pull ubuntu:22.04

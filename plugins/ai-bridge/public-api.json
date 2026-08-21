@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "toolNaming": {
@@ -213,6 +213,9 @@
     "SHEETS_CHART_CREATE_FAILED",
     "SHEETS_RUNTIME_INCOMPATIBLE",
     "SHEETS_CHART_PARTIAL_MUTATION",
+    "EDITOR_CAPABILITY_PROBE_FAILED",
+    "EDITOR_COMMAND_REJECTED",
+    "EDITOR_COMMAND_FAILED",
     "EXECUTION_FAILED",
     "INVALID_LISTENER",
     "CLIENT_DESTROYED",

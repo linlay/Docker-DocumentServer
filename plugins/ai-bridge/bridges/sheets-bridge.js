@@ -3,8 +3,77 @@
 
   window.AICopilotBridges = window.AICopilotBridges || {};
 
+  function commandFailure(code, message, details) {
+    const sourceDetails = details && typeof details === "object" ? details : {};
+    const error = new Error(message || "Sheets Bridge 执行失败");
+    error.code = code;
+    error.details = {
+      ...sourceDetails,
+      editorType: "cell",
+      operation: sourceDetails.operation || "execute_tool_calls",
+      reason: sourceDetails.reason || "exception",
+      completedToolCalls: Number.isInteger(sourceDetails.completedToolCalls)
+        ? sourceDetails.completedToolCalls
+        : 0,
+      partialMutationPossible: Boolean(sourceDetails.partialMutationPossible),
+      retryable: false,
+      reuseAllowed: false,
+      requiredAction: sourceDetails.partialMutationPossible
+        ? "inspect_current_state"
+        : (code === "EDITOR_COMMAND_REJECTED"
+          ? "fix_or_use_supported_operation"
+          : "report_bridge_failure"),
+    };
+    return error;
+  }
+
+  function addCommandContext(error, toolCalls) {
+    const source = error && typeof error === "object" ? error : new Error(String(error));
+    const existing = source.details && typeof source.details === "object" ? source.details : {};
+    const index = Number.isInteger(existing.toolCallIndex) ? existing.toolCallIndex : 0;
+    const call = Array.isArray(toolCalls) && toolCalls[index] ? toolCalls[index] : null;
+    if (!source.code) source.code = "EDITOR_COMMAND_FAILED";
+    source.details = {
+      ...existing,
+      editorType: "cell",
+      tool: existing.tool || (call && call.name ? String(call.name) : undefined),
+      operation: existing.operation && existing.operation !== "execute_tool_calls"
+        ? existing.operation
+        : (call && call.name ? String(call.name) : "execute_tool_calls"),
+      reason: existing.reason || "exception",
+      completedToolCalls: Number.isInteger(existing.completedToolCalls)
+        ? existing.completedToolCalls
+        : index,
+      partialMutationPossible: Boolean(existing.partialMutationPossible),
+      retryable: false,
+      reuseAllowed: false,
+    };
+    source.details.requiredAction = source.details.partialMutationPossible
+      ? "inspect_current_state"
+      : (source.code === "EDITOR_COMMAND_REJECTED"
+        ? "fix_or_use_supported_operation"
+        : "report_bridge_failure");
+    return source;
+  }
+
   function parseResult(rawResult) {
-    const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
+    if (rawResult === undefined || rawResult === null || rawResult === "") {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Sheets Bridge 未返回有效结果",
+        { reason: "empty_result" },
+      );
+    }
+    let value;
+    try {
+      value = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
+    } catch (error) {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Sheets Bridge 返回了无法解析的结果",
+        { reason: "malformed_result" },
+      );
+    }
     if (!value || !value.ok) {
       const rawError = value && value.error;
       const error = new Error(
@@ -14,7 +83,7 @@
       );
       error.code = value && value.code
         ? value.code
-        : (rawError && rawError.code ? rawError.code : "EXECUTION_FAILED");
+        : (rawError && rawError.code ? rawError.code : "EDITOR_COMMAND_FAILED");
       const rawDetails = value && value.details && typeof value.details === "object"
         ? value.details
         : (
@@ -24,6 +93,15 @@
         );
       error.details = { ...rawDetails };
       if (!error.details.phase) error.details.phase = "sheets-command";
+      if (!error.details.reason) error.details.reason = value ? "reported_failure" : "invalid_result";
+      if (
+        !(value && value.code)
+        && !(rawError && rawError.code)
+        || error.code === "EDITOR_COMMAND_FAILED"
+        || error.code === "EDITOR_COMMAND_REJECTED"
+      ) {
+        throw commandFailure(error.code, error.message, error.details);
+      }
       throw error;
     }
     return value;
@@ -864,8 +942,23 @@
         return;
       }
       try {
-        Asc.plugin.executeMethod(method, params, function (data) {
+        const accepted = Asc.plugin.executeMethod(method, params, function (data) {
           try {
+            if (
+              (needsSave && data === false)
+              || (data && typeof data === "object" && (data.error || data.success === false))
+            ) {
+              reject(commandFailure(
+                "EDITOR_COMMAND_REJECTED",
+                data && data.error ? String(data.error) : "ONLYOFFICE 拒绝执行 " + method,
+                {
+                  operation: method,
+                  reason: "callback_rejected",
+                  partialMutationPossible: needsSave,
+                },
+              ));
+              return;
+            }
             let content = data;
             if (method === "GetMacros" && typeof data === "string") {
               try {
@@ -887,6 +980,17 @@
             reject(error);
           }
         });
+        if (accepted === false) {
+          reject(commandFailure(
+            "EDITOR_COMMAND_REJECTED",
+            "ONLYOFFICE 拒绝执行 " + method,
+            {
+              operation: method,
+              reason: "execute_method_rejected",
+              partialMutationPossible: needsSave,
+            },
+          ));
+        }
       } catch (error) {
         if (!error.details || typeof error.details !== "object") error.details = {};
         error.details.partialMutationPossible = needsSave;
@@ -913,15 +1017,25 @@
           && typeof error.details === "object"
           ? error.details
           : {};
-        error.code = error.code || "EXECUTION_FAILED";
+        error.code = error.code || "EDITOR_COMMAND_FAILED";
         error.details = {
           ...existingDetails,
+          editorType: "cell",
           phase: existingDetails.phase || "sheets-command",
           tool: failedCall.name ? String(failedCall.name) : undefined,
+          operation: existingDetails.operation || (failedCall.name ? String(failedCall.name) : "execute_tool_calls"),
+          reason: existingDetails.reason || "exception",
           toolCallIndex: failedIndex,
           completedToolCalls: 0,
           partialMutationPossible: Boolean(existingDetails.partialMutationPossible),
+          retryable: false,
+          reuseAllowed: false,
         };
+        error.details.requiredAction = error.details.partialMutationPossible
+          ? "inspect_current_state"
+          : (error.code === "EDITOR_COMMAND_REJECTED"
+            ? "fix_or_use_supported_operation"
+            : "report_bridge_failure");
         throw error;
       });
     }
@@ -1292,14 +1406,18 @@
                 Array.prototype.slice.call(arguments, 3)
               );
               if (result === false) {
-                throw new Error("ONLYOFFICE 拒绝" + (feature || method));
+                throw sheetError(
+                  "EDITOR_COMMAND_REJECTED",
+                  "ONLYOFFICE 拒绝" + (feature || method),
+                  { operation: method, reason: "api_returned_false" }
+                );
               }
               return result;
             }
 
             function sheetError(code, message, details) {
               var error = new Error(message);
-              error.code = code || "EXECUTION_FAILED";
+              error.code = code || "EDITOR_COMMAND_FAILED";
               error.details = details || {};
               return error;
             }
@@ -1308,7 +1426,7 @@
               var result = mutationCall.apply(null, arguments);
               if (result === null || result === undefined) {
                 throw sheetError(
-                  "EXECUTION_FAILED",
+                  "EDITOR_COMMAND_FAILED",
                   "ONLYOFFICE 未创建" + (feature || method)
                 );
               }
@@ -3968,7 +4086,7 @@
                     var deletedConditionCount = safeCall(conditions, "GetCount");
                     if (typeof deletedConditionCount === "number" && deletedConditionCount !== 0) {
                       throw sheetError(
-                        "EXECUTION_FAILED",
+                        "EDITOR_COMMAND_FAILED",
                         "删除条件格式后规则数量仍为 " + deletedConditionCount
                       );
                     }
@@ -4023,7 +4141,7 @@
                       && conditionCountAfter !== conditionCountBefore + 1
                     ) {
                       throw sheetError(
-                        "EXECUTION_FAILED",
+                        "EDITOR_COMMAND_FAILED",
                         "添加条件格式后规则数量未增加"
                       );
                     }
@@ -4149,7 +4267,7 @@
                   );
                   if (validationAction !== "delete" && !validationReadback) {
                     throw sheetError(
-                      "EXECUTION_FAILED",
+                      "EDITOR_COMMAND_FAILED",
                       "数据验证写入后无法读回有效规则"
                     );
                   }
@@ -4971,12 +5089,17 @@
               details[name] = existingDetails[name];
             });
             details.phase = existingDetails.phase || "sheets-command";
+            details.editorType = "cell";
             details.completedToolCalls = failedCallIndex === null ? 0 : failedCallIndex;
             details.partialMutationPossible = priorMutationPossible || currentMutationPossible;
             if (failedCall && failedCall.name) details.tool = String(failedCall.name);
+            details.operation = existingDetails.operation || details.tool || "execute_tool_calls";
+            details.reason = existingDetails.reason || "exception";
+            details.retryable = false;
+            details.reuseAllowed = false;
             if (failedCallIndex !== null) details.toolCallIndex = failedCallIndex;
             var errorMessage = error && error.message ? error.message : String(error);
-            var normalizedErrorCode = error && error.code ? error.code : "EXECUTION_FAILED";
+            var normalizedErrorCode = error && error.code ? error.code : "EDITOR_COMMAND_FAILED";
             if (errorMessage.indexOf("setDirtyConditionalFormatting") >= 0) {
               normalizedErrorCode = "SHEETS_RUNTIME_INCOMPATIBLE";
               details.feature = "sheets.conditionalFormatting";
@@ -4984,6 +5107,11 @@
               details.mutationState = details.partialMutationPossible ? "partial" : "unknown";
               details.recovery = "inspect_then_undo_or_reopen";
             }
+            details.requiredAction = details.partialMutationPossible
+              ? "inspect_current_state"
+              : (normalizedErrorCode === "EDITOR_COMMAND_REJECTED"
+                ? "fix_or_use_supported_operation"
+                : "report_bridge_failure");
             return JSON.stringify({
               ok: false,
               code: normalizedErrorCode,
@@ -5004,6 +5132,8 @@
           }
         },
       );
+    }).catch(function (error) {
+      throw addCommandContext(error, toolCalls);
     });
   }
 

@@ -1383,7 +1383,10 @@ def render_toml(
             "expect_status = 200",
             'extract_type = "jq"',
             (
-                "extract_expr = '''if (.body.online == true "
+                "extract_expr = '''if (.body.contractVersion != "
+                f'"{contract["version"]}" or .body.contractSha256 != "{sha256}") then '
+                f"error(\"CONTRACT_MISMATCH: {config['site']}\") "
+                "elif (.body.online == true "
                 f'and .body.saveReady == true and .body.editorType == "{editor}") then .body '
                 f"else error(\"EDITOR_SESSION_UNAVAILABLE: {config['site']}\") end'''"
             ),
@@ -1752,8 +1755,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.5":
-        raise ValueError("public-api.json version must be 0.2.5")
+    if contract.get("version") != "0.2.6":
+        raise ValueError("public-api.json version must be 0.2.6")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}
@@ -1772,6 +1775,9 @@ def validate_contract(contract: dict[str, Any]) -> None:
     required_runtime_errors = {
         "CONTRACT_MISMATCH",
         "DOCUMENT_LOAD_TIMEOUT",
+        "EDITOR_CAPABILITY_PROBE_FAILED",
+        "EDITOR_COMMAND_FAILED",
+        "EDITOR_COMMAND_REJECTED",
         "EDITOR_APP_STARTUP_TIMEOUT",
         "HTTP_RELAY_INVALID_RESPONSE",
         "HTTP_RELAY_NETWORK_ERROR",

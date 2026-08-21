@@ -1465,7 +1465,7 @@ test("Sheets bridge reads validation getters and rejects null validation mutatio
   } catch (error) {
     caught = error;
   }
-  assert.equal(caught && caught.code, "EXECUTION_FAILED");
+  assert.equal(caught && caught.code, "EDITOR_COMMAND_FAILED");
   assert.equal(caught.details.completedToolCalls, 0);
   assert.equal(caught.details.partialMutationPossible, true);
 });
@@ -1520,7 +1520,7 @@ test("Sheets bridge rejects null from every conditional-format Add API", async (
     } catch (error) {
       caught = error;
     }
-    assert.equal(caught && caught.code, "EXECUTION_FAILED", method);
+    assert.equal(caught && caught.code, "EDITOR_COMMAND_FAILED", method);
     assert.equal(caught.details.completedToolCalls, 0, method);
   }
 });
@@ -1593,7 +1593,7 @@ test("Sheets bridge rejects null from validation Add and Modify", async () => {
     } catch (error) {
       caught = error;
     }
-    assert.equal(caught && caught.code, "EXECUTION_FAILED", action);
+    assert.equal(caught && caught.code, "EDITOR_COMMAND_FAILED", action);
     assert.equal(caught.details.completedToolCalls, 0, action);
   }
 });

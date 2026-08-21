@@ -3,6 +3,59 @@
 
   window.AICopilotBridges = window.AICopilotBridges || {};
 
+  function commandFailure(code, message, details) {
+    const sourceDetails = details && typeof details === "object" ? details : {};
+    const error = new Error(message || "Slides Bridge 执行失败");
+    error.code = code;
+    error.details = {
+      ...sourceDetails,
+      editorType: "slide",
+      operation: sourceDetails.operation || "execute_tool_calls",
+      reason: sourceDetails.reason || "exception",
+      completedToolCalls: Number.isInteger(sourceDetails.completedToolCalls)
+        ? sourceDetails.completedToolCalls
+        : 0,
+      partialMutationPossible: Boolean(sourceDetails.partialMutationPossible),
+      retryable: false,
+      reuseAllowed: false,
+      requiredAction: sourceDetails.partialMutationPossible
+        ? "inspect_current_state"
+        : (code === "EDITOR_COMMAND_REJECTED"
+          ? "fix_or_use_supported_operation"
+          : "report_bridge_failure"),
+    };
+    return error;
+  }
+
+  function addCommandContext(error, toolCalls) {
+    const source = error && typeof error === "object" ? error : new Error(String(error));
+    const existing = source.details && typeof source.details === "object" ? source.details : {};
+    const index = Number.isInteger(existing.toolCallIndex) ? existing.toolCallIndex : 0;
+    const call = Array.isArray(toolCalls) && toolCalls[index] ? toolCalls[index] : null;
+    if (!source.code) source.code = "EDITOR_COMMAND_FAILED";
+    source.details = {
+      ...existing,
+      editorType: "slide",
+      tool: existing.tool || (call && call.name ? String(call.name) : undefined),
+      operation: existing.operation && existing.operation !== "execute_tool_calls"
+        ? existing.operation
+        : (call && call.name ? String(call.name) : "execute_tool_calls"),
+      reason: existing.reason || "exception",
+      completedToolCalls: Number.isInteger(existing.completedToolCalls)
+        ? existing.completedToolCalls
+        : index,
+      partialMutationPossible: Boolean(existing.partialMutationPossible),
+      retryable: false,
+      reuseAllowed: false,
+    };
+    source.details.requiredAction = source.details.partialMutationPossible
+      ? "inspect_current_state"
+      : (source.code === "EDITOR_COMMAND_REJECTED"
+        ? "fix_or_use_supported_operation"
+        : "report_bridge_failure");
+    return source;
+  }
+
   const SMART_ART_TYPES = Object.freeze([
     "AccentedPicture", "Balance", "TitledPictureBlocks", "PictureAccentBlocks", "BlockCycle",
     "StackedVenn", "VerticalEquation", "VerticalBlockList", "VerticalBendingProcess", "VerticalBulletList",
@@ -38,11 +91,35 @@
   ]);
 
   function parseResult(rawResult) {
-    const value = typeof rawResult === "string" ? JSON.parse(rawResult || "{}") : rawResult;
+    if (rawResult === undefined || rawResult === null || rawResult === "") {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Slides Bridge 未返回有效结果",
+        { reason: "empty_result" },
+      );
+    }
+    let value;
+    try {
+      value = typeof rawResult === "string" ? JSON.parse(rawResult) : rawResult;
+    } catch (error) {
+      throw commandFailure(
+        "EDITOR_COMMAND_FAILED",
+        "Slides Bridge 返回了无法解析的结果",
+        { reason: "malformed_result" },
+      );
+    }
     if (!value || !value.ok) {
+      const code = value && value.code ? value.code : "EDITOR_COMMAND_FAILED";
+      const details = value && value.details && typeof value.details === "object"
+        ? { ...value.details }
+        : {};
+      if (!details.reason) details.reason = value ? "reported_failure" : "invalid_result";
+      if (!value || !value.code || code === "EDITOR_COMMAND_FAILED" || code === "EDITOR_COMMAND_REJECTED") {
+        throw commandFailure(code, (value && value.error) || "Slides Bridge 执行失败", details);
+      }
       const error = new Error((value && value.error) || "Slides Bridge 执行失败");
-      if (value && value.code) error.code = value.code;
-      if (value && value.details && typeof value.details === "object") error.details = { ...value.details };
+      error.code = code;
+      error.details = details;
       throw error;
     }
     return value;
@@ -4404,11 +4481,50 @@
               results: results,
             });
           } catch (error) {
+            var failedCallIndex = typeof callIndex === "number"
+              && callIndex >= 0
+              && calls
+              && callIndex < calls.length
+              ? callIndex
+              : null;
+            var failedCall = failedCallIndex !== null ? calls[failedCallIndex] : null;
+            var priorMutationPossible = false;
+            if (failedCallIndex !== null) {
+              for (var mutationIndex = 0; mutationIndex < failedCallIndex; mutationIndex += 1) {
+                if (calls[mutationIndex] && mutatingNames[calls[mutationIndex].name]) {
+                  priorMutationPossible = true;
+                  break;
+                }
+              }
+            }
+            var existingDetails = error && error.details && typeof error.details === "object"
+              ? error.details
+              : {};
+            var currentMutationPossible = Boolean(failedCall && mutatingNames[failedCall.name]);
+            if (typeof existingDetails.partialMutationPossible === "boolean") {
+              currentMutationPossible = existingDetails.partialMutationPossible;
+            }
+            var details = {};
+            Object.keys(existingDetails).forEach(function (name) { details[name] = existingDetails[name]; });
+            details.editorType = "slide";
+            details.phase = existingDetails.phase || "slides-command";
+            details.tool = failedCall && failedCall.name ? String(failedCall.name) : undefined;
+            details.operation = existingDetails.operation || details.tool || "execute_tool_calls";
+            details.reason = existingDetails.reason || "exception";
+            details.completedToolCalls = failedCallIndex === null ? 0 : failedCallIndex;
+            details.partialMutationPossible = priorMutationPossible || currentMutationPossible;
+            details.retryable = false;
+            details.reuseAllowed = false;
+            details.requiredAction = details.partialMutationPossible
+              ? "inspect_current_state"
+              : ((error && error.code) === "EDITOR_COMMAND_REJECTED"
+                ? "fix_or_use_supported_operation"
+                : "report_bridge_failure");
             return JSON.stringify({
               ok: false,
-              code: error && error.code ? error.code : undefined,
+              code: error && error.code ? error.code : "EDITOR_COMMAND_FAILED",
               error: error && error.message ? error.message : String(error),
-              details: error && error.details !== undefined ? error.details : undefined,
+              details: details,
             });
           }
         },
@@ -4490,8 +4606,23 @@
         return;
       }
 
-      Asc.plugin.executeMethod(method, params, function (data) {
+      const accepted = Asc.plugin.executeMethod(method, params, function (data) {
         try {
+          if (
+            (needsSave && data === false)
+            || (data && typeof data === "object" && (data.error || data.success === false))
+          ) {
+            reject(commandFailure(
+              "EDITOR_COMMAND_REJECTED",
+              data && data.error ? String(data.error) : "ONLYOFFICE 拒绝执行 " + method,
+              {
+                operation: method,
+                reason: "callback_rejected",
+                partialMutationPossible: needsSave,
+              },
+            ));
+            return;
+          }
           var content = data;
           if ((method === "GetMacros" || method === "GetEditorThemes") && typeof data === "string") {
             try {
@@ -4516,6 +4647,17 @@
           reject(error);
         }
       });
+      if (accepted === false) {
+        reject(commandFailure(
+          "EDITOR_COMMAND_REJECTED",
+          "ONLYOFFICE 拒绝执行 " + method,
+          {
+            operation: method,
+            reason: "execute_method_rejected",
+            partialMutationPossible: needsSave,
+          },
+        ));
+      }
     });
   }
 
@@ -4687,11 +4829,17 @@
 
   function execute(toolCalls) {
     requireStaticValidation(toolCalls);
+    let operation;
     if (toolCalls.some(function (call) { return call && call.name === "slides_add_smartart"; })) {
-      return executeSmartArtAware(toolCalls);
+      operation = executeSmartArtAware(toolCalls);
+    } else if (toolCalls.some(isPluginTool)) {
+      operation = executePluginTool(toolCalls);
+    } else {
+      operation = executeOfficeCommands(toolCalls);
     }
-    if (toolCalls.some(isPluginTool)) return executePluginTool(toolCalls);
-    return executeOfficeCommands(toolCalls);
+    return operation.catch(function (error) {
+      throw addCommandContext(error, toolCalls);
+    });
   }
 
   window.AICopilotBridges.slide = {

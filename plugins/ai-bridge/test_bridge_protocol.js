@@ -416,6 +416,7 @@ function createWordBridgeHarness(options = {}) {
   const executeMethodCalls = [];
   const nativeSearchAndReplaceCalls = [];
   const callCommandCalls = [];
+  let capabilityProbeResultUsed = false;
   const insertContentCalls = [];
   const addElementCalls = [];
   const formattedRanges = [];
@@ -994,6 +995,15 @@ function createWordBridgeHarness(options = {}) {
       callCommand(command, close, recalculate, callback) {
         assert.equal(close, false);
         callCommandCalls.push({ command: command.toString(), recalculate: Boolean(recalculate) });
+        if (
+          !recalculate
+          && !capabilityProbeResultUsed
+          && Object.prototype.hasOwnProperty.call(options, "capabilityProbeRawResult")
+        ) {
+          capabilityProbeResultUsed = true;
+          callback(options.capabilityProbeRawResult);
+          return;
+        }
         try {
           callback(vm.runInContext(`(${command.toString()})()`, officeContext));
         } catch (error) {
@@ -1022,6 +1032,7 @@ function createWordBridgeHarness(options = {}) {
       },
     },
   };
+  if (options.executeMethodSupported === false) delete Asc.plugin.executeMethod;
   pluginWindow.Asc = Asc;
   vm.runInNewContext(wordBridgeSource, { window: pluginWindow, Asc, console, Promise, JSON, String });
   return {
@@ -3272,6 +3283,50 @@ test("word bridge replaces text through the compatible plugin method", async () 
   }]);
 });
 
+test("word bridge falls back when native replacement capability probing returns no result", async () => {
+  const harness = createWordBridgeHarness({
+    text: "A",
+    capabilityProbeRawResult: "",
+  });
+
+  const result = await harness.bridge.execute([{
+    name: "word_replace_text",
+    arguments: { search: "A", replace: "B", matchCase: true },
+  }]);
+
+  assert.equal(harness.text, "B");
+  assert.equal(result.changed, 1);
+  assert.deepEqual(harness.executeMethodCalls, [{
+    name: "SearchAndReplace",
+    args: [{ searchString: "A", replaceString: "B", matchCase: true }],
+  }]);
+});
+
+test("word bridge reports capability probe failure when no safe fallback exists", async () => {
+  const harness = createWordBridgeHarness({
+    text: "A",
+    capabilityProbeRawResult: "",
+    executeMethodSupported: false,
+  });
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "word_replace_text",
+      arguments: { search: "A", replace: "不得泄露", matchCase: true },
+    }]),
+    error => {
+      assert.equal(error.code, "EDITOR_CAPABILITY_PROBE_FAILED");
+      assert.equal(error.details.editorType, "word");
+      assert.equal(error.details.operation, "probe_search_and_replace");
+      assert.equal(error.details.reason, "probe_failed");
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(error.details.requiredAction, "report_bridge_failure");
+      assert.doesNotMatch(JSON.stringify(error.details), /不得泄露/);
+      return true;
+    },
+  );
+});
+
 test("word bridge skips SearchAndReplace when the source text is absent", async () => {
   const harness = createWordBridgeHarness({ text: "主任委员：李四" });
 
@@ -5324,9 +5379,19 @@ test("word bridge rejects when ONLYOFFICE refuses SearchAndReplace", async () =>
   await assert.rejects(
     harness.bridge.execute([{
       name: "word_replace_text",
-      arguments: { search: "姜涛", replace: "张三", matchCase: false },
+      arguments: { search: "姜涛", replace: "敏感替换文本", matchCase: false },
     }]),
-    /ONLYOFFICE 拒绝执行 SearchAndReplace/,
+    error => {
+      assert.equal(error.code, "EDITOR_COMMAND_REJECTED");
+      assert.equal(error.details.editorType, "word");
+      assert.equal(error.details.operation, "SearchAndReplace");
+      assert.equal(error.details.reason, "execute_method_rejected");
+      assert.equal(error.details.partialMutationPossible, false);
+      assert.equal(error.details.requiredAction, "fix_or_use_supported_operation");
+      assert.equal(error.details.reuseAllowed, false);
+      assert.doesNotMatch(JSON.stringify(error.details), /敏感替换文本/);
+      return true;
+    },
   );
 });
 

@@ -42,7 +42,14 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.5")
+        self.assertEqual(self.contract["version"], "0.2.6")
+        self.assertTrue(
+            {
+                "EDITOR_CAPABILITY_PROBE_FAILED",
+                "EDITOR_COMMAND_REJECTED",
+                "EDITOR_COMMAND_FAILED",
+            }.issubset(set(self.contract["errors"]))
+        )
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -497,7 +504,7 @@ class ContractGenerationTests(unittest.TestCase):
             artifacts[sync_contract.INDEX_PATH],
         )
         self.assertEqual(index_revisions, [revision])
-        self.assertRegex(revision, r"^0\.2\.5-[0-9a-f]{64}$")
+        self.assertRegex(revision, r"^0\.2\.6-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
             artifacts[sync_contract.CONFIG_PATH],
@@ -705,6 +712,15 @@ class ContractGenerationTests(unittest.TestCase):
                     rendered,
                 )
                 self.assertIn(f"EDITOR_SESSION_UNAVAILABLE: {site}", rendered)
+                self.assertIn(f"CONTRACT_MISMATCH: {site}", rendered)
+                self.assertIn(
+                    f'.body.contractVersion != "{self.contract["version"]}"',
+                    rendered,
+                )
+                self.assertIn(
+                    f'.body.contractSha256 != "{sha256}"',
+                    rendered,
+                )
 
     def test_httpx_typed_file_projection_covers_all_167_structured_actions(
         self,
