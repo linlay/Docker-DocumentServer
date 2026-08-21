@@ -178,7 +178,8 @@ class ContractAlignmentTests(unittest.TestCase):
             public_contract = json.load(stream)
         config_revision = plugin_config["variations"][0]["url"].split("?v=", 1)[1]
 
-        self.assertEqual(revisions, [config_revision] * 4)
+        self.assertEqual(revisions, [config_revision])
+        self.assertIn("bootstrap.js?v=" + config_revision, plugin_index)
         self.assertRegex(
             config_revision,
             rf"^{re.escape(public_contract['version'])}-[0-9a-f]{{64}}$",

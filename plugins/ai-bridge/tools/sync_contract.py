@@ -26,7 +26,9 @@ HOST_PATH = BRIDGE_ROOT / "host-bridge.js"
 CLIENT_PATH = BRIDGE_ROOT / "client-sdk.js"
 CONFIG_PATH = BRIDGE_ROOT / "config.json"
 INDEX_PATH = BRIDGE_ROOT / "index.html"
+BOOTSTRAP_PATH = BRIDGE_ROOT / "bootstrap.js"
 STATIC_RUNTIME_PATHS = (
+    BOOTSTRAP_PATH,
     BRIDGE_ROOT / "bridges" / "word-bridge.js",
     BRIDGE_ROOT / "bridges" / "slides-bridge.js",
     BRIDGE_ROOT / "bridges" / "sheets-bridge.js",
@@ -1629,8 +1631,8 @@ def build_artifacts(
         INDEX_PATH.read_text(encoding="utf-8"),
         ASSET_REVISION_PLACEHOLDER,
     )
-    if normalized_index.count(f"v={ASSET_REVISION_PLACEHOLDER}") != 4:
-        raise ValueError("index.html must version all four local bridge scripts")
+    if normalized_index.count(f"v={ASSET_REVISION_PLACEHOLDER}") != 1:
+        raise ValueError("index.html must version the ai-bridge bootstrap script")
     revision_sources = runtime_asset_sources(
         contract,
         artifacts,
@@ -1769,12 +1771,20 @@ def validate_contract(contract: dict[str, Any]) -> None:
     errors = set(contract.get("errors") or [])
     required_runtime_errors = {
         "CONTRACT_MISMATCH",
+        "DOCUMENT_LOAD_TIMEOUT",
+        "EDITOR_APP_STARTUP_TIMEOUT",
         "HTTP_RELAY_INVALID_RESPONSE",
         "HTTP_RELAY_NETWORK_ERROR",
         "MESSAGE_NOT_SUPPORTED",
         "PERSISTENCE_NOT_AVAILABLE",
         "PERSISTENCE_INVALID_RESPONSE",
         "PERSISTENCE_TIMEOUT",
+        "PLUGIN_ASSET_LOAD_FAILED",
+        "PLUGIN_BRIDGE_MISSING",
+        "PLUGIN_HANDSHAKE_CONFIG_INVALID",
+        "PLUGIN_INITIALIZATION_FAILED",
+        "PLUGIN_NOT_LOADED",
+        "UNSUPPORTED_EDITOR_TYPE",
     }
     if not required_runtime_errors.issubset(errors):
         raise ValueError("public-api.json must expose current browser runtime errors")

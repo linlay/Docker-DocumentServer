@@ -3,7 +3,7 @@
 
   const VERSION = "0.2.5";
   const PROTOCOL_VERSION = 1;
-  const CONTRACT_SHA256 = "3a8940e1e7ba8b042d65871eabb23d7ee1cc3f1a5e7f1854ac82081490e05d3e";
+  const CONTRACT_SHA256 = "2ce1539fab15d1551acb30c94fae681729c5889efe4a75f2462ffef6afaaa28f";
   const PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
   const CHANNEL_ID_PATTERN = /^[A-Za-z0-9._:-]{16,200}$/;
@@ -44,6 +44,7 @@
   let relayStateValue = null;
   let relayStateCode = null;
   let relayStateSignature = null;
+  let startupHandshakeRejection = null;
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -59,6 +60,17 @@
     return Date.now();
   }());
   const startupMarks = {};
+  const STARTUP_FAILURE_CODES = new Set([
+    "EDITOR_APP_STARTUP_TIMEOUT",
+    "DOCUMENT_LOAD_TIMEOUT",
+    "PLUGIN_NOT_LOADED",
+    "PLUGIN_INITIALIZATION_FAILED",
+    "PLUGIN_HANDSHAKE_CONFIG_INVALID",
+    "PLUGIN_HANDSHAKE_REJECTED",
+    "PLUGIN_ASSET_LOAD_FAILED",
+    "PLUGIN_BRIDGE_MISSING",
+    "UNSUPPORTED_EDITOR_TYPE",
+  ]);
 
   function startupElapsedMs() {
     return Math.max(0, Math.round(Date.now() - startupNavigationStartedAt));
@@ -69,7 +81,33 @@
   }
 
   markStartup("hostScriptMs");
-  window.addEventListener("load", function () { markStartup("windowLoadMs"); });
+  if (document.readyState === "complete") markStartup("windowLoadMs");
+  else window.addEventListener("load", function () { markStartup("windowLoadMs"); });
+  window.addEventListener("ai-bridge-host-startup", function (event) {
+    const stage = event && event.detail && event.detail.stage;
+    if (stage === "editorCreateRequested") markStartup("editorCreateRequestedMs");
+    if (stage === "editorCreated") markStartup("editorCreatedMs");
+  });
+
+  (function observeEditorFrame() {
+    function attach() {
+      const frame = typeof document.querySelector === "function"
+        ? document.querySelector('iframe[name="frameEditor"]')
+        : null;
+      if (!frame) return false;
+      markStartup("editorFrameMs");
+      if (typeof frame.addEventListener === "function" && !frame.__aiBridgeLoadObserved) {
+        frame.__aiBridgeLoadObserved = true;
+        frame.addEventListener("load", function () { markStartup("editorFrameLoadedMs"); }, { once: true });
+      }
+      return true;
+    }
+    if (attach() || typeof window.MutationObserver !== "function" || !document.documentElement) return;
+    const observer = new window.MutationObserver(function () {
+      if (attach()) observer.disconnect();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }());
 
   class AiBridgeError extends Error {
     constructor(code, message, options) {
@@ -170,7 +208,15 @@
       : {};
     const raw = options[PLUGIN_GUID];
     if (!raw || typeof raw !== "object") {
-      return { strict: false, valid: true, hostOrigin: null, channelId: null };
+      return {
+        strict: false,
+        valid: true,
+        hostOrigin: null,
+        channelId: null,
+        originValid: true,
+        originMatches: true,
+        channelValid: true,
+      };
     }
 
     const hostOrigin = typeof raw.hostOrigin === "string" ? raw.hostOrigin : "";
@@ -190,7 +236,101 @@
       ),
       hostOrigin,
       channelId,
+      originValid: normalizedOrigin === hostOrigin,
+      originMatches: hostOrigin === window.location.origin,
+      channelValid: CHANNEL_ID_PATTERN.test(channelId),
     };
+  }
+
+  function pluginConfigurationSnapshot() {
+    const editorConfig = editorConfiguration();
+    const plugins = editorConfig.editorConfig
+      && editorConfig.editorConfig.plugins
+      && typeof editorConfig.editorConfig.plugins === "object"
+      ? editorConfig.editorConfig.plugins
+      : {};
+    const autostart = Array.isArray(plugins.autostart) ? plugins.autostart : [];
+    const pluginsData = Array.isArray(plugins.pluginsData) ? plugins.pluginsData : [];
+    return {
+      pluginAutostartConfigured: autostart.includes(PLUGIN_GUID),
+      pluginDataConfigured: pluginsData.some(function (value) {
+        return typeof value === "string" && value.includes("A17E5F31-64AA-4E37-9A42-8D430814C2F6");
+      }),
+    };
+  }
+
+  function startupEnvironment() {
+    const pluginConfiguration = pluginConfigurationSnapshot();
+    return {
+      documentReadyState: String(document.readyState || "unknown"),
+      pageVisibilityState: String(document.visibilityState || "unknown"),
+      editorFramePresent: Boolean(
+        typeof document.querySelector === "function"
+        && document.querySelector('iframe[name="frameEditor"]'),
+      ),
+      ...pluginConfiguration,
+      strictHandshake: pluginHandshake.strict,
+      handshakeConfigValid: pluginHandshake.valid,
+      handshakeOriginValid: pluginHandshake.originValid,
+      handshakeOriginMatches: pluginHandshake.originMatches,
+      handshakeChannelConfigured: Boolean(pluginHandshake.channelId),
+      handshakeChannelValid: pluginHandshake.channelValid,
+      currentHostOrigin: window.location.origin,
+      expectedHostOrigin: pluginHandshake.hostOrigin,
+      pluginOrigin,
+      hostVersion: VERSION,
+      contractSha256: CONTRACT_SHA256,
+    };
+  }
+
+  function startupDetails(timeoutMs, stalledPhase, extraDetails) {
+    return {
+      timeoutMs,
+      stalledPhase,
+      startup: { ...startupMarks },
+      environment: startupEnvironment(),
+      ...(extraDetails && typeof extraDetails === "object" ? extraDetails : {}),
+    };
+  }
+
+  function startupTimeoutError(timeoutMs) {
+    if (startupHandshakeRejection) {
+      return bridgeError(
+        "PLUGIN_HANDSHAKE_REJECTED",
+        "检测到 ai-bridge 插件启动消息，但严格握手校验未通过",
+        {
+          details: startupDetails(timeoutMs, "handshake-rejected", {
+            handshakeRejection: { ...startupHandshakeRejection },
+          }),
+        },
+      );
+    }
+    if (startupMarks.appReadyMs === undefined) {
+      return bridgeError(
+        "EDITOR_APP_STARTUP_TIMEOUT",
+        "ONLYOFFICE 编辑器应用未在限定时间内启动",
+        { details: startupDetails(timeoutMs, "waiting-editor-app") },
+      );
+    }
+    if (startupMarks.documentReadyMs === undefined) {
+      return bridgeError(
+        "DOCUMENT_LOAD_TIMEOUT",
+        "ONLYOFFICE 编辑器已启动，但文档未在限定时间内加载完成",
+        { details: startupDetails(timeoutMs, "waiting-document") },
+      );
+    }
+    if (startupMarks.pluginHelloMs === undefined) {
+      return bridgeError(
+        "PLUGIN_NOT_LOADED",
+        "文档已就绪，但 ai-bridge 插件未发送启动消息",
+        { details: startupDetails(timeoutMs, "waiting-plugin-hello") },
+      );
+    }
+    return bridgeError(
+      "PLUGIN_INITIALIZATION_FAILED",
+      "ai-bridge 插件已连接宿主页，但未完成初始化",
+      { details: startupDetails(timeoutMs, "waiting-plugin-ready") },
+    );
   }
 
   function editorToken() {
@@ -321,7 +461,9 @@
   }
 
   function sendConfiguration() {
-    send({ type: "configure", config: currentConfig() });
+    const sent = send({ type: "configure", config: currentConfig() });
+    if (sent) markStartup("configureSentMs");
+    return sent;
   }
 
   function waitUntilReady(timeoutMs) {
@@ -353,14 +495,38 @@
       "CONTRACT_MISMATCH",
       "ai-bridge 插件资源版本与页面不一致，请关闭并重新打开文档",
       {
-        details: {
+        details: startupDetails(null, "contract-mismatch", {
           expectedContractSha256: CONTRACT_SHA256,
           actualContractSha256: actualSha256 || null,
-        },
+        }),
       },
     );
     document.documentElement.dataset.aiBridgeState = "contract-mismatch";
-    setRelayState("contract-mismatch", "CONTRACT_MISMATCH", bridgeTerminalError);
+    for (const waiter of readyWaiters) waiter.reject(bridgeTerminalError);
+    readyWaiters.clear();
+  }
+
+  function markPluginStartupError(event, message) {
+    if (bridgeTerminalError) return;
+    markStartup("pluginErrorMs");
+    pluginWindow = event.source;
+    const reported = message.error && typeof message.error === "object" ? message.error : {};
+    const code = STARTUP_FAILURE_CODES.has(reported.code)
+      ? reported.code
+      : "PLUGIN_INITIALIZATION_FAILED";
+    const reportedDetails = reported.details && typeof reported.details === "object"
+      ? reported.details
+      : {};
+    bridgeTerminalError = bridgeError(
+      code,
+      reported.message || "ai-bridge 插件初始化失败",
+      {
+        details: startupDetails(null, "plugin-reported-error", {
+          pluginError: reportedDetails,
+        }),
+      },
+    );
+    document.documentElement.dataset.aiBridgeState = "startup-error";
     for (const waiter of readyWaiters) waiter.reject(bridgeTerminalError);
     readyWaiters.clear();
   }
@@ -390,20 +556,40 @@
     const message = event.data;
     if (!message || message.source !== "ai-bridge-plugin") return;
     if (message.pluginGuid !== PLUGIN_GUID || message.protocolVersion !== PROTOCOL_VERSION) return;
+    markStartup("pluginMessageSeenMs");
     if (message.contractSha256 && message.contractSha256 !== CONTRACT_SHA256) {
       markContractMismatch(message.contractSha256);
       return;
     }
     if (pluginHandshake.strict) {
-      if (!pluginHandshake.valid || message.channelId !== pluginHandshake.channelId) return;
+      if (!pluginHandshake.valid) return;
+      if (message.channelId !== pluginHandshake.channelId) {
+        markStartup("handshakeRejectedMs");
+        startupHandshakeRejection = {
+          reason: "channel-mismatch",
+          channelPresent: typeof message.channelId === "string" && Boolean(message.channelId),
+        };
+        return;
+      }
     } else if (message.channelId !== undefined) {
+      markStartup("handshakeRejectedMs");
+      startupHandshakeRejection = {
+        reason: "unexpected-channel",
+        channelPresent: true,
+      };
       return;
     }
 
     if (message.type === "hello") {
       if (pluginWindow && pluginWindow !== event.source) return;
+      markStartup("pluginHelloMs");
       pluginWindow = event.source;
       sendConfiguration();
+      return;
+    }
+    if (message.type === "startup-error") {
+      if (pluginWindow && pluginWindow !== event.source) return;
+      markPluginStartupError(event, message);
       return;
     }
     if (event.source !== pluginWindow || message.sessionId !== sessionId) return;
@@ -1290,6 +1476,31 @@
       });
     }
 
+    function reportStartupFailure(error) {
+      if (!error || error.__aiBridgeStartupFailureReported) return error;
+      error.__aiBridgeStartupFailureReported = true;
+      const details = error.details && typeof error.details === "object"
+        ? { ...error.details }
+        : startupDetails(relayStartupTimeoutMs, "unknown");
+      if (!details.diagnosticId) details.diagnosticId = createRequestId("diagnostic");
+      error.details = details;
+      const body = JSON.stringify({
+        diagnosticId: details.diagnosticId,
+        sessionId: httpSessionId,
+        code: error.code || "PLUGIN_INITIALIZATION_FAILED",
+        message: error.message || "ai-bridge 插件启动失败",
+        details,
+      });
+      window.fetch(`${httpRelayBaseURL()}/startup-failure`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: httpRelayHeaders(),
+        body,
+        keepalive: true,
+      }).catch(function () {});
+      return error;
+    }
+
     function reloadForCredentialError(code, error) {
       const now = Date.now();
       if (now - credentialReloadAt() < credentialReloadWindowMs) {
@@ -1305,20 +1516,18 @@
 
     async function register() {
       setRelayState("registering");
+      if (pluginHandshake.strict && !pluginHandshake.valid) {
+        throw bridgeError(
+          "PLUGIN_HANDSHAKE_CONFIG_INVALID",
+          "ai-bridge 严格握手配置无效",
+          { details: startupDetails(null, "invalid-handshake-config") },
+        );
+      }
       try {
         await waitUntilReady(relayStartupTimeoutMs);
       } catch (error) {
         if (!error || error.code !== "NOT_READY") throw error;
-        throw bridgeError(
-          "PLUGIN_STARTUP_TIMEOUT",
-          "ai-bridge 插件启动超时",
-          {
-            details: {
-              timeoutMs: relayStartupTimeoutMs,
-              startup: { ...startupMarks },
-            },
-          },
-        );
+        throw startupTimeoutError(relayStartupTimeoutMs);
       }
       const payload = {
         sessionId: httpSessionId,
@@ -1384,11 +1593,13 @@
             return;
           }
           if (code === "CONTRACT_MISMATCH" || code === "CONTRACT_VERSION_MISMATCH") {
+            reportStartupFailure(error);
             stopRelay("contract-mismatch", code, error);
             return;
           }
-          if (code === "PLUGIN_STARTUP_TIMEOUT") {
-            stopRelay("startup-timeout", code, error);
+          if (code === "PLUGIN_STARTUP_TIMEOUT" || STARTUP_FAILURE_CODES.has(code)) {
+            reportStartupFailure(error);
+            stopRelay("startup-failed", code, error);
             return;
           }
           if (

@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const pluginSource = fs.readFileSync(path.join(__dirname, "plugin.js"), "utf8");
 const hostSource = fs.readFileSync(path.join(__dirname, "host-bridge.js"), "utf8");
 const clientSource = fs.readFileSync(path.join(__dirname, "client-sdk.js"), "utf8");
+const bootstrapSource = fs.readFileSync(path.join(__dirname, "bootstrap.js"), "utf8");
 const wordBridgeSource = fs.readFileSync(path.join(__dirname, "bridges/word-bridge.js"), "utf8");
 const publicContract = JSON.parse(fs.readFileSync(path.join(__dirname, "public-api.json"), "utf8"));
 const TEST_PLUGIN_GUID = "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
@@ -179,6 +180,7 @@ function createHarness(options = {}) {
       };
     },
   });
+  if (options.bootstrapState) pluginWindow.__aiBridgeBootstrapState = options.bootstrapState;
 
   const ancestorMessages = [];
   const hostMessages = [];
@@ -247,7 +249,7 @@ function createHarness(options = {}) {
 
   pluginWindow.parent = options.nestedHost ? editorProxy : topProxy;
   pluginWindow.top = options.nestedHost ? outerProxy : topProxy;
-  pluginWindow.AICopilotBridges = {
+  pluginWindow.AICopilotBridges = options.missingBridge ? {} : {
     [editorType]: {
       execute: async toolCalls => {
         executedToolCalls.push(...toolCalls);
@@ -267,7 +269,7 @@ function createHarness(options = {}) {
       },
     },
   };
-  if (editorType === "cell") {
+  if (editorType === "cell" && !options.missingBridge) {
     pluginWindow.AICopilotBridges.cell.probeCapabilities = async () => ({
       runtime: { product: "ONLYOFFICE", version: "test", edition: "enterprise" },
       features: {
@@ -280,7 +282,7 @@ function createHarness(options = {}) {
       },
     });
   }
-  if (typeof options.bridgePreflight === "function") {
+  if (typeof options.bridgePreflight === "function" && !options.missingBridge) {
     pluginWindow.AICopilotBridges[editorType].preflight = options.bridgePreflight;
   }
 
@@ -1165,6 +1167,82 @@ test("strict host rejects a legacy channel-less plugin handshake", async () => {
   assert.notEqual(harness.documentElement.dataset.aiBridgeState, "ready");
 });
 
+test("HTTP Relay reports an invalid strict handshake before registration", async () => {
+  let diagnosticReport = null;
+  const harness = createHarness({
+    hostname: "office.test",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    hostPluginOptions: {
+      hostOrigin: "https://wrong-host.test",
+      channelId: "11111111-2222-4333-8444-555555555555",
+    },
+    ascPluginOptions: {
+      hostOrigin: "https://wrong-host.test",
+      channelId: "11111111-2222-4333-8444-555555555555",
+    },
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, { ok: true, diagnosticId: diagnosticReport.diagnosticId });
+    },
+  });
+
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-failed");
+  assert.equal(diagnosticReport.code, "PLUGIN_HANDSHAKE_CONFIG_INVALID");
+  assert.equal(diagnosticReport.details.stalledPhase, "invalid-handshake-config");
+  assert.equal(diagnosticReport.details.environment.handshakeConfigValid, false);
+  assert.equal(diagnosticReport.details.environment.handshakeOriginValid, true);
+  assert.equal(diagnosticReport.details.environment.handshakeOriginMatches, false);
+  assert.equal(
+    harness.hostRelayPaths.some(requestPath => requestPath.endsWith("/register")),
+    false,
+  );
+});
+
+test("HTTP Relay distinguishes a rejected plugin handshake from a missing plugin", async () => {
+  let startupTimeout = null;
+  let diagnosticReport = null;
+  const harness = createHarness({
+    hostname: "office.test",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    strictHandshake: true,
+    ascPluginOptions: {
+      hostOrigin: "https://app.test",
+      channelId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    },
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+    hostSetTimeout(callback, delay) {
+      if (delay === 180000) {
+        startupTimeout = callback;
+        return 180000;
+      }
+      return setTimeout(callback, delay);
+    },
+    hostClearTimeout(timer) {
+      if (timer !== 180000) clearTimeout(timer);
+    },
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, { ok: true, diagnosticId: diagnosticReport.diagnosticId });
+    },
+  });
+
+  startupTimeout();
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-failed");
+  assert.equal(diagnosticReport.code, "PLUGIN_HANDSHAKE_REJECTED");
+  assert.equal(diagnosticReport.details.stalledPhase, "handshake-rejected");
+  assert.equal(diagnosticReport.details.handshakeRejection.reason, "channel-mismatch");
+  assert.equal(diagnosticReport.details.handshakeRejection.channelPresent, true);
+  assert.equal(Number.isFinite(diagnosticReport.details.startup.pluginMessageSeenMs), true);
+  assert.equal(Number.isFinite(diagnosticReport.details.startup.handshakeRejectedMs), true);
+});
+
 test("strict plugin ignores wrong origin, wrong channel, and non-ancestor configuration", async () => {
   const harness = createHarness({
     nestedHost: true,
@@ -1217,6 +1295,108 @@ test("strict plugin ignores wrong origin, wrong channel, and non-ancestor config
   await assert.rejects(
     harness.hostWindow.aiBridge.ready({ timeoutMs: 20 }),
     error => error && error.code === "NOT_READY",
+  );
+});
+
+test("plugin reports a missing editor bridge instead of waiting for a generic timeout", async () => {
+  const harness = createHarness({
+    missingBridge: true,
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+  });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 }),
+    error => (
+      error
+      && error.code === "PLUGIN_BRIDGE_MISSING"
+      && error.details?.pluginError?.editorType === "word"
+      && error.details?.pluginError?.expectedAsset === "bridges/word-bridge.js"
+    ),
+  );
+  assert.equal(harness.documentElement.dataset.aiBridgeState, "startup-error");
+  assert.equal(
+    harness.ancestorMessages.some(
+      entry => entry.message?.type === "startup-error"
+        && entry.message.error?.code === "PLUGIN_BRIDGE_MISSING",
+    ),
+    true,
+  );
+});
+
+test("plugin exposes browser asset loading failures in startup diagnostics", async () => {
+  const harness = createHarness({
+    missingBridge: true,
+    bootstrapState: {
+      loaded: ["bridges/slides-bridge.js", "bridges/sheets-bridge.js"],
+      failures: [{
+        asset: "bridges/word-bridge.js",
+        reason: "network-or-policy-error",
+      }],
+    },
+    pluginSetInterval() { return 1; },
+    pluginClearInterval() {},
+  });
+
+  await assert.rejects(
+    harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 }),
+    error => (
+      error
+      && error.code === "PLUGIN_ASSET_LOAD_FAILED"
+      && error.details?.pluginError?.asset === "bridges/word-bridge.js"
+      && error.details?.pluginError?.reason === "network-or-policy-error"
+    ),
+  );
+});
+
+test("bootstrap records versioned browser asset loads and failures", async () => {
+  const requestedURLs = [];
+  const bootstrapWindow = {
+    location: {
+      href: "https://docs.test/sdkjs-plugins/ai-bridge/index.html",
+      origin: "https://docs.test",
+      ancestorOrigins: ["https://app.test"],
+    },
+    Asc: { plugin: { info: { options: {} }, init() {} } },
+    setInterval() { return 1; },
+  };
+  bootstrapWindow.parent = bootstrapWindow;
+  bootstrapWindow.top = bootstrapWindow;
+  const bootstrapDocument = {
+    currentScript: {
+      src: "https://docs.test/sdkjs-plugins/ai-bridge/bootstrap.js?v=revision-123",
+    },
+    createElement() { return {}; },
+    head: {
+      appendChild(script) {
+        requestedURLs.push(script.src);
+        queueMicrotask(() => {
+          if (new URL(script.src).pathname.endsWith("/bridges/word-bridge.js")) script.onerror();
+          else script.onload();
+        });
+      },
+    },
+  };
+
+  vm.runInNewContext(bootstrapSource, {
+    window: bootstrapWindow,
+    document: bootstrapDocument,
+    URL,
+    console,
+  });
+
+  await waitFor(() => requestedURLs.length === 4);
+  assert.deepEqual(
+    requestedURLs.map(value => new URL(value).searchParams.get("v")),
+    ["revision-123", "revision-123", "revision-123", "revision-123"],
+  );
+  assert.deepEqual(
+    Array.from(bootstrapWindow.__aiBridgeBootstrapState.failures, value => ({ ...value })),
+    [{ asset: "bridges/word-bridge.js", reason: "network-or-policy-error" }],
+  );
+  assert.deepEqual(
+    Array.from(bootstrapWindow.__aiBridgeBootstrapState.loaded),
+    ["bridges/slides-bridge.js", "bridges/sheets-bridge.js", "plugin.js"],
   );
 });
 
@@ -1438,6 +1618,7 @@ test("HTTP Relay keeps registering when the plugin becomes ready after 120 secon
 test("HTTP Relay stops with startup diagnostics after 180 seconds", async () => {
   let now = 1_000_000;
   let startupTimeout = null;
+  let diagnosticReport = null;
   const FakeDate = class extends Date {
     static now() { return now; }
   };
@@ -1459,8 +1640,17 @@ test("HTTP Relay stops with startup diagnostics after 180 seconds", async () => 
     hostClearTimeout(timer) {
       if (timer !== 180000) clearTimeout(timer);
     },
-    hostFetch: async () => {
-      throw new Error("startup timeout must stop before Relay registration");
+    beforePluginInit({ editorConfig }) {
+      editorConfig.events.onAppReady({ type: "app-ready" });
+      editorConfig.events.onDocumentReady({ type: "document-ready" });
+    },
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, {
+        ok: true,
+        diagnosticId: diagnosticReport.diagnosticId,
+      });
     },
   });
 
@@ -1469,17 +1659,29 @@ test("HTTP Relay stops with startup diagnostics after 180 seconds", async () => 
   now += 180000;
   startupTimeout();
 
-  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-timeout");
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-failed");
+  await waitFor(() => diagnosticReport !== null);
   const detail = harness.hostWindow.dispatchedEvents
     .filter(event => event.type === "ai-bridge-relay-state")
     .at(-1).detail;
-  assert.equal(detail.code, "PLUGIN_STARTUP_TIMEOUT");
+  assert.equal(detail.code, "PLUGIN_NOT_LOADED");
   assert.equal(detail.details.timeoutMs, 180000);
+  assert.equal(detail.details.stalledPhase, "waiting-plugin-hello");
   assert.equal(detail.details.startup.hostScriptMs, 0);
-  assert.deepEqual(harness.hostRelayPaths, []);
+  assert.equal(detail.details.startup.appReadyMs, 0);
+  assert.equal(detail.details.startup.documentReadyMs, 0);
+  assert.match(detail.details.diagnosticId, /^diagnostic:/);
+  assert.equal(diagnosticReport.code, "PLUGIN_NOT_LOADED");
+  assert.equal(diagnosticReport.details.diagnosticId, detail.details.diagnosticId);
+  assert.deepEqual(
+    harness.hostRelayPaths.map(requestPath => requestPath.split("/").at(-1)),
+    ["startup-failure"],
+  );
 });
 
-test("contract mismatch is terminal and reports one Relay state without registering", async () => {
+test("HTTP Relay distinguishes an editor app startup timeout", async () => {
+  let startupTimeout = null;
+  let diagnosticReport = null;
   const harness = createHarness({
     hostname: "localhost",
     httpRelay: true,
@@ -1487,8 +1689,43 @@ test("contract mismatch is terminal and reports one Relay state without register
     dropPluginHello: true,
     pluginSetInterval: () => 0,
     pluginClearInterval: () => {},
-    hostFetch: async () => {
-      throw new Error("contract mismatch must stop before Relay registration");
+    hostSetTimeout(callback, delay) {
+      if (delay === 180000) {
+        startupTimeout = callback;
+        return 180000;
+      }
+      return setTimeout(callback, delay);
+    },
+    hostClearTimeout(timer) {
+      if (timer !== 180000) clearTimeout(timer);
+    },
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, { ok: true, diagnosticId: diagnosticReport.diagnosticId });
+    },
+  });
+
+  startupTimeout();
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "startup-failed");
+  assert.equal(diagnosticReport.code, "EDITOR_APP_STARTUP_TIMEOUT");
+  assert.equal(diagnosticReport.details.stalledPhase, "waiting-editor-app");
+  assert.equal(diagnosticReport.details.environment.documentReadyState, "unknown");
+});
+
+test("contract mismatch is terminal and reports one Relay state without registering", async () => {
+  let diagnosticReport = null;
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    dropPluginHello: true,
+    pluginSetInterval: () => 0,
+    pluginClearInterval: () => {},
+    hostFetch: async (requestPath, requestOptions) => {
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, { ok: true, diagnosticId: diagnosticReport.diagnosticId });
     },
   });
   const mismatchMessage = {
@@ -1517,7 +1754,12 @@ test("contract mismatch is terminal and reports one Relay state without register
   await new Promise(resolve => setTimeout(resolve, 25));
 
   assert.equal(harness.documentElement.dataset.aiBridgeState, "contract-mismatch");
-  assert.deepEqual(harness.hostRelayPaths, []);
+  assert.deepEqual(
+    harness.hostRelayPaths.map(requestPath => requestPath.split("/").at(-1)),
+    ["startup-failure"],
+  );
+  assert.equal(diagnosticReport.code, "CONTRACT_MISMATCH");
+  assert.equal(diagnosticReport.details.stalledPhase, "contract-mismatch");
   assert.deepEqual(
     harness.hostWindow.dispatchedEvents
       .filter(event => event.type === "ai-bridge-relay-state")
@@ -1533,6 +1775,7 @@ test("contract mismatch is terminal and reports one Relay state without register
 
 test("Relay contract version mismatch is terminal and preserves server diagnostics", async () => {
   let registerCalls = 0;
+  let diagnosticReport = null;
   const mismatchDetails = {
     expectedContractVersion: "0.2.2",
     expectedContractSha256: "a".repeat(64),
@@ -1543,26 +1786,30 @@ test("Relay contract version mismatch is terminal and preserves server diagnosti
     hostname: "localhost",
     httpRelay: true,
     relayBaseUrl: "/api/v1/editor-relay",
-    hostFetch: async requestPath => {
-      assert.ok(requestPath.endsWith("/register"));
-      registerCalls += 1;
-      return relayResponse(409, {
-        ok: false,
-        error: {
-          code: "CONTRACT_VERSION_MISMATCH",
-          message: "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
-          details: mismatchDetails,
-        },
-      });
+    hostFetch: async (requestPath, requestOptions) => {
+      if (requestPath.endsWith("/register")) {
+        registerCalls += 1;
+        return relayResponse(409, {
+          ok: false,
+          error: {
+            code: "CONTRACT_VERSION_MISMATCH",
+            message: "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
+            details: mismatchDetails,
+          },
+        });
+      }
+      assert.ok(requestPath.endsWith("/startup-failure"));
+      diagnosticReport = JSON.parse(requestOptions.body);
+      return relayResponse(202, { ok: true, diagnosticId: diagnosticReport.diagnosticId });
     },
   });
 
   await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "contract-mismatch");
-  const requestCount = harness.hostRelayPaths.length;
-  await new Promise(resolve => setTimeout(resolve, 25));
+  await waitFor(() => diagnosticReport !== null);
 
   assert.equal(registerCalls, 1);
-  assert.equal(harness.hostRelayPaths.length, requestCount);
+  assert.equal(harness.hostRelayPaths.length, 2);
+  assert.equal(diagnosticReport.code, "CONTRACT_VERSION_MISMATCH");
   const terminalDetail = JSON.parse(JSON.stringify(
     harness.hostWindow.dispatchedEvents
       .filter(event => event.type === "ai-bridge-relay-state")
@@ -1576,6 +1823,7 @@ test("Relay contract version mismatch is terminal and preserves server diagnosti
       message: "编辑器页面与 HTTP Relay 使用了不同的 ai-bridge 契约",
       details: {
         ...mismatchDetails,
+        diagnosticId: diagnosticReport.diagnosticId,
         httpStatus: 409,
         path: "register",
       },

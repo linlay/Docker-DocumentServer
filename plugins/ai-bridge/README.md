@@ -6,6 +6,8 @@ business boundary.
 
 ## Architecture
 
+- `bootstrap.js` loads the three editor bridges and `plugin.js` in order while
+  recording network, policy, DOM insertion, and script evaluation failures.
 - `plugin.js` runs inside the ONLYOFFICE plugin frame and dispatches validated
   commands to the editor-specific bridge.
 - `host-bridge.js` exposes `window.aiBridge`, supports the postMessage SDK,
@@ -111,6 +113,32 @@ document-hub is the only caller of the internal endpoints:
 
 Every request requires the private Relay secret. Port 3001 must not be
 published.
+
+## Startup diagnostics
+
+The browser host records milestones from host script load through editor app,
+document, plugin handshake, configuration, and bridge readiness. A terminal
+startup failure includes a `diagnosticId`, `stalledPhase`, the milestone
+timeline, plugin registration checks, browser-visible host/plugin origins, the
+asset revision, and any failed plugin asset.
+
+Startup failures use specific codes instead of one generic timeout:
+
+- `EDITOR_APP_STARTUP_TIMEOUT` and `DOCUMENT_LOAD_TIMEOUT` identify the
+  ONLYOFFICE application or document stage.
+- `PLUGIN_NOT_LOADED` and `PLUGIN_INITIALIZATION_FAILED` distinguish an absent
+  plugin from a plugin that connected but never became ready.
+- `PLUGIN_HANDSHAKE_CONFIG_INVALID` and `PLUGIN_HANDSHAKE_REJECTED` expose
+  origin/channel configuration failures, including on remote HTTPS hosts.
+- `PLUGIN_ASSET_LOAD_FAILED`, `PLUGIN_BRIDGE_MISSING`, and
+  `UNSUPPORTED_EDITOR_TYPE` identify browser resource or editor adapter issues.
+- `CONTRACT_MISMATCH` and `CONTRACT_VERSION_MISMATCH` identify mixed browser
+  or Relay resource revisions.
+
+When document-hub is the host, the browser posts the same bounded diagnostic to
+`/api/v1/editor-relay/startup-failure`. document-hub logs the diagnostic ID and
+safe structured fields and increments
+`document_hub_ai_startup_failures_total`; it does not log document content.
 
 ## Tests
 

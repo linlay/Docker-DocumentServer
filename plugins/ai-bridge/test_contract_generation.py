@@ -496,7 +496,7 @@ class ContractGenerationTests(unittest.TestCase):
             r"[?&]v=([^&\"'\s<>]+)",
             artifacts[sync_contract.INDEX_PATH],
         )
-        self.assertEqual(index_revisions, [revision] * 4)
+        self.assertEqual(index_revisions, [revision])
         self.assertRegex(revision, r"^0\.2\.5-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
@@ -522,6 +522,7 @@ class ContractGenerationTests(unittest.TestCase):
                 "client-sdk.js",
                 "config.json",
                 "index.html",
+                "bootstrap.js",
                 "bridges/word-bridge.js",
                 "bridges/slides-bridge.js",
                 "bridges/sheets-bridge.js",
