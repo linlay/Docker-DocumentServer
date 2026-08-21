@@ -1120,6 +1120,117 @@ test("Sheets bridge normalizes public enum aliases, preserves formula matrices, 
   );
 });
 
+test("Sheets filter rejects unsafe arguments before creating a history point", async () => {
+  const invalidCalls = [
+    { action: "set", range: "A1:B3" },
+    { action: "set", range: "A1:B3", field: 3 },
+    { action: "set", range: "A1:B1", field: 1 },
+    { action: "set", range: "A1:B3", field: 1, criteria2: "B" },
+    { action: "set", range: "A1:B3", field: 1, criteria1: ["Open"] },
+    { action: "showAll", field: 1 },
+    { action: "reapply", range: "A1:B3" },
+  ];
+
+  for (const argumentsValue of invalidCalls) {
+    const { bridge, state } = createHarness();
+    await assert.rejects(
+      bridge.execute([{ name: "sheets_filter", arguments: argumentsValue }]),
+      error => (
+        error.code === "INVALID_TOOL_ARGUMENTS"
+        && error.details.completedToolCalls === 0
+        && error.details.partialMutationPossible === false
+      ),
+    );
+    assert.equal(state.historyPoints, 0);
+    assert.equal(state.events.some(item => item[0] === "range.filter"), false);
+  }
+
+  const { bridge } = createHarness();
+  const preflight = bridge.preflight([{
+    name: "sheets_filter",
+    arguments: { action: "set", range: "A1:B3", field: 3 },
+  }]);
+  assert.equal(preflight.validationErrors.length, 1);
+  assert.equal(preflight.validationErrors[0].path, "arguments.field");
+});
+
+test("Sheets filter validates live AutoFilter state and preserves numeric field writes", async () => {
+  const valid = createHarness();
+  const result = await valid.bridge.execute([{
+    name: "sheets_filter",
+    arguments: {
+      action: "set",
+      sheet: "Sheet1",
+      field: 1,
+      criteria1: ">0",
+      operator: "and",
+    },
+  }]);
+  const filterEvent = valid.state.events.find(item => item[0] === "range.filter");
+  assert.equal(filterEvent[1], 1);
+  assert.notEqual(filterEvent[1], null);
+  assert.equal(filterEvent[3], "xlAnd");
+  assert.equal(result.results[0].range.address, "A1:B3");
+  assert.equal(valid.state.historyPoints, 1);
+
+  const conflict = createHarness();
+  conflict.sheet1.autoFilter.GetRange = () => conflict.sheet1.GetRange("C1:D3");
+  await assert.rejects(
+    conflict.bridge.execute([{
+      name: "sheets_filter",
+      arguments: { action: "set", range: "A1:B3", field: 1 },
+    }]),
+    error => (
+      error.code === "INVALID_TOOL_ARGUMENTS"
+      && error.details.partialMutationPossible === false
+      && error.details.existingRange === "C1:D3"
+    ),
+  );
+  assert.equal(conflict.state.historyPoints, 0);
+
+  for (const action of ["showAll", "reapply"]) {
+    const missing = createHarness();
+    missing.sheet1.autoFilter = null;
+    await assert.rejects(
+      missing.bridge.execute([{
+        name: "sheets_filter",
+        arguments: { action, sheet: "Sheet1" },
+      }]),
+      error => (
+        error.code === "INVALID_TOOL_ARGUMENTS"
+        && error.details.partialMutationPossible === false
+      ),
+    );
+    assert.equal(missing.state.historyPoints, 0);
+  }
+});
+
+test("Sheets filter reports a post-mutation AutoFilter readback mismatch", async () => {
+  const harness = createHarness();
+  let filterMutated = false;
+  harness.sheet1.autoFilter.GetRange = () => harness.sheet1.GetRange(
+    filterMutated ? "C1:D3" : "A1:B3",
+  );
+  harness.sheet1.GetRange("A1:B3").SetAutoFilter = () => {
+    filterMutated = true;
+    return true;
+  };
+
+  await assert.rejects(
+    harness.bridge.execute([{
+      name: "sheets_filter",
+      arguments: { action: "set", range: "A1:B3", field: 1 },
+    }]),
+    error => (
+      error.code === "SHEETS_RUNTIME_INCOMPATIBLE"
+      && error.details.expectedRange === "A1:B3"
+      && error.details.observedRange === "C1:D3"
+      && error.details.partialMutationPossible === true
+    ),
+  );
+  assert.equal(harness.state.historyPoints, 1);
+});
+
 test("Sheets format verification distinguishes failed and unavailable readback", async () => {
   const mismatchHarness = createHarness();
   const mismatchRange = mismatchHarness.sheet1.GetRange("A1");

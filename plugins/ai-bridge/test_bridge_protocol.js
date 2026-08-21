@@ -1817,6 +1817,41 @@ test("plugin aggregates generated schema and bridge semantic errors before check
   assert.deepEqual(harness.servicePaths, []);
 });
 
+test("plugin rejects unsafe sheets_filter batches before checkpoint or execution", async () => {
+  const cases = [
+    [{
+      name: "sheets_filter",
+      arguments: { action: "set", range: "A1:B3" },
+    }],
+    [
+      { name: "sheets_inspect", arguments: {} },
+      {
+        name: "sheets_filter",
+        arguments: { action: "set", range: "A1:B3" },
+      },
+    ],
+  ];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const harness = createHarness({ editorType: "cell" });
+    await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });
+    await assert.rejects(
+      harness.hostWindow.aiBridge.executeBatch(cases[index], {
+        timeoutMs: 1000,
+        requestId: `unsafe-filter-${index}`,
+      }),
+      error => {
+        assert.equal(error.code, "INVALID_TOOL_ARGUMENTS");
+        assert.equal(error.details.completedToolCalls, 0);
+        assert.equal(error.details.partialMutationPossible, false);
+        return true;
+      },
+    );
+    assert.equal(harness.executedToolCalls.length, 0);
+    assert.deepEqual(harness.servicePaths, []);
+  }
+});
+
 test("plugin preserves all 30 ordered calls but keeps the public 20-call error message", async () => {
   const harness = createHarness();
   await harness.hostWindow.aiBridge.ready({ timeoutMs: 1000 });

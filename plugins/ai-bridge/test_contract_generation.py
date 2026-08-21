@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.4")
+        self.assertEqual(self.contract["version"], "0.2.5")
         self.assertEqual(
             self.contract["toolNaming"],
             {
@@ -497,7 +497,7 @@ class ContractGenerationTests(unittest.TestCase):
             artifacts[sync_contract.INDEX_PATH],
         )
         self.assertEqual(index_revisions, [revision] * 4)
-        self.assertRegex(revision, r"^0\.2\.4-[0-9a-f]{64}$")
+        self.assertRegex(revision, r"^0\.2\.5-[0-9a-f]{64}$")
 
         normalized_config = sync_contract.replace_asset_revision_queries(
             artifacts[sync_contract.CONFIG_PATH],
@@ -1094,7 +1094,9 @@ class ContractGenerationTests(unittest.TestCase):
                 "arguments": {
                     "action": "set",
                     "range": "A1:B2",
+                    "field": 1,
                     "operator": "AND",
+                    "criteria1": ">0",
                 },
             }
         ]
@@ -1124,6 +1126,79 @@ class ContractGenerationTests(unittest.TestCase):
             "xlValidateList",
         )
         self.assertEqual(changes[0]["kind"], "enumCanonicalization")
+
+    def test_sheets_filter_rejects_unsafe_shapes_before_execution(self) -> None:
+        valid_arguments = (
+            {"action": "set", "field": 1},
+            {
+                "action": "set",
+                "range": "A1:B3",
+                "field": 2,
+                "criteria1": ["Open", "Closed"],
+                "operator": "filterValues",
+            },
+            {
+                "action": "set",
+                "range": "A1:B3",
+                "field": 1,
+                "criteria1": ">0",
+                "operator": "and",
+            },
+            {"action": "showAll"},
+            {"action": "reapply"},
+        )
+        for arguments in valid_arguments:
+            with self.subTest(valid=arguments):
+                normalized, _changes = copilot_server.require_valid_editor_tool_calls(
+                    "cell",
+                    [{"name": "sheets_filter", "arguments": arguments}],
+                )
+                self.assertEqual(normalized[0]["arguments"]["action"], arguments["action"])
+
+        invalid_arguments = (
+            {"action": "set", "range": "A1:B3"},
+            {"action": "set", "range": "A1:B3", "field": 1.5},
+            {"action": "set", "range": "A1:B3", "field": 3},
+            {"action": "set", "range": "A1:B1", "field": 1},
+            {"action": "set", "range": "not-a-range", "field": 1},
+            {"action": "set", "field": 1, "operator": "and"},
+            {"action": "set", "field": 1, "criteria2": "B"},
+            {"action": "set", "field": 1, "criteria1": ["Open"]},
+            {
+                "action": "set",
+                "field": 1,
+                "criteria1": "Open",
+                "operator": "filterValues",
+            },
+            {"action": "showAll", "field": 1},
+            {"action": "reapply", "range": "A1:B3"},
+        )
+        for arguments in invalid_arguments:
+            with self.subTest(invalid=arguments):
+                with self.assertRaises(copilot_server.BridgeError) as caught:
+                    copilot_server.require_valid_editor_tool_calls(
+                        "cell",
+                        [{"name": "sheets_filter", "arguments": arguments}],
+                    )
+                self.assertEqual(caught.exception.code, "INVALID_TOOL_ARGUMENTS")
+                self.assertEqual(caught.exception.details["completedToolCalls"], 0)
+                self.assertFalse(caught.exception.details["partialMutationPossible"])
+
+        with self.assertRaises(copilot_server.BridgeError) as missing_field:
+            copilot_server.require_valid_editor_tool_calls(
+                "cell",
+                [{
+                    "name": "sheets_filter",
+                    "arguments": {"action": "set", "range": "A1:B3"},
+                }],
+            )
+        self.assertIn(
+            "arguments.field",
+            [
+                error["path"]
+                for error in missing_field.exception.details["validationErrors"]
+            ],
+        )
 
     def test_freeze_panes_actions_have_strict_mutually_exclusive_shapes(self) -> None:
         valid_arguments = (

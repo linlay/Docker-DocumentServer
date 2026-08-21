@@ -1547,6 +1547,145 @@ def validate_sheet_semantics(
                     "action format only accepts sheet and range",
                 )
 
+    if name == "sheets_filter":
+        action = arguments.get("action")
+        set_only_fields = {
+            "range",
+            "field",
+            "criteria1",
+            "operator",
+            "criteria2",
+            "visibleDropDown",
+        }
+        if action == "set":
+            target_range = arguments.get("range")
+            target_shape = sheet_a1_range_shape(target_range)
+            if (
+                isinstance(target_range, str)
+                and target_range.casefold() != "selection"
+                and target_shape is None
+            ):
+                semantic_error(
+                    "range",
+                    "range must be a finite A1 cell range or selection",
+                )
+            if target_shape is not None:
+                rows, columns = target_shape
+                if rows < 2:
+                    semantic_error(
+                        "range",
+                        "filter range must contain a header row and at least one data row",
+                    )
+                field = arguments.get("field")
+                if (
+                    isinstance(field, int)
+                    and not isinstance(field, bool)
+                    and field > columns
+                ):
+                    semantic_error(
+                        "field",
+                        f"field must not exceed the filter range width ({columns})",
+                    )
+
+            criteria1_present = "criteria1" in arguments
+            criteria2_present = "criteria2" in arguments
+            criteria1 = arguments.get("criteria1")
+            criteria2 = arguments.get("criteria2")
+            operator = {
+                "and": "xlAnd",
+                "or": "xlOr",
+                "filterValues": "xlFilterValues",
+                "values": "xlFilterValues",
+                "top10Items": "xlTop10Items",
+                "bottom10Items": "xlBottom10Items",
+                "top10Percent": "xlTop10Percent",
+                "bottom10Percent": "xlBottom10Percent",
+                "filterCellColor": "xlFilterCellColor",
+                "filterFontColor": "xlFilterFontColor",
+                "filterIcon": "xlFilterIcon",
+                "dynamic": "xlFilterDynamic",
+            }.get(arguments.get("operator"), arguments.get("operator"))
+
+            def safe_filter_scalar(value: Any) -> bool:
+                return (
+                    isinstance(value, (str, bool))
+                    or (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                    )
+                )
+
+            def safe_filter_criterion(value: Any, allow_array: bool) -> bool:
+                if safe_filter_scalar(value):
+                    return True
+                return bool(
+                    allow_array
+                    and isinstance(value, list)
+                    and value
+                    and all(safe_filter_scalar(item) for item in value)
+                )
+
+            if criteria1_present and not safe_filter_criterion(criteria1, True):
+                semantic_error(
+                    "criteria1",
+                    "criteria1 must be a scalar or a non-empty array of scalar values",
+                )
+            if criteria2_present and not safe_filter_criterion(criteria2, False):
+                semantic_error("criteria2", "criteria2 must be a scalar value")
+            if operator is not None and not criteria1_present:
+                semantic_error("criteria1", "criteria1 is required when operator is provided")
+            if criteria2_present and operator not in {"xlAnd", "xlOr"}:
+                semantic_error(
+                    "criteria2",
+                    "criteria2 is only allowed with xlAnd or xlOr",
+                )
+            if criteria2_present and not criteria1_present:
+                semantic_error("criteria1", "criteria1 is required when criteria2 is provided")
+            if operator == "xlFilterValues" and not (
+                isinstance(criteria1, list) and criteria1
+            ):
+                semantic_error(
+                    "criteria1",
+                    "xlFilterValues requires a non-empty criteria1 array",
+                )
+            if isinstance(criteria1, list) and operator != "xlFilterValues":
+                semantic_error(
+                    "operator",
+                    "array criteria1 is only allowed with xlFilterValues",
+                )
+            if operator in {
+                "xlTop10Items",
+                "xlBottom10Items",
+                "xlTop10Percent",
+                "xlBottom10Percent",
+            }:
+                try:
+                    ranking = float(criteria1)
+                except (TypeError, ValueError):
+                    ranking = math.nan
+                if not math.isfinite(ranking) or ranking <= 0:
+                    semantic_error(
+                        "criteria1",
+                        "top/bottom filters require a positive numeric criteria1",
+                    )
+            if operator in {
+                "xlFilterCellColor",
+                "xlFilterFontColor",
+                "xlFilterIcon",
+            }:
+                semantic_error(
+                    "operator",
+                    "color and icon filters require runtime objects and are not safe through the JSON bridge",
+                )
+        elif action in {"showAll", "reapply"}:
+            invalid_fields = sorted(set_only_fields.intersection(arguments))
+            if invalid_fields:
+                semantic_error(
+                    invalid_fields[0],
+                    f"{invalid_fields[0]} is only allowed when action is set",
+                )
+
 SEMANTIC_VALIDATORS = {
     "word.fieldInstruction": validate_word_semantics,
     "word.pageBreakTarget": validate_word_semantics,
@@ -1557,6 +1696,7 @@ SEMANTIC_VALIDATORS = {
     "sheets.a1MatrixShape": validate_sheet_semantics,
     "sheets.validationRule": validate_sheet_semantics,
     "sheets.tableOperation": validate_sheet_semantics,
+    "sheets.filterOperation": validate_sheet_semantics,
 }
 
 

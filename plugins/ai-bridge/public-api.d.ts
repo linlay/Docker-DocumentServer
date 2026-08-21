@@ -81,7 +81,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.4";
+  contractVersion?: "0.2.5";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -104,10 +104,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.4";
+  version: "0.2.5";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.4";
+  contractVersion: "0.2.5";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -155,7 +155,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.4";
+  contractVersion: "0.2.5";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -6789,7 +6789,7 @@ export type AiBridgeGeneratedSheetsFilterArgs = {
   operator?: "and" | "or" | "filterValues" | "values" | "top10Items" | "bottom10Items" | "top10Percent" | "bottom10Percent" | "filterCellColor" | "filterFontColor" | "filterIcon" | "dynamic" | "xlAnd" | "xlOr" | "xlFilterValues" | "xlTop10Items" | "xlBottom10Items" | "xlTop10Percent" | "xlBottom10Percent" | "xlFilterCellColor" | "xlFilterFontColor" | "xlFilterIcon" | "xlFilterDynamic";
   criteria2?: unknown;
   visibleDropDown?: boolean;
-};
+} & ({ action: "set"; field: number; } | { action?: Exclude<"set" | "showAll" | "reapply", "set">; });
 export type AiBridgeGeneratedSheetsInspectTablesArgs = {
   sheet?: string;
   tableIndex?: number;
@@ -8755,7 +8755,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.4";
+  readonly version: "0.2.5";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

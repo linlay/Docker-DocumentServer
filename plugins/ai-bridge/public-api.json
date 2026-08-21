@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "ai-bridge",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "protocolVersion": 1,
   "pluginGuid": "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}",
   "toolNaming": {
@@ -10665,6 +10665,25 @@
         "required": [
           "action"
         ],
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "action"
+              ],
+              "properties": {
+                "action": {
+                  "const": "set"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "field"
+              ]
+            }
+          }
+        ],
         "properties": {
           "action": {
             "enum": [
@@ -10693,10 +10712,12 @@
           }
         },
         "additionalProperties": false,
-        "description": "设置、更新或清除 XLSX 区域筛选",
+        "description": "设置、显示全部或重新应用 XLSX 区域筛选",
         "x-effects": "write",
         "x-argumentLimitClass": "standard",
-        "x-semanticValidators": []
+        "x-semanticValidators": [
+          "sheets.filterOperation"
+        ]
       },
       "sheets_inspect_tables": {
         "type": "object",

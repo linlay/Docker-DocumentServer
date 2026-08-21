@@ -1750,8 +1750,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.4":
-        raise ValueError("public-api.json version must be 0.2.4")
+    if contract.get("version") != "0.2.5":
+        raise ValueError("public-api.json version must be 0.2.5")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}

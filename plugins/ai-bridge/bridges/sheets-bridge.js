@@ -32,6 +32,164 @@
   const VIEW_VERIFY_INTERVAL_MS = 100;
   const VIEW_VERIFY_TIMEOUT_MS = 5000;
 
+  function staticA1RangeShape(value) {
+    if (typeof value !== "string" || value.toLowerCase() === "selection") return null;
+    const localAddress = value.split("!").pop().replace(/\$/g, "");
+    const matched = /^([A-Za-z]{1,3})([1-9][0-9]*)(?::([A-Za-z]{1,3})([1-9][0-9]*))?$/.exec(localAddress);
+    if (!matched) return null;
+    function columnNumber(label) {
+      let number = 0;
+      for (let index = 0; index < label.length; index += 1) {
+        number = number * 26 + label.toUpperCase().charCodeAt(index) - 64;
+      }
+      return number;
+    }
+    const firstColumn = columnNumber(matched[1]);
+    const firstRow = Number(matched[2]);
+    const lastColumn = columnNumber(matched[3] || matched[1]);
+    const lastRow = Number(matched[4] || matched[2]);
+    if (
+      firstColumn > 16384
+      || lastColumn > 16384
+      || firstRow > 1048576
+      || lastRow > 1048576
+    ) return null;
+    return {
+      rows: Math.abs(lastRow - firstRow) + 1,
+      columns: Math.abs(lastColumn - firstColumn) + 1,
+    };
+  }
+
+  function canonicalStaticFilterOperator(value) {
+    const aliases = {
+      and: "xlAnd",
+      or: "xlOr",
+      filterValues: "xlFilterValues",
+      values: "xlFilterValues",
+      top10Items: "xlTop10Items",
+      bottom10Items: "xlBottom10Items",
+      top10Percent: "xlTop10Percent",
+      bottom10Percent: "xlBottom10Percent",
+      filterCellColor: "xlFilterCellColor",
+      filterFontColor: "xlFilterFontColor",
+      filterIcon: "xlFilterIcon",
+      dynamic: "xlFilterDynamic",
+    };
+    return aliases[value] || value;
+  }
+
+  function staticFilterScalar(value) {
+    return typeof value === "string"
+      || typeof value === "boolean"
+      || (typeof value === "number" && Number.isFinite(value));
+  }
+
+  function staticFilterCriterion(value, allowArray) {
+    return staticFilterScalar(value) || Boolean(
+      allowArray
+      && Array.isArray(value)
+      && value.length
+      && value.every(staticFilterScalar)
+    );
+  }
+
+  function collectFilterValidationErrors(toolCalls) {
+    const validationErrors = [];
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+    function semanticError(toolCallIndex, path, message) {
+      validationErrors.push({
+        toolCallIndex,
+        tool: "sheets_filter",
+        path: `arguments.${path}`,
+        keyword: "semantic",
+        message,
+      });
+    }
+    calls.forEach(function (call, toolCallIndex) {
+      if (!call || call.name !== "sheets_filter") return;
+      const args = call.arguments || call.args || {};
+      const action = args.action;
+      if (action === "set") {
+        if (typeof args.range === "string" && args.range.toLowerCase() !== "selection") {
+          const shape = staticA1RangeShape(args.range);
+          if (!shape) {
+            semanticError(toolCallIndex, "range", "range must be a finite A1 cell range or selection");
+          } else {
+            if (shape.rows < 2) {
+              semanticError(toolCallIndex, "range", "filter range must contain a header row and at least one data row");
+            }
+            if (Number.isInteger(args.field) && args.field > shape.columns) {
+              semanticError(toolCallIndex, "field", `field must not exceed the filter range width (${shape.columns})`);
+            }
+          }
+        }
+        const criteria1Present = Object.prototype.hasOwnProperty.call(args, "criteria1");
+        const criteria2Present = Object.prototype.hasOwnProperty.call(args, "criteria2");
+        const operator = canonicalStaticFilterOperator(args.operator);
+        if (criteria1Present && !staticFilterCriterion(args.criteria1, true)) {
+          semanticError(toolCallIndex, "criteria1", "criteria1 must be a scalar or a non-empty array of scalar values");
+        }
+        if (criteria2Present && !staticFilterCriterion(args.criteria2, false)) {
+          semanticError(toolCallIndex, "criteria2", "criteria2 must be a scalar value");
+        }
+        if (args.operator !== undefined && !criteria1Present) {
+          semanticError(toolCallIndex, "criteria1", "criteria1 is required when operator is provided");
+        }
+        if (criteria2Present && operator !== "xlAnd" && operator !== "xlOr") {
+          semanticError(toolCallIndex, "criteria2", "criteria2 is only allowed with xlAnd or xlOr");
+        }
+        if (criteria2Present && !criteria1Present) {
+          semanticError(toolCallIndex, "criteria1", "criteria1 is required when criteria2 is provided");
+        }
+        if (operator === "xlFilterValues" && !Array.isArray(args.criteria1)) {
+          semanticError(toolCallIndex, "criteria1", "xlFilterValues requires a non-empty criteria1 array");
+        }
+        if (Array.isArray(args.criteria1) && operator !== "xlFilterValues") {
+          semanticError(toolCallIndex, "operator", "array criteria1 is only allowed with xlFilterValues");
+        }
+        if ([
+          "xlTop10Items",
+          "xlBottom10Items",
+          "xlTop10Percent",
+          "xlBottom10Percent",
+        ].indexOf(operator) >= 0) {
+          const ranking = Number(args.criteria1);
+          if (!Number.isFinite(ranking) || ranking <= 0) {
+            semanticError(toolCallIndex, "criteria1", "top/bottom filters require a positive numeric criteria1");
+          }
+        }
+        if (["xlFilterCellColor", "xlFilterFontColor", "xlFilterIcon"].indexOf(operator) >= 0) {
+          semanticError(toolCallIndex, "operator", "color and icon filters are not safe through the JSON bridge");
+        }
+      } else if (action === "showAll" || action === "reapply") {
+        const setOnlyFields = [
+          "range",
+          "field",
+          "criteria1",
+          "operator",
+          "criteria2",
+          "visibleDropDown",
+        ];
+        const invalidField = setOnlyFields.find(function (field) {
+          return Object.prototype.hasOwnProperty.call(args, field);
+        });
+        if (invalidField) {
+          semanticError(toolCallIndex, invalidField, `${invalidField} is only allowed when action is set`);
+        }
+      }
+    });
+    return validationErrors;
+  }
+
+  function preflight(toolCalls) {
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+    return {
+      toolCalls: calls,
+      argumentNormalizations: [],
+      validationErrors: collectFilterValidationErrors(calls),
+    };
+  }
+
   function probeCapabilities() {
     return new Promise(function (resolve) {
       Asc.plugin.callCommand(
@@ -2488,6 +2646,261 @@
               );
             }
 
+            function invalidFilterArguments(message, field, details) {
+              throw sheetError(
+                "INVALID_TOOL_ARGUMENTS",
+                message,
+                Object.assign({
+                  field: field || null,
+                  mutationState: "none",
+                  partialMutationPossible: false,
+                }, details || {})
+              );
+            }
+
+            function sheetAutoFilter(sheet) {
+              return typeof sheet.GetAutoFilter === "function"
+                ? sheet.GetAutoFilter()
+                : sheet.AutoFilter;
+            }
+
+            function filterRangeIdentity(range) {
+              var address = safeCall(range, "GetAddress", true, true, "xlA1", false);
+              if (typeof address !== "string" || !address) address = safeCall(range, "GetAddress");
+              if (typeof address !== "string" || !address) return null;
+              return address
+                .split("!")
+                .pop()
+                .replace(/\$/g, "")
+                .replace(/^'|'$/g, "")
+                .toUpperCase();
+            }
+
+            function resolveFilterTargetRange(sheet, args, autoFilter) {
+              if (hasOwn(args, "range")) {
+                if (typeof args.range !== "string" || !args.range.trim()) {
+                  invalidFilterArguments("sheets_filter.range 必须是有效区域", "range");
+                }
+                try {
+                  var requestedRange = getRange(sheet, args.range);
+                  if (requestedRange) return requestedRange;
+                } catch (error) {
+                  invalidFilterArguments("sheets_filter.range 无法解析", "range");
+                }
+                invalidFilterArguments("sheets_filter.range 无法解析", "range");
+              }
+              var currentRange = safeCall(autoFilter, "GetRange");
+              if (currentRange) return currentRange;
+              var usedRange = safeCall(sheet, "GetUsedRange");
+              if (usedRange) return usedRange;
+              invalidFilterArguments(
+                "未提供 sheets_filter.range，且当前工作表没有可筛选区域",
+                "range"
+              );
+            }
+
+            function isSafeFilterScalar(value) {
+              return typeof value === "string"
+                || typeof value === "boolean"
+                || (typeof value === "number" && isFinite(value));
+            }
+
+            function isSafeFilterCriterion(value, allowArray) {
+              if (isSafeFilterScalar(value)) return true;
+              if (!allowArray || !Array.isArray(value) || !value.length) return false;
+              for (var criterionIndex = 0; criterionIndex < value.length; criterionIndex += 1) {
+                if (!isSafeFilterScalar(value[criterionIndex])) return false;
+              }
+              return true;
+            }
+
+            function validateFilterArguments(args) {
+              var action = String(args.action || "");
+              if (action !== "set" && action !== "showAll" && action !== "reapply") {
+                invalidFilterArguments("不支持的筛选操作：" + action, "action");
+              }
+              var setOnlyFields = [
+                "range",
+                "field",
+                "criteria1",
+                "operator",
+                "criteria2",
+                "visibleDropDown",
+              ];
+              if (action !== "set") {
+                for (var setFieldIndex = 0; setFieldIndex < setOnlyFields.length; setFieldIndex += 1) {
+                  var setOnlyField = setOnlyFields[setFieldIndex];
+                  if (hasOwn(args, setOnlyField)) {
+                    invalidFilterArguments(
+                      "sheets_filter." + setOnlyField + " 仅允许用于 action=set",
+                      setOnlyField
+                    );
+                  }
+                }
+                return { action: action, operator: undefined };
+              }
+
+              if (!hasOwn(args, "field") || !Number.isInteger(args.field) || args.field < 1) {
+                invalidFilterArguments(
+                  "sheets_filter.action=set 需要从 1 开始的整数 field",
+                  "field"
+                );
+              }
+              if (hasOwn(args, "visibleDropDown") && typeof args.visibleDropDown !== "boolean") {
+                invalidFilterArguments(
+                  "sheets_filter.visibleDropDown 必须是布尔值",
+                  "visibleDropDown"
+                );
+              }
+              var criteria1Present = hasOwn(args, "criteria1");
+              var criteria2Present = hasOwn(args, "criteria2");
+              if (criteria1Present && !isSafeFilterCriterion(args.criteria1, true)) {
+                invalidFilterArguments(
+                  "sheets_filter.criteria1 必须是标量或非空标量数组",
+                  "criteria1"
+                );
+              }
+              if (criteria2Present && !isSafeFilterCriterion(args.criteria2, false)) {
+                invalidFilterArguments("sheets_filter.criteria2 必须是标量", "criteria2");
+              }
+              var operator;
+              try {
+                operator = normalizeFilterOperator(args.operator);
+              } catch (error) {
+                invalidFilterArguments(error.message, "operator");
+              }
+              if (operator !== undefined && !criteria1Present) {
+                invalidFilterArguments(
+                  "提供 sheets_filter.operator 时必须提供 criteria1",
+                  "criteria1"
+                );
+              }
+              if (criteria2Present && operator !== "xlAnd" && operator !== "xlOr") {
+                invalidFilterArguments(
+                  "sheets_filter.criteria2 仅允许与 xlAnd 或 xlOr 一起使用",
+                  "criteria2"
+                );
+              }
+              if (criteria2Present && !criteria1Present) {
+                invalidFilterArguments(
+                  "提供 sheets_filter.criteria2 时必须提供 criteria1",
+                  "criteria1"
+                );
+              }
+              if (operator === "xlFilterValues" && !Array.isArray(args.criteria1)) {
+                invalidFilterArguments(
+                  "xlFilterValues 需要非空数组 criteria1",
+                  "criteria1"
+                );
+              }
+              if (Array.isArray(args.criteria1) && operator !== "xlFilterValues") {
+                invalidFilterArguments(
+                  "数组 criteria1 仅允许与 xlFilterValues 一起使用",
+                  "operator"
+                );
+              }
+              if (
+                operator === "xlTop10Items"
+                || operator === "xlBottom10Items"
+                || operator === "xlTop10Percent"
+                || operator === "xlBottom10Percent"
+              ) {
+                var ranking = Number(args.criteria1);
+                if (!isFinite(ranking) || ranking <= 0) {
+                  invalidFilterArguments(
+                    "排名筛选需要正数 criteria1",
+                    "criteria1"
+                  );
+                }
+              }
+              if (
+                operator === "xlFilterCellColor"
+                || operator === "xlFilterFontColor"
+                || operator === "xlFilterIcon"
+              ) {
+                invalidFilterArguments(
+                  "颜色和图标筛选需要运行时对象，不能通过 JSON bridge 安全调用",
+                  "operator"
+                );
+              }
+              return { action: action, operator: operator };
+            }
+
+            function validateFilterTarget(sheet, args, expectedRangeIdentity) {
+              var autoFilter = sheetAutoFilter(sheet);
+              var targetRange = resolveFilterTargetRange(sheet, args, autoFilter);
+              if (typeof targetRange.SetAutoFilter !== "function") {
+                unsupportedFeature(
+                  "sheets.autoFilter.set",
+                  "当前 ONLYOFFICE 运行时不支持安全设置自动筛选"
+                );
+              }
+              var shape = targetRangeShape(targetRange, "自动筛选");
+              if (shape.rows < 2) {
+                invalidFilterArguments(
+                  "自动筛选区域必须包含表头和至少一行数据",
+                  "range",
+                  { rows: shape.rows, columns: shape.columns }
+                );
+              }
+              if (args.field > shape.columns) {
+                invalidFilterArguments(
+                  "sheets_filter.field 超出筛选区域列数",
+                  "field",
+                  { fieldValue: args.field, columns: shape.columns }
+                );
+              }
+              var targetIdentity = filterRangeIdentity(targetRange);
+              if (!targetIdentity) {
+                unsupportedFeature(
+                  "sheets.autoFilter.rangeReadback",
+                  "当前 ONLYOFFICE 运行时无法读取自动筛选目标区域"
+                );
+              }
+              var currentRange = safeCall(autoFilter, "GetRange");
+              var currentIdentity = filterRangeIdentity(currentRange);
+              if (currentIdentity && currentIdentity !== targetIdentity) {
+                invalidFilterArguments(
+                  "目标区域与工作表现有自动筛选区域冲突",
+                  "range",
+                  { requestedRange: targetIdentity, existingRange: currentIdentity }
+                );
+              }
+              if (expectedRangeIdentity && expectedRangeIdentity !== targetIdentity) {
+                invalidFilterArguments(
+                  "同一批次不能为同一工作表设置不同的自动筛选区域",
+                  "range",
+                  { requestedRange: targetIdentity, existingRange: expectedRangeIdentity }
+                );
+              }
+              return { range: targetRange, identity: targetIdentity };
+            }
+
+            function validateExistingFilterAction(sheet, action) {
+              var autoFilter = sheetAutoFilter(sheet);
+              var currentRange = safeCall(autoFilter, "GetRange");
+              if (!autoFilter || !currentRange) {
+                invalidFilterArguments(
+                  "action=" + action + " 需要工作表已有自动筛选",
+                  "action"
+                );
+              }
+              var method = action === "showAll" ? "ShowAllData" : "ApplyFilter";
+              if (typeof autoFilter[method] !== "function") {
+                unsupportedFeature(
+                  "sheets.autoFilter." + action,
+                  "当前 ONLYOFFICE 运行时不支持筛选操作 " + action
+                );
+              }
+              if (!filterRangeIdentity(currentRange)) {
+                unsupportedFeature(
+                  "sheets.autoFilter.rangeReadback",
+                  "当前 ONLYOFFICE 运行时无法读取现有自动筛选区域"
+                );
+              }
+              return autoFilter;
+            }
+
             function containsNull(value) {
               if (value === null) return true;
               if (!Array.isArray(value)) return false;
@@ -2562,10 +2975,25 @@
 
             function preflightRuntimeCalls(toolCalls) {
               preflightBatchDependencies(toolCalls);
+              var expectedFilterRanges = {};
               for (var preflightIndex = 0; preflightIndex < toolCalls.length; preflightIndex += 1) {
                 var preflightCall = toolCalls[preflightIndex] || {};
                 var preflightArgs = getArgs(preflightCall);
-                if (preflightCall.name === "sheets_manage_table") {
+                if (preflightCall.name === "sheets_filter") {
+                  var preflightFilter = validateFilterArguments(preflightArgs);
+                  var preflightFilterSheet = getSheet(preflightArgs.sheet);
+                  if (preflightFilter.action === "set") {
+                    var filterSheetName = String(preflightFilterSheet.GetName());
+                    var preflightFilterTarget = validateFilterTarget(
+                      preflightFilterSheet,
+                      preflightArgs,
+                      expectedFilterRanges[filterSheetName]
+                    );
+                    expectedFilterRanges[filterSheetName] = preflightFilterTarget.identity;
+                  } else {
+                    validateExistingFilterAction(preflightFilterSheet, preflightFilter.action);
+                  }
+                } else if (preflightCall.name === "sheets_manage_table") {
                   var preflightTableSheet = getSheet(preflightArgs.sheet);
                   var preflightTableAction = String(preflightArgs.action || "");
                   if (preflightTableAction === "create") {
@@ -3245,38 +3673,58 @@
                 }
 
                 case "sheets_filter": {
-                  if (!args.action) throw new Error("sheets_filter.action 不能为空");
                   var filterSheet = getSheet(args.sheet);
-                  var filterAction = String(args.action);
+                  var validatedFilter = validateFilterArguments(args);
+                  var filterAction = validatedFilter.action;
+                  var expectedFilterRange = null;
                   if (filterAction === "set") {
-                    if (!args.range) throw new Error("set 需要 range");
-                    var filterRange = getRange(filterSheet, args.range);
+                    var filterTarget = validateFilterTarget(filterSheet, args, null);
+                    var filterRange = filterTarget.range;
+                    expectedFilterRange = filterTarget.identity;
                     mutationCall(
                       filterRange,
                       "SetAutoFilter",
                       "设置自动筛选",
-                      hasOwn(args, "field") ? Number(args.field) : null,
+                      args.field,
                       args.criteria1,
-                      normalizeFilterOperator(args.operator),
+                      validatedFilter.operator,
                       args.criteria2,
                       hasOwn(args, "visibleDropDown") ? Boolean(args.visibleDropDown) : undefined
                     );
                   } else if (filterAction === "showAll") {
-                    var autoFilter = typeof filterSheet.GetAutoFilter === "function" ? filterSheet.GetAutoFilter() : filterSheet.AutoFilter;
-                    requireMethod(autoFilter, "ShowAllData", "显示全部筛选数据").call(autoFilter);
+                    var autoFilter = validateExistingFilterAction(filterSheet, filterAction);
+                    mutationCall(autoFilter, "ShowAllData", "显示全部筛选数据");
                   } else if (filterAction === "reapply") {
-                    var reappliedFilter = typeof filterSheet.GetAutoFilter === "function" ? filterSheet.GetAutoFilter() : filterSheet.AutoFilter;
-                    requireMethod(reappliedFilter, "ApplyFilter", "重新应用筛选").call(reappliedFilter);
-                  } else {
-                    throw new Error("不支持的筛选操作：" + filterAction);
+                    var reappliedFilter = validateExistingFilterAction(filterSheet, filterAction);
+                    mutationCall(reappliedFilter, "ApplyFilter", "重新应用筛选");
+                  }
+                  var inspectedFilter = sheetAutoFilter(filterSheet);
+                  var inspectedFilterRange = safeCall(inspectedFilter, "GetRange");
+                  var inspectedFilterIdentity = filterRangeIdentity(inspectedFilterRange);
+                  if (
+                    filterAction === "set"
+                    && (!inspectedFilter || inspectedFilterIdentity !== expectedFilterRange)
+                  ) {
+                    throw sheetError(
+                      "SHEETS_RUNTIME_INCOMPATIBLE",
+                      "ONLYOFFICE 未能可靠读取刚设置的自动筛选区域",
+                      {
+                        feature: "sheets.autoFilter.setReadback",
+                        expectedRange: expectedFilterRange,
+                        observedRange: inspectedFilterIdentity,
+                        retryable: false,
+                        mutationState: "partial",
+                        partialMutationPossible: true,
+                        recovery: "inspect_then_undo_or_reopen",
+                      }
+                    );
                   }
                   changed += 1;
-                  var inspectedFilter = typeof filterSheet.GetAutoFilter === "function" ? filterSheet.GetAutoFilter() : filterSheet.AutoFilter;
                   results.push({
                     name: call.name,
                     action: filterAction,
                     sheet: filterSheet.GetName(),
-                    range: describeRange(safeCall(inspectedFilter, "GetRange"), false),
+                    range: describeRange(inspectedFilterRange, false),
                     filterMode: safeCall(inspectedFilter, "GetFilterMode"),
                   });
                   break;
@@ -4561,6 +5009,7 @@
 
   window.AICopilotBridges.cell = {
     execute: execute,
+    preflight: preflight,
     probeCapabilities: probeCapabilities,
     inspect: function () {
       return execute([{ name: "sheets_inspect", arguments: { maxCells: 1200 } }]);
