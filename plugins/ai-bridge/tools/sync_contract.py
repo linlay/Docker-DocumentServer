@@ -1383,10 +1383,7 @@ def render_toml(
             "expect_status = 200",
             'extract_type = "jq"',
             (
-                "extract_expr = '''if (.body.contractVersion != "
-                f'"{contract["version"]}" or .body.contractSha256 != "{sha256}") then '
-                f"error(\"CONTRACT_MISMATCH: {config['site']}\") "
-                "elif (.body.online == true "
+                "extract_expr = '''if (.body.online == true "
                 f'and .body.saveReady == true and .body.editorType == "{editor}") then .body '
                 f"else error(\"EDITOR_SESSION_UNAVAILABLE: {config['site']}\") end'''"
             ),
@@ -1755,8 +1752,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.6":
-        raise ValueError("public-api.json version must be 0.2.6")
+    if contract.get("version") != "0.2.7":
+        raise ValueError("public-api.json version must be 0.2.7")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}

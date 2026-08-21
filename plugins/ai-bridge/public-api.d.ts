@@ -93,7 +93,7 @@ export interface AiBridgeCapabilities {
   editorType: AiBridgeEditorType;
   tools: AiBridgeToolName[];
   controls: AiBridgeControl[];
-  contractVersion?: "0.2.6";
+  contractVersion?: "0.2.7";
   contractSha256?: string;
   runtime?: {
     product: "ONLYOFFICE";
@@ -116,10 +116,10 @@ export interface AiBridgeCapabilities {
 }
 
 export interface AiBridgeState {
-  version: "0.2.6";
+  version: "0.2.7";
   protocolVersion: 1;
   pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
-  contractVersion: "0.2.6";
+  contractVersion: "0.2.7";
   contractSha256: string;
   ready: boolean;
   documentReady?: boolean;
@@ -167,7 +167,7 @@ export interface AiBridgeWordValidationResult {
   valid: true;
   editorType: "word";
   toolCalls: number;
-  contractVersion: "0.2.6";
+  contractVersion: "0.2.7";
   contractSha256: string;
   argumentNormalizations?: AiBridgeArgumentNormalization[];
 }
@@ -8779,7 +8779,7 @@ export interface AiBridgeSheetsApi {
 export type AiBridgeEventName = "ready" | "reload" | "error";
 
 export interface AiBridgeApi {
-  readonly version: "0.2.6";
+  readonly version: "0.2.7";
   readonly protocolVersion: 1;
   readonly pluginGuid: "asc.{A17E5F31-64AA-4E37-9A42-8D430814C2F6}";
   readonly isReady: boolean;

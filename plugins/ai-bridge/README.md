@@ -109,9 +109,11 @@ make ai-bridge-release-contract-check \
   HTTPX_BASE_URL=https://documents.example.com
 ```
 
-Publish/install the generated Skills and the image as one release unit. The
-generated session actions reject mismatched `contractVersion` or
-`contractSha256` before saving a lease or executing a write action.
+Publish/install the generated Skills and the image as one release unit. A
+generated session action accepts any server-issued lease when the requested
+editor is online and save-ready. It records the returned contract metadata for
+diagnostics, but contract version or SHA differences do not block compatible
+operations.
 
 ## Private Relay endpoints
 
