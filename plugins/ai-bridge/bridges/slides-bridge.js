@@ -1068,6 +1068,8 @@
               var paragraphs = getParagraphsFromShape(shape);
               var fontSizes = [];
               var fontFamilies = [];
+              var unavailableFontSizeRuns = 0;
+              var unavailableFontFamilyRuns = 0;
               var paragraphResults = [];
               for (var paragraphIndex = 0; paragraphIndex < paragraphs.length; paragraphIndex += 1) {
                 var paragraph = paragraphs[paragraphIndex];
@@ -1112,14 +1114,19 @@
                   var italic = readableValue(element, "GetItalic");
                   var underline = readableValue(element, "GetUnderline");
                   var color = readableValue(element, "GetColor", readableColor);
+                  var runText = String(safeCall(element, "GetText") || "");
                   if (typeof fontSize.value === "number" && isFinite(fontSize.value)) {
                     fontSizes.push(fontSize.value);
+                  } else if (runText.length > 0) {
+                    unavailableFontSizeRuns += 1;
                   }
                   if (typeof fontFamily.value === "string" && fontFamilies.indexOf(fontFamily.value) === -1) {
                     fontFamilies.push(fontFamily.value);
+                  } else if (runText.length > 0 && typeof fontFamily.value !== "string") {
+                    unavailableFontFamilyRuns += 1;
                   }
                   runs.push({
-                    text: safeCall(element, "GetText"),
+                    text: runText,
                     fontSize: fontSize,
                     fontFamily: fontFamily,
                     bold: bold,
@@ -1146,8 +1153,63 @@
                 minFontSize: fontSizes.length ? Math.min.apply(Math, fontSizes) : null,
                 maxFontSize: fontSizes.length ? Math.max.apply(Math, fontSizes) : null,
                 fontFamilies: fontFamilies,
+                unavailableFontSizeRuns: unavailableFontSizeRuns,
+                unavailableFontFamilyRuns: unavailableFontFamilyRuns,
                 paragraphs: paragraphResults,
               };
+            }
+
+            function aggregateTextStyles(summaries, detailName) {
+              var fontSizes = [];
+              var fontFamilies = [];
+              var details = [];
+              var unavailableFontSizeRuns = 0;
+              var unavailableFontFamilyRuns = 0;
+              for (var index = 0; index < summaries.length; index += 1) {
+                var entry = summaries[index] || {};
+                var summary = entry.textStyles || entry;
+                details.push(entry);
+                if (summary && typeof summary.minFontSize === "number") fontSizes.push(summary.minFontSize);
+                if (summary && typeof summary.maxFontSize === "number") fontSizes.push(summary.maxFontSize);
+                unavailableFontSizeRuns += Number(summary && summary.unavailableFontSizeRuns || 0);
+                unavailableFontFamilyRuns += Number(summary && summary.unavailableFontFamilyRuns || 0);
+                var families = summary && Array.isArray(summary.fontFamilies) ? summary.fontFamilies : [];
+                for (var familyIndex = 0; familyIndex < families.length; familyIndex += 1) {
+                  if (fontFamilies.indexOf(families[familyIndex]) === -1) fontFamilies.push(families[familyIndex]);
+                }
+              }
+              var result = {
+                available: summaries.some(function (entry) {
+                  var summary = entry && (entry.textStyles || entry);
+                  return Boolean(summary && summary.available);
+                }),
+                minFontSize: fontSizes.length ? Math.min.apply(Math, fontSizes) : null,
+                maxFontSize: fontSizes.length ? Math.max.apply(Math, fontSizes) : null,
+                fontFamilies: fontFamilies,
+                unavailableFontSizeRuns: unavailableFontSizeRuns,
+                unavailableFontFamilyRuns: unavailableFontFamilyRuns,
+              };
+              result[detailName] = details;
+              return result;
+            }
+
+            function describeTableTextStyles(table) {
+              var dimensions = tableDimensions(table);
+              var cells = [];
+              for (var rowIndex = 0; rowIndex < dimensions.rows; rowIndex += 1) {
+                var row = safeCall(table, "GetRow", rowIndex);
+                for (var columnIndex = 0; columnIndex < dimensions.columns; columnIndex += 1) {
+                  var cell = row ? safeCall(row, "GetCell", columnIndex) : null;
+                  if (!cell) continue;
+                  cells.push({
+                    row: rowIndex + 1,
+                    column: columnIndex + 1,
+                    text: String(safeCall(cell, "GetText") || ""),
+                    textStyles: describeTextStyles(cell),
+                  });
+                }
+              }
+              return aggregateTextStyles(cells, "cells");
             }
 
             function applyRunFormat(run, format) {
@@ -1802,6 +1864,17 @@
                     raw: includeRaw ? serialized(item) : undefined,
                   };
                 }) : [];
+                if (includeTextStyles) {
+                  info.textStyles = {
+                    available: false,
+                    minFontSize: null,
+                    maxFontSize: null,
+                    fontFamilies: [],
+                    unavailableFontSizeRuns: 1,
+                    unavailableFontFamilyRuns: 1,
+                    unavailableReason: "chart text style getters are unavailable",
+                  };
+                }
               }
               if (kind === "smartArt") {
                 var smartArtType = smartArtTypeInfo(drawing);
@@ -1813,6 +1886,9 @@
                 info.nodes = smartArtNodes.map(function (entry, index) {
                   return describeSmartArtNode(entry, index, includeTextStyles);
                 });
+                if (includeTextStyles) {
+                  info.textStyles = aggregateTextStyles(info.nodes, "nodes");
+                }
               }
               if (kind === "table") {
                 var tableInfo = describeTable(drawing);
@@ -1820,6 +1896,17 @@
                 info.columns = tableInfo.columns;
                 info.data = tableInfo.data;
                 info.columnWidthsMm = tableInfo.columnWidthsMm;
+                info.rowHeightsMm = tableInfo.rowHeightsMm;
+                info.rowHeightSumMm = tableInfo.rowHeightSumMm;
+                if (tableInfo.rowHeightsComplete && typeof tableInfo.rowHeightSumMm === "number" && tableInfo.rowHeightSumMm > 0) {
+                  info.effectiveBoundsMm = {
+                    xMm: info.xMm,
+                    yMm: info.yMm,
+                    widthMm: info.widthMm,
+                    heightMm: tableInfo.rowHeightSumMm,
+                  };
+                }
+                if (includeTextStyles) info.textStyles = describeTableTextStyles(drawing);
               }
               if (kind === "oleObject") {
                 info.applicationId = safeCall(drawing, "GetApplicationId");
@@ -1842,6 +1929,20 @@
               }
               var margin = Math.max(0, asFinite(value, 0));
               return { left: margin, top: margin, right: margin, bottom: margin };
+            }
+
+            function classifySlideSize(widthMm, heightMm) {
+              var width = Number(widthMm);
+              var height = Number(heightMm);
+              var landscapeRatio = Math.max(width, height) / Math.min(width, height);
+              var ratioValue = width / height;
+              if (Math.abs(landscapeRatio - (16 / 9)) <= 0.01) {
+                return { preset: "wide", aspectRatio: "16:9", aspectRatioValue: ratioValue };
+              }
+              if (Math.abs(landscapeRatio - (4 / 3)) <= 0.01) {
+                return { preset: "standard", aspectRatio: "4:3", aspectRatioValue: ratioValue };
+              }
+              return { preset: "custom", aspectRatio: "custom", aspectRatioValue: ratioValue };
             }
 
             function drawingLabel(info) {
@@ -1867,22 +1968,24 @@
             }
 
             function drawingIntersection(first, second) {
-              var left = Math.max(first.xMm, second.xMm);
-              var top = Math.max(first.yMm, second.yMm);
-              var right = Math.min(first.xMm + first.widthMm, second.xMm + second.widthMm);
-              var bottom = Math.min(first.yMm + first.heightMm, second.yMm + second.heightMm);
+              var firstFrame = drawingValidationFrame(first);
+              var secondFrame = drawingValidationFrame(second);
+              var left = Math.max(firstFrame.xMm, secondFrame.xMm);
+              var top = Math.max(firstFrame.yMm, secondFrame.yMm);
+              var right = Math.min(firstFrame.xMm + firstFrame.widthMm, secondFrame.xMm + secondFrame.widthMm);
+              var bottom = Math.min(firstFrame.yMm + firstFrame.heightMm, secondFrame.yMm + secondFrame.heightMm);
               if (!(right > left && bottom > top)) return null;
               var firstContainsSecond = (
-                first.xMm <= second.xMm
-                && first.yMm <= second.yMm
-                && first.xMm + first.widthMm >= second.xMm + second.widthMm
-                && first.yMm + first.heightMm >= second.yMm + second.heightMm
+                firstFrame.xMm <= secondFrame.xMm
+                && firstFrame.yMm <= secondFrame.yMm
+                && firstFrame.xMm + firstFrame.widthMm >= secondFrame.xMm + secondFrame.widthMm
+                && firstFrame.yMm + firstFrame.heightMm >= secondFrame.yMm + secondFrame.heightMm
               );
               var secondContainsFirst = (
-                second.xMm <= first.xMm
-                && second.yMm <= first.yMm
-                && second.xMm + second.widthMm >= first.xMm + first.widthMm
-                && second.yMm + second.heightMm >= first.yMm + first.heightMm
+                secondFrame.xMm <= firstFrame.xMm
+                && secondFrame.yMm <= firstFrame.yMm
+                && secondFrame.xMm + secondFrame.widthMm >= firstFrame.xMm + firstFrame.widthMm
+                && secondFrame.yMm + secondFrame.heightMm >= firstFrame.yMm + firstFrame.heightMm
               );
               return {
                 kind: firstContainsSecond || secondContainsFirst ? "containment" : "overlap",
@@ -1891,6 +1994,195 @@
                 widthMm: right - left,
                 heightMm: bottom - top,
               };
+            }
+
+            function drawingValidationFrame(info) {
+              var effective = info && info.effectiveBoundsMm;
+              if (
+                effective
+                && typeof effective.xMm === "number"
+                && typeof effective.yMm === "number"
+                && typeof effective.widthMm === "number"
+                && typeof effective.heightMm === "number"
+              ) {
+                return effective;
+              }
+              return {
+                xMm: info && info.xMm,
+                yMm: info && info.yMm,
+                widthMm: info && info.widthMm,
+                heightMm: info && info.heightMm,
+              };
+            }
+
+            function drawingContainsText(info) {
+              if (!info) return false;
+              if (info.kind === "shape") return String(info.text || "").trim().length > 0;
+              if (info.kind === "chart") return true;
+              if (info.kind === "smartArt") {
+                return (info.nodes || []).some(function (node) {
+                  return String(node && node.text || "").trim().length > 0;
+                });
+              }
+              if (info.kind === "table") {
+                return (info.data || []).some(function (row) {
+                  return (row || []).some(function (value) {
+                    return value !== null && value !== undefined && String(value).trim().length > 0;
+                  });
+                });
+              }
+              return false;
+            }
+
+            function normalizedFontFamily(value) {
+              return String(value || "").trim().toLowerCase();
+            }
+
+            function validateFontPolicy(objects, slideNumber, policy, issues) {
+              var rules = Array.isArray(policy.rules) ? policy.rules : [];
+              var rulesByName = {};
+              var matchedRules = {};
+              var objectNameCounts = {};
+              for (var countIndex = 0; countIndex < objects.length; countIndex += 1) {
+                var countedName = typeof objects[countIndex].name === "string" ? objects[countIndex].name : "";
+                objectNameCounts[countedName] = Number(objectNameCounts[countedName] || 0) + 1;
+              }
+              for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+                var configuredRule = rules[ruleIndex] || {};
+                var configuredName = String(configuredRule.name || "");
+                if (hasOwn(rulesByName, configuredName)) {
+                  throw commandError(
+                    "INVALID_TOOL_ARGUMENTS",
+                    "fontPolicy.rules 中的对象名必须唯一且精确匹配",
+                    { name: configuredName, firstRule: rulesByName[configuredName].index, secondRule: ruleIndex }
+                  );
+                }
+                rulesByName[configuredName] = { rule: configuredRule, index: ruleIndex };
+              }
+
+              for (var objectIndex = 0; objectIndex < objects.length; objectIndex += 1) {
+                var info = objects[objectIndex];
+                var objectName = typeof info.name === "string" ? info.name : "";
+                var ruleEntry = hasOwn(rulesByName, objectName) ? rulesByName[objectName] : null;
+                if (ruleEntry) matchedRules[objectName] = true;
+                if (!drawingContainsText(info)) continue;
+
+                if (!ruleEntry && policy.requireObjectRules === true) {
+                  issues.push({
+                    code: "FONT_POLICY_UNCLASSIFIED_OBJECT",
+                    slide: slideNumber,
+                    object: drawingLabel(info),
+                    objectName: objectName || null,
+                    role: null,
+                    policyId: String(policy.id || ""),
+                    policySource: String(policy.source || ""),
+                  });
+                }
+
+                var rule = ruleEntry ? ruleEntry.rule : null;
+                var role = rule ? String(rule.role || "") : "default";
+                var minimum = rule ? Number(rule.minPt) : Number(policy.defaultMinPt);
+                var styles = info.textStyles;
+                if (
+                  !styles
+                  || typeof styles.minFontSize !== "number"
+                  || !isFinite(styles.minFontSize)
+                  || Number(styles.unavailableFontSizeRuns || 0) > 0
+                ) {
+                  issues.push({
+                    code: "FONT_STYLE_UNAVAILABLE",
+                    slide: slideNumber,
+                    object: drawingLabel(info),
+                    objectName: objectName || null,
+                    role: role,
+                    policyId: String(policy.id || ""),
+                    policySource: String(policy.source || ""),
+                    requiredMinPt: minimum,
+                    reason: styles && styles.unavailableReason
+                      ? styles.unavailableReason
+                      : "one or more text runs have no readable font size",
+                  });
+                  continue;
+                }
+                if (styles.minFontSize < minimum) {
+                  issues.push({
+                    code: "FONT_TOO_SMALL",
+                    slide: slideNumber,
+                    object: drawingLabel(info),
+                    objectName: objectName || null,
+                    role: role,
+                    policyId: String(policy.id || ""),
+                    policySource: String(policy.source || ""),
+                    minimum: minimum,
+                    requiredMinPt: minimum,
+                    actual: styles.minFontSize,
+                    actualMinPt: styles.minFontSize,
+                  });
+                }
+                if (rule && Array.isArray(rule.allowedFamilies)) {
+                  var actualFamilies = Array.isArray(styles.fontFamilies) ? styles.fontFamilies : [];
+                  if (!actualFamilies.length || Number(styles.unavailableFontFamilyRuns || 0) > 0) {
+                    issues.push({
+                      code: "FONT_STYLE_UNAVAILABLE",
+                      slide: slideNumber,
+                      object: drawingLabel(info),
+                      objectName: objectName || null,
+                      role: role,
+                      policyId: String(policy.id || ""),
+                      policySource: String(policy.source || ""),
+                      requiredFamilies: rule.allowedFamilies,
+                      reason: "one or more text runs have no readable font family",
+                    });
+                  } else {
+                    var allowedFamilies = rule.allowedFamilies.map(normalizedFontFamily);
+                    var mismatchedFamilies = actualFamilies.filter(function (family) {
+                      return allowedFamilies.indexOf(normalizedFontFamily(family)) === -1;
+                    });
+                    if (mismatchedFamilies.length) {
+                      issues.push({
+                        code: "FONT_FAMILY_MISMATCH",
+                        slide: slideNumber,
+                        object: drawingLabel(info),
+                        objectName: objectName || null,
+                        role: role,
+                        policyId: String(policy.id || ""),
+                        policySource: String(policy.source || ""),
+                        requiredFamilies: rule.allowedFamilies,
+                        actualFamilies: actualFamilies,
+                        mismatchedFamilies: mismatchedFamilies,
+                      });
+                    }
+                  }
+                }
+              }
+
+              for (var missingIndex = 0; missingIndex < rules.length; missingIndex += 1) {
+                var missingRule = rules[missingIndex] || {};
+                var missingName = String(missingRule.name || "");
+                if (!hasOwn(matchedRules, missingName)) {
+                  issues.push({
+                    code: "FONT_RULE_TARGET_MISSING",
+                    slide: slideNumber,
+                    object: missingName,
+                    objectName: missingName,
+                    role: String(missingRule.role || ""),
+                    policyId: String(policy.id || ""),
+                    policySource: String(policy.source || ""),
+                    requiredMinPt: Number(missingRule.minPt),
+                  });
+                } else if (Number(objectNameCounts[missingName] || 0) !== 1) {
+                  issues.push({
+                    code: "FONT_RULE_TARGET_AMBIGUOUS",
+                    slide: slideNumber,
+                    object: missingName,
+                    objectName: missingName,
+                    role: String(missingRule.role || ""),
+                    policyId: String(policy.id || ""),
+                    policySource: String(policy.source || ""),
+                    matchCount: Number(objectNameCounts[missingName] || 0),
+                  });
+                }
+              }
             }
 
             function hasManualListPrefix(text) {
@@ -1902,6 +2194,13 @@
             }
 
             function validateSlideLayout(slide, slideNumber, args) {
+              if (hasOwn(args, "minFontSize") && hasOwn(args, "fontPolicy")) {
+                throw commandError(
+                  "INVALID_TOOL_ARGUMENTS",
+                  "minFontSize 和 fontPolicy 不能同时使用",
+                  { fields: ["minFontSize", "fontPolicy"] }
+                );
+              }
               var widthMm = emuToMm(safeCall(slide, "GetWidth"));
               var heightMm = emuToMm(safeCall(slide, "GetHeight"));
               if (typeof widthMm !== "number") widthMm = emuToMm(safeCall(presentation, "GetWidth"));
@@ -1909,6 +2208,7 @@
               var margins = normalizeSafeMargins(args.safeMarginMm);
               var requireUniqueNames = args.requireUniqueNames !== false;
               var minFontSize = hasOwn(args, "minFontSize") ? Number(args.minFontSize) : null;
+              var fontPolicy = isObject(args.fontPolicy) ? args.fontPolicy : null;
               var maxObjects = hasOwn(args, "maxObjects") ? Number(args.maxObjects) : null;
               var drawings = slideDrawings(slide);
               var objects = drawings.map(function (drawing, index) {
@@ -1950,6 +2250,7 @@
               for (var objectIndex = 0; objectIndex < objects.length; objectIndex += 1) {
                 var info = objects[objectIndex];
                 var label = drawingLabel(info);
+                var validationFrame = drawingValidationFrame(info);
                 var name = typeof info.name === "string" ? info.name.trim() : "";
                 if (requireUniqueNames && !name) {
                   issues.push({ code: "OBJECT_NAME_MISSING", object: label, objectIndex: info.objectIndex });
@@ -1965,30 +2266,30 @@
                   }
                 }
                 var numericFrame = (
-                  typeof info.xMm === "number"
-                  && typeof info.yMm === "number"
-                  && typeof info.widthMm === "number"
-                  && typeof info.heightMm === "number"
+                  typeof validationFrame.xMm === "number"
+                  && typeof validationFrame.yMm === "number"
+                  && typeof validationFrame.widthMm === "number"
+                  && typeof validationFrame.heightMm === "number"
                 );
                 if (!numericFrame) {
                   issues.push({ code: "GEOMETRY_UNAVAILABLE", object: label });
                 } else {
-                  var right = info.xMm + info.widthMm;
-                  var bottom = info.yMm + info.heightMm;
-                  if (info.xMm < 0 || info.yMm < 0 || right > widthMm || bottom > heightMm) {
+                  var right = validationFrame.xMm + validationFrame.widthMm;
+                  var bottom = validationFrame.yMm + validationFrame.heightMm;
+                  if (validationFrame.xMm < 0 || validationFrame.yMm < 0 || right > widthMm || bottom > heightMm) {
                     issues.push({
                       code: "OBJECT_OUT_OF_BOUNDS",
                       object: label,
                       frame: {
-                        xMm: info.xMm,
-                        yMm: info.yMm,
-                        widthMm: info.widthMm,
-                        heightMm: info.heightMm,
+                        xMm: validationFrame.xMm,
+                        yMm: validationFrame.yMm,
+                        widthMm: validationFrame.widthMm,
+                        heightMm: validationFrame.heightMm,
                       },
                     });
                   } else if (
-                    info.xMm < margins.left
-                    || info.yMm < margins.top
+                    validationFrame.xMm < margins.left
+                    || validationFrame.yMm < margins.top
                     || right > widthMm - margins.right
                     || bottom > heightMm - margins.bottom
                   ) {
@@ -2013,19 +2314,23 @@
                 }
               }
 
+              if (fontPolicy) validateFontPolicy(objects, slideNumber, fontPolicy, issues);
+
               for (var firstIndex = 0; firstIndex < objects.length; firstIndex += 1) {
                 for (var secondIndex = firstIndex + 1; secondIndex < objects.length; secondIndex += 1) {
                   var first = objects[firstIndex];
                   var second = objects[secondIndex];
+                  var firstFrame = drawingValidationFrame(first);
+                  var secondFrame = drawingValidationFrame(second);
                   if (
-                    typeof first.xMm !== "number"
-                    || typeof first.yMm !== "number"
-                    || typeof first.widthMm !== "number"
-                    || typeof first.heightMm !== "number"
-                    || typeof second.xMm !== "number"
-                    || typeof second.yMm !== "number"
-                    || typeof second.widthMm !== "number"
-                    || typeof second.heightMm !== "number"
+                    typeof firstFrame.xMm !== "number"
+                    || typeof firstFrame.yMm !== "number"
+                    || typeof firstFrame.widthMm !== "number"
+                    || typeof firstFrame.heightMm !== "number"
+                    || typeof secondFrame.xMm !== "number"
+                    || typeof secondFrame.yMm !== "number"
+                    || typeof secondFrame.widthMm !== "number"
+                    || typeof secondFrame.heightMm !== "number"
                   ) {
                     continue;
                   }
@@ -2062,6 +2367,12 @@
                 layout: layout,
                 objectCount: objects.length,
                 safeMarginMm: margins,
+                fontPolicy: fontPolicy ? {
+                  id: String(fontPolicy.id || ""),
+                  source: String(fontPolicy.source || ""),
+                  defaultMinPt: Number(fontPolicy.defaultMinPt),
+                  requireObjectRules: fontPolicy.requireObjectRules === true,
+                } : null,
                 objects: objects,
                 intersections: intersections,
                 issues: issues,
@@ -2106,8 +2417,16 @@
             function describeTable(table) {
               var dimensions = tableDimensions(table);
               var data = [];
+              var rowHeightsMm = [];
+              var rowHeightSumMm = 0;
+              var rowHeightsComplete = true;
               for (var rowIndex = 0; rowIndex < dimensions.rows; rowIndex += 1) {
                 var row = table.GetRow(rowIndex);
+                var rawRowHeight = safeCall(row, "GetHeight");
+                var rowHeightMm = typeof rawRowHeight === "number" ? emuToMm(rawRowHeight) : null;
+                rowHeightsMm.push(rowHeightMm);
+                if (typeof rowHeightMm === "number" && isFinite(rowHeightMm)) rowHeightSumMm += rowHeightMm;
+                else rowHeightsComplete = false;
                 var values = [];
                 var cells = safeCall(row, "GetCellsCount");
                 var cellCount = typeof cells === "number" ? cells : dimensions.columns;
@@ -2126,6 +2445,9 @@
                 columns: dimensions.columns,
                 data: data,
                 columnWidthsMm: columnWidths,
+                rowHeightsMm: rowHeightsMm,
+                rowHeightSumMm: rowHeightsComplete ? rowHeightSumMm : null,
+                rowHeightsComplete: rowHeightsComplete,
               };
             }
 
@@ -2963,11 +3285,18 @@
                   if (presentation.SetSizes(mmToEmu(sizeWidthMm), mmToEmu(sizeHeightMm)) === false) {
                     throw new Error("修改幻灯片尺寸失败");
                   }
+                  var actualSizeWidthMm = emuToMm(safeCall(presentation, "GetWidth"));
+                  var actualSizeHeightMm = emuToMm(safeCall(presentation, "GetHeight"));
+                  var actualSizeClass = classifySlideSize(actualSizeWidthMm, actualSizeHeightMm);
                   changed += 1;
                   results.push({
                     name: call.name,
-                    widthMm: emuToMm(safeCall(presentation, "GetWidth")),
-                    heightMm: emuToMm(safeCall(presentation, "GetHeight")),
+                    requestedPreset: sizePreset,
+                    widthMm: actualSizeWidthMm,
+                    heightMm: actualSizeHeightMm,
+                    preset: actualSizeClass.preset,
+                    aspectRatio: actualSizeClass.aspectRatio,
+                    aspectRatioValue: actualSizeClass.aspectRatioValue,
                   });
                   break;
                 }
@@ -3713,6 +4042,27 @@
 
                 case "slides_format_table": {
                   var formattedTable = resolveDrawing(args, "table");
+                  var formattedDimensions = tableDimensions(formattedTable.drawing);
+                  var completeRowHeightSumMm = null;
+                  if (Array.isArray(args.rowHeightsMm) && args.rowHeightsMm.length === formattedDimensions.rows) {
+                    completeRowHeightSumMm = args.rowHeightsMm.reduce(function (sum, value) {
+                      return sum + Number(value);
+                    }, 0);
+                    if (
+                      hasOwn(args, "heightMm")
+                      && Math.abs(Number(args.heightMm) - completeRowHeightSumMm) > 0.5
+                    ) {
+                      throw commandError(
+                        "INVALID_TOOL_ARGUMENTS",
+                        "完整 rowHeightsMm 的合计必须与 heightMm 一致",
+                        {
+                          heightMm: Number(args.heightMm),
+                          rowHeightSumMm: completeRowHeightSumMm,
+                          toleranceMm: 0.5,
+                        }
+                      );
+                    }
+                  }
                   applyDrawingFrame(formattedTable.drawing, args);
                   if (typeof formattedTable.drawing.SetTableLook === "function" && isObject(args.tableLook)) {
                     formattedTable.drawing.SetTableLook(
@@ -3729,7 +4079,6 @@
                       formattedTable.drawing.SetColumnWidth(tableWidthIndex, mmToEmu(args.columnWidthsMm[tableWidthIndex]));
                     }
                   }
-                  var formattedDimensions = tableDimensions(formattedTable.drawing);
                   if (Array.isArray(args.rowHeightsMm)) {
                     for (var tableHeightIndex = 0; tableHeightIndex < Math.min(args.rowHeightsMm.length, formattedDimensions.rows); tableHeightIndex += 1) {
                       var formattedRow = formattedTable.drawing.GetRow(tableHeightIndex);
@@ -3737,6 +4086,14 @@
                         formattedRow.SetHeight(mmToEmu(args.rowHeightsMm[tableHeightIndex]));
                       }
                     }
+                  }
+                  if (
+                    completeRowHeightSumMm !== null
+                    && !hasOwn(args, "heightMm")
+                    && typeof formattedTable.drawing.SetSize === "function"
+                  ) {
+                    var formattedFrame = getDrawingFrame(formattedTable.drawing);
+                    formattedTable.drawing.SetSize(formattedFrame.width, mmToEmu(completeRowHeightSumMm));
                   }
                   var formatRowStart = Math.max(1, Math.round(asFinite(args.rowStart, 1)));
                   var formatRowEnd = Math.min(formattedDimensions.rows, Math.round(asFinite(args.rowEnd, formattedDimensions.rows)));

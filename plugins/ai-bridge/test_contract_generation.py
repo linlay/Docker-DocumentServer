@@ -42,7 +42,7 @@ class ContractGenerationTests(unittest.TestCase):
             for name, schema in editor_tools.items()
         }
         self.assertEqual(len(tools), 160)
-        self.assertEqual(self.contract["version"], "0.2.7")
+        self.assertEqual(self.contract["version"], "0.2.8")
         self.assertTrue(
             {
                 "EDITOR_CAPABILITY_PROBE_FAILED",
@@ -94,6 +94,21 @@ class ContractGenerationTests(unittest.TestCase):
             ["auto", "placeholder", "textbox"],
         )
         self.assertEqual(title_placement["default"], "auto")
+
+    def test_slides_layout_contract_exposes_auditable_font_policy(self) -> None:
+        schema = self.contract["tools"]["slide"]["slides_validate_layout"]
+        self.assertEqual(
+            schema["properties"]["fontPolicy"],
+            {"$ref": "#/$defs/slideFontPolicy"},
+        )
+        policy = self.contract["$defs"]["slideFontPolicy"]
+        self.assertEqual(
+            policy["required"],
+            ["id", "source", "defaultMinPt", "rules"],
+        )
+        rule = self.contract["$defs"]["slideFontPolicyRule"]
+        self.assertEqual(rule["required"], ["name", "role", "minPt"])
+        self.assertTrue(rule["properties"]["allowedFamilies"]["uniqueItems"])
 
     def test_slides_contract_exposes_native_smartart_crud(self) -> None:
         slide_tools = self.contract["tools"]["slide"]
@@ -688,18 +703,23 @@ class ContractGenerationTests(unittest.TestCase):
                     rendered,
                 )
                 self.assertIn('key = "mutation_receipt"', rendered)
-                if editor == "word":
+                if editor in {"word", "slide"}:
                     self.assertIn("[actions.qa]", rendered)
                     self.assertIn("/ai/qa", rendered)
                     qa_action = rendered.split("[actions.qa]", 1)[1].split("\n[actions.", 1)[0]
                     self.assertIn('"X-AI-Session-Lease"', qa_action)
                     self.assertIn('key = "session.lease"', qa_action)
-                    self.assertIn('key = "required_styles", default = []', qa_action)
-                    self.assertIn('key = "numbering_sequences", default = []', qa_action)
-                    self.assertIn('key = "require_seq", default = false', qa_action)
-                    self.assertIn('key = "require_ref", default = false', qa_action)
-                    self.assertIn('key = "require_comment_anchors", default = false', qa_action)
-                    self.assertIn('key = "allowed_blank_pages", default = []', qa_action)
+                    if editor == "word":
+                        self.assertIn('key = "required_styles", default = []', qa_action)
+                        self.assertIn('key = "numbering_sequences", default = []', qa_action)
+                        self.assertIn('key = "require_seq", default = false', qa_action)
+                        self.assertIn('key = "require_ref", default = false', qa_action)
+                        self.assertIn('key = "require_comment_anchors", default = false', qa_action)
+                        self.assertIn('key = "allowed_blank_pages", default = []', qa_action)
+                    else:
+                        self.assertIn('key = "expected_slide_count", default = 0', qa_action)
+                        self.assertIn('key = "allowed_blank_slides", default = []', qa_action)
+                        self.assertIn("renderComplete 不等于已识图", qa_action)
                     self.assertNotIn("qa_json", qa_action)
                     self.assertNotIn("qaJson", qa_action)
                 else:
@@ -730,7 +750,7 @@ class ContractGenerationTests(unittest.TestCase):
                     session_action,
                 )
 
-    def test_httpx_typed_file_projection_covers_all_167_structured_actions(
+    def test_httpx_typed_file_projection_covers_all_168_structured_actions(
         self,
     ) -> None:
         sha256 = sync_contract.contract_sha256(self.contract)
@@ -748,9 +768,7 @@ class ContractGenerationTests(unittest.TestCase):
             counts["tool_calls"] += rendered.count(
                 'toolCalls = { from = "param", key = "tool_calls" }'
             )
-            counts["qa"] += rendered.count(
-                'requiredStyles = { from = "param", key = "required_styles"'
-            )
+            counts["qa"] += rendered.count("[actions.qa]")
             for legacy in (
                 "arguments_json",
                 "tool_calls_json",
@@ -760,8 +778,8 @@ class ContractGenerationTests(unittest.TestCase):
                 "qaJson",
             ):
                 self.assertNotIn(legacy, rendered)
-        self.assertEqual(counts, {"arguments": 160, "tool_calls": 6, "qa": 1})
-        self.assertEqual(sum(counts.values()), 167)
+        self.assertEqual(counts, {"arguments": 160, "tool_calls": 6, "qa": 2})
+        self.assertEqual(sum(counts.values()), 168)
 
     def test_word_header_footer_httpx_description_rejects_empty_first_page_content(
         self,
@@ -894,7 +912,7 @@ class ContractGenerationTests(unittest.TestCase):
                         for name in self.contract["tools"][editor]
                     ),
                 }
-                if editor == "word":
+                if editor in {"word", "slide"}:
                     expected_actions.add("qa")
                 if editor == "slide":
                     expected_actions.add("import_local_image")

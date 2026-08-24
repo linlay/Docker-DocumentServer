@@ -1878,6 +1878,10 @@ test("Slides bridge inspects layouts and changes order, visibility, size, layout
   assert.equal(presentation.slides[0], second);
   assert.equal(Math.round(presentation.GetWidth() / 36000), 300);
   assert.equal(Math.round(presentation.GetHeight() / 36000), 170);
+  assert.equal(result.results[4].requestedPreset, "custom");
+  assert.equal(result.results[4].preset, "custom");
+  assert.equal(result.results[4].aspectRatio, "custom");
+  assert.ok(Math.abs(result.results[4].aspectRatioValue - (300 / 170)) < 0.0001);
   assert.equal(presentation.GetLoopUntilStopped(), true);
   assert.equal(result.results[6].slides[0].visible, false);
   assert.equal(result.results[6].loopUntilStopped, true);
@@ -2265,6 +2269,201 @@ test("Slides structural validation distinguishes containment, allowed overlap, a
   assert.ok(validation.issues.some(item => item.code === "MANUAL_LIST_PREFIX"));
 });
 
+test("Slides font policy audits exact semantic roles without silently passing unavailable styles", async () => {
+  const { bridge } = slidesHarness();
+  await bridge.execute([
+    { name: "slides_add_slide", arguments: {} },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "s3-title", xMm: 15, yMm: 12, widthMm: 180, heightMm: 18,
+        text: "项目启动", fontSize: 22, fontFamily: "Microsoft YaHei",
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "s3-body", xMm: 15, yMm: 45, widthMm: 180, heightMm: 40,
+        text: "这是正文", fontSize: 11, fontFamily: "Arial",
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "s3-footer", xMm: 15, yMm: 125, widthMm: 80, heightMm: 8,
+        text: "内部资料", fontSize: 9, fontFamily: "Microsoft YaHei",
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "s3-extra", xMm: 210, yMm: 45, widthMm: 60, heightMm: 20,
+        text: "未分类", fontSize: 12, fontFamily: "Microsoft YaHei",
+      },
+    },
+    {
+      name: "slides_add_chart",
+      arguments: {
+        slide: 3, name: "s3-chart", chartType: "bar", xMm: 15, yMm: 75,
+        widthMm: 100, heightMm: 45, series: [[1, 2]], seriesNames: ["进度"], categories: ["A", "B"],
+      },
+    },
+  ]);
+
+  const result = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 3,
+      requireUniqueNames: true,
+      fontPolicy: {
+        id: "online-pptx/default-formal",
+        source: "online-pptx-default",
+        defaultMinPt: 12,
+        requireObjectRules: true,
+        rules: [
+          { name: "s3-title", role: "contentTitle", minPt: 28, allowedFamilies: ["Microsoft YaHei"] },
+          { name: "s3-body", role: "body", minPt: 16, allowedFamilies: ["Microsoft YaHei"] },
+          { name: "s3-footer", role: "footer", minPt: 9, allowedFamilies: ["Microsoft YaHei"] },
+          { name: "s3-chart", role: "chartLabel", minPt: 12, allowedFamilies: ["Microsoft YaHei", "Arial"] },
+          { name: "does-not-exist", role: "supporting", minPt: 12 },
+        ],
+      },
+    },
+  }]);
+  const validation = result.results[0].slides[0];
+  assert.equal(validation.fontPolicy.id, "online-pptx/default-formal");
+  assert.ok(validation.issues.some(item => item.code === "FONT_TOO_SMALL" && item.objectName === "s3-title" && item.actualMinPt === 22));
+  assert.ok(validation.issues.some(item => item.code === "FONT_TOO_SMALL" && item.objectName === "s3-body" && item.actualMinPt === 11));
+  assert.ok(validation.issues.some(item => item.code === "FONT_FAMILY_MISMATCH" && item.objectName === "s3-body"));
+  assert.ok(validation.issues.some(item => item.code === "FONT_POLICY_UNCLASSIFIED_OBJECT" && item.objectName === "s3-extra"));
+  assert.ok(validation.issues.some(item => item.code === "FONT_STYLE_UNAVAILABLE" && item.objectName === "s3-chart"));
+  assert.ok(validation.issues.some(item => item.code === "FONT_RULE_TARGET_MISSING" && item.objectName === "does-not-exist"));
+  assert.ok(!validation.issues.some(item => item.code === "FONT_TOO_SMALL" && item.objectName === "s3-footer"));
+});
+
+test("Slides font policy accepts role-specific title, body, and footer minimums", async () => {
+  const { bridge } = slidesHarness();
+  await bridge.execute([
+    { name: "slides_add_slide", arguments: {} },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "title", xMm: 15, yMm: 12, widthMm: 180, heightMm: 18,
+        text: "项目启动", fontSize: 28, fontFamily: "Microsoft YaHei",
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "body", xMm: 15, yMm: 45, widthMm: 180, heightMm: 40,
+        text: "正式正文", fontSize: 16, fontFamily: "Microsoft YaHei",
+      },
+    },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "footer", xMm: 15, yMm: 125, widthMm: 80, heightMm: 8,
+        text: "内部资料", fontSize: 9, fontFamily: "Microsoft YaHei",
+      },
+    },
+  ]);
+  const result = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 3,
+      fontPolicy: {
+        id: "policy/pass",
+        source: "user",
+        defaultMinPt: 12,
+        requireObjectRules: true,
+        rules: [
+          { name: "title", role: "contentTitle", minPt: 28, allowedFamilies: ["Microsoft YaHei"] },
+          { name: "body", role: "body", minPt: 16, allowedFamilies: ["Microsoft YaHei"] },
+          { name: "footer", role: "footer", minPt: 9, allowedFamilies: ["Microsoft YaHei"] },
+        ],
+      },
+    },
+  }]);
+  assert.equal(
+    result.results[0].slides[0].valid,
+    true,
+    JSON.stringify(result.results[0].slides[0].issues),
+  );
+
+  await assert.rejects(
+    bridge.execute([{
+      name: "slides_validate_layout",
+      arguments: {
+        slide: 3,
+        minFontSize: 9,
+        fontPolicy: { id: "conflict", source: "user", defaultMinPt: 12, rules: [] },
+      },
+    }]),
+    error => error.code === "INVALID_TOOL_ARGUMENTS",
+  );
+
+  await bridge.execute([{
+    name: "slides_add_textbox",
+    arguments: {
+      slide: 3, name: "body", xMm: 205, yMm: 45, widthMm: 40, heightMm: 20,
+      text: "重复名称", fontSize: 16, fontFamily: "Microsoft YaHei",
+    },
+  }]);
+  const ambiguous = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 3,
+      requireUniqueNames: false,
+      fontPolicy: {
+        id: "policy/ambiguous",
+        source: "user",
+        defaultMinPt: 12,
+        requireObjectRules: true,
+        rules: [
+          { name: "title", role: "contentTitle", minPt: 28 },
+          { name: "body", role: "body", minPt: 16 },
+          { name: "footer", role: "footer", minPt: 9 },
+        ],
+      },
+    },
+  }]);
+  assert.ok(ambiguous.results[0].slides[0].issues.some(item => (
+    item.code === "FONT_RULE_TARGET_AMBIGUOUS" && item.objectName === "body" && item.matchCount === 2
+  )));
+});
+
+test("Slides font policy fails when an ordinary text run style getter is unavailable", async () => {
+  const { bridge, presentation } = slidesHarness();
+  await bridge.execute([
+    { name: "slides_add_slide", arguments: {} },
+    {
+      name: "slides_add_textbox",
+      arguments: {
+        slide: 3, name: "unreadable", xMm: 15, yMm: 20, widthMm: 100, heightMm: 20,
+        text: "样式不可读", fontSize: 16, fontFamily: "Microsoft YaHei",
+      },
+    },
+  ]);
+  const run = presentation.slides[2].shapes[0].GetContent().GetAllParagraphs()[0].runs[0];
+  run.GetFontSize = undefined;
+  const result = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 3,
+      fontPolicy: {
+        id: "getter-policy",
+        source: "user",
+        defaultMinPt: 12,
+        requireObjectRules: true,
+        rules: [{ name: "unreadable", role: "body", minPt: 16 }],
+      },
+    },
+  }]);
+  assert.ok(result.results[0].slides[0].issues.some(item => (
+    item.code === "FONT_STYLE_UNAVAILABLE" && item.objectName === "unreadable"
+  )));
+});
+
 test("Slides bridge inspects and customizes themes, masters, and layouts", async () => {
   const { bridge, presentation, first, second } = slidesHarness();
   const colors = [
@@ -2570,7 +2769,7 @@ test("Slides bridge creates, edits, merges, and formats tables", async () => {
         fontSize: 12,
       },
     },
-    { name: "slides_inspect_objects", arguments: { slide: 1, kinds: ["table"], includeRaw: true } },
+    { name: "slides_inspect_objects", arguments: { slide: 1, kinds: ["table"], includeRaw: true, includeTextStyles: true } },
   ]);
 
   const table = first.tables[0];
@@ -2584,10 +2783,32 @@ test("Slides bridge creates, edits, merges, and formats tables", async () => {
   assert.deepEqual(table.GetRow(1).GetCell(1).split, [2, 2]);
   assert.equal(table.GetColumnWidth(0), 70 * 36000);
   assert.equal(table.GetRow(0).GetHeight(), 14 * 36000);
+  assert.equal(table.GetHeight(), 38 * 36000);
   assert.equal(table.GetRow(0).GetCell(0).borders.top[0], 0.5);
   assert.equal(result.results[7].slides[0].objects[0].kind, "table");
   assert.equal(result.results[7].slides[0].objects[0].rows, 3);
   assert.equal(result.results[7].slides[0].objects[0].columns, 3);
+  assert.equal(result.results[7].slides[0].objects[0].rowHeightSumMm, 38);
+  assert.equal(result.results[7].slides[0].objects[0].effectiveBoundsMm.heightMm, 38);
+  assert.equal(result.results[7].slides[0].objects[0].textStyles.minFontSize, 12);
+
+  const tableValidation = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 1,
+      requireUniqueNames: false,
+      fontPolicy: {
+        id: "table-policy",
+        source: "template:formal@1",
+        defaultMinPt: 1,
+        requireObjectRules: false,
+        rules: [{ name: "Metrics", role: "table", minPt: 13 }],
+      },
+    },
+  }]);
+  assert.ok(tableValidation.results[0].slides[0].issues.some(item => (
+    item.code === "FONT_TOO_SMALL" && item.objectName === "Metrics" && item.actualMinPt === 12
+  )));
 });
 
 test("Slides bridge writes scalar and formatted table cells before applying header defaults", async () => {
@@ -2681,6 +2902,36 @@ test("Slides bridge rejects invalid formatted table cells before mutation", () =
   assert.equal(error.details.partialMutationPossible, false);
   assert.equal(presentation.historyPoints, 0);
   assert.equal(first.tables.length, 0);
+});
+
+test("Slides bridge rejects conflicting complete row heights before resizing a table", async () => {
+  const { bridge, first } = slidesHarness();
+  await bridge.execute([{
+    name: "slides_add_table",
+    arguments: {
+      slide: 1,
+      name: "HeightPolicy",
+      rows: 2,
+      columns: 2,
+      widthMm: 100,
+      heightMm: 40,
+      data: [["A", "B"], ["C", "D"]],
+    },
+  }]);
+  const before = first.tables[0].GetHeight();
+  await assert.rejects(
+    bridge.execute([{
+      name: "slides_format_table",
+      arguments: {
+        slide: 1,
+        name: "HeightPolicy",
+        heightMm: 20,
+        rowHeightsMm: [15, 15],
+      },
+    }]),
+    error => error.code === "INVALID_TOOL_ARGUMENTS",
+  );
+  assert.equal(first.tables[0].GetHeight(), before);
 });
 
 test("Slides bridge aligns, distributes, groups, reorders, and creates custom geometry", async () => {
@@ -2919,6 +3170,7 @@ test("Slides bridge creates, inspects, updates, and deletes native SmartArt", as
   assert.equal(added.results[0].smartArt.smartArtTypeValue, 77);
   assert.equal(added.results[0].smartArt.name, "ServiceSystem");
   assert.equal(added.results[0].smartArt.nodes[0].text, "咨询规划");
+  assert.equal(added.results[0].smartArt.textStyles.minFontSize, 10);
   assert.equal(first.smartArts.length, 1);
   assert.equal(first.smartArts[0].nodeShapes[0].smartArtSyncCount > 0, true);
   assert.equal(first.smartArts[0].nodeShapes[0].getSmartArtPointContent()[0].point.text, "咨询规划");
@@ -2941,6 +3193,24 @@ test("Slides bridge creates, inspects, updates, and deletes native SmartArt", as
   assert.equal(updated.results[1].smartArt.name, "ServiceSystemV2");
   assert.equal(updated.results[1].smartArt.nodes[0].text, "持续运营");
   assert.equal(first.smartArts[0].nodeShapes[0].getSmartArtPointContent()[0].point.text, "持续运营");
+
+  const validation = await bridge.execute([{
+    name: "slides_validate_layout",
+    arguments: {
+      slide: 1,
+      requireUniqueNames: false,
+      fontPolicy: {
+        id: "smartart-policy",
+        source: "user",
+        defaultMinPt: 1,
+        requireObjectRules: false,
+        rules: [{ name: "ServiceSystemV2", role: "smartArtLabel", minPt: 12 }],
+      },
+    },
+  }]);
+  assert.ok(validation.results[0].slides[0].issues.some(item => (
+    item.code === "FONT_TOO_SMALL" && item.objectName === "ServiceSystemV2" && item.actualMinPt === 10
+  )));
 
   const deleted = await bridge.execute([{
     name: "slides_delete_smartart",

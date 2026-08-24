@@ -1550,6 +1550,25 @@ def render_toml(
                 "",
             ]
         )
+    elif editor == "slide":
+        lines.extend(
+            [
+                "[actions.qa]",
+                'description = "强制保存并对 PPTX 执行最终包、画布元数据、关系、diagram 兼容性和逐页全尺寸渲染验收；renderComplete 不等于已识图"',
+                'method = "POST"',
+                f"path = {document_path_source('qa')}",
+                'headers = { "X-AI-Session-Lease" = { from = "state", scope = "chat", key = "session.lease" } }',
+                'body = { expectedSlideCount = { from = "param", key = "expected_slide_count", default = 0 }, allowedBlankSlides = { from = "param", key = "allowed_blank_slides", default = [] } }',
+                "expect_status = 200",
+                "params = [",
+                '  { name = "expected_slide_count", type = "integer", required = false, description = "期望的幻灯片数量；0 表示不额外断言", example = 0 },',
+                '  { name = "allowed_blank_slides", type = "array", required = false, description = "允许为空白页的一基幻灯片页码", example = [] }',
+                "]",
+                'extract_type = "jq"',
+                'extract_expr = ".body"',
+                "",
+            ]
+        )
     for control in contract.get("controls") or []:
         lines.extend(
             [
@@ -1752,8 +1771,8 @@ def validate_skill_layout(
 
 
 def validate_contract(contract: dict[str, Any]) -> None:
-    if contract.get("version") != "0.2.7":
-        raise ValueError("public-api.json version must be 0.2.7")
+    if contract.get("version") != "0.2.8":
+        raise ValueError("public-api.json version must be 0.2.8")
     if contract.get("protocolVersion") != 1:
         raise ValueError("protocolVersion must remain 1")
     http_relay = (contract.get("transport") or {}).get("httpRelay") or {}

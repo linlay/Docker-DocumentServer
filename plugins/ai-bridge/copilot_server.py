@@ -1332,6 +1332,25 @@ def validate_slide_semantics(
         semantic_error("layoutIndex", "layoutIndex is required when masterIndex is provided")
 
     if name == "slides_validate_layout":
+        if "minFontSize" in arguments and "fontPolicy" in arguments:
+            semantic_error(
+                "fontPolicy",
+                "minFontSize and fontPolicy are mutually exclusive",
+            )
+        font_policy = arguments.get("fontPolicy")
+        if isinstance(font_policy, dict):
+            seen_rule_names: set[str] = set()
+            for index, rule in enumerate(font_policy.get("rules") or []):
+                if not isinstance(rule, dict):
+                    continue
+                rule_name = rule.get("name")
+                if isinstance(rule_name, str):
+                    if rule_name in seen_rule_names:
+                        semantic_error(
+                            f"fontPolicy.rules[{index}].name",
+                            "font policy rule names must be unique exact object names",
+                        )
+                    seen_rule_names.add(rule_name)
         for index, pair in enumerate(arguments.get("allowedOverlapPairs") or []):
             if (
                 isinstance(pair, dict)

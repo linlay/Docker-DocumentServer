@@ -75,8 +75,10 @@
 ### 结构化检查边界
 
 - `inspectObjects({includeTextStyles:true})` 返回可读取的段落与 run 样式；当前 ONLYOFFICE 版本没有 getter 的属性明确标记为不可用。
-- `validateLayout` 只读检查版式、对象预算、命名、边界、安全边距、几何交叉、字号和手写列表前缀。
-- `validateLayout.visualVerified` 与 `textOverflowVerified` 固定为 `false`。它不能替代截图、渲染或人工视觉验收，也不能证明自动换行和文字溢出正确。
+- `validateLayout` 只读检查版式、对象预算、命名、边界、安全边距、几何交叉、字号和手写列表前缀。0.2.8 起可传逐对象 `fontPolicy`，按精确名称校验语义角色、字号下限和字体族；旧 `minFontSize` 仅保留兼容，不能与 `fontPolicy` 同时使用。
+- 普通 Shape、表格和 SmartArt 进入同一文字样式统计；Getter 不可用会返回 `FONT_STYLE_UNAVAILABLE`，不会静默通过。表格同时返回行高合计和参与边界/重叠检查的 `effectiveBoundsMm`。
+- `setSize` 返回写后实际宽高、识别出的 preset 和 aspect ratio，供保存后的 PPTX 包 QA 对照。
+- `validateLayout.visualVerified` 与 `textOverflowVerified` 固定为 `false`。它不能替代 document-hub 的最终包 QA 和逐页 PNG 识图，也不能证明自动换行和文字溢出正确。
 
 ## 图片
 

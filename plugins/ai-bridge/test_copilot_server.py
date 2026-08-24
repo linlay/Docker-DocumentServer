@@ -1751,6 +1751,36 @@ class HttpRelayTests(unittest.TestCase):
         self.assertEqual(copilot_server.BRIDGE_COMMANDS, commands_before)
         self.assertEqual(copilot_server.BRIDGE_REQUESTS, requests_before)
 
+        with self.assertRaises(copilot_server.BridgeError) as policy_error:
+            copilot_server.bridge_validate(
+                {
+                    "toolCalls": [
+                        {
+                            "name": "validate_layout",
+                            "arguments": {
+                                "minFontSize": 9,
+                                "fontPolicy": {
+                                    "id": "policy/conflict",
+                                    "source": "user",
+                                    "defaultMinPt": 12,
+                                    "rules": [
+                                        {"name": "title", "role": "contentTitle", "minPt": 28},
+                                        {"name": "title", "role": "body", "minPt": 16},
+                                    ],
+                                },
+                            },
+                        }
+                    ],
+                },
+                claims,
+            )
+        policy_paths = {
+            error["path"]
+            for error in policy_error.exception.details["validationErrors"]
+        }
+        self.assertIn("arguments.fontPolicy", policy_paths)
+        self.assertIn("arguments.fontPolicy.rules[1].name", policy_paths)
+
     def test_sheets_validate_batch_rejects_semantic_errors_without_editor_commands(self):
         self.register(
             file_name="demo.xlsx",
