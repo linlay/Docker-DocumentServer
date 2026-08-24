@@ -72,7 +72,9 @@ const result = await client.word.inspect({ maxChars: 5000 });
 
 ## 4. Relay 与持久化
 
-浏览器页面使用 `register/poll/result/unregister` 维持 Relay 会话。
+浏览器页面使用 `register/poll/result/unregister` 维持 Relay 会话，并把启动故障和运行期
+`fetch` 拒绝分别上报到 `startup-failure`、`runtime-failure`。运行期诊断包含请求序号、
+耗时、连续失败次数、在线状态、页面可见性和最近的页面生命周期事件，不包含正文。
 document-hub 通过私网 secret 调用：
 
 - `/bridge/internal/execute`

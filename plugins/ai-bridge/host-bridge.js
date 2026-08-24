@@ -45,6 +45,14 @@
   let relayStateCode = null;
   let relayStateSignature = null;
   let startupHandshakeRejection = null;
+  let httpRelayRequestSequence = 0;
+  let httpRelayConsecutiveFailures = 0;
+  let httpRelayLastRuntimeReportAt = 0;
+  const relayLifecycle = {
+    event: "script-loaded",
+    at: Date.now(),
+    pageHidePersisted: false,
+  };
   const startupNavigationStartedAt = (function () {
     const performance = window.performance;
     if (performance && Number.isFinite(Number(performance.timeOrigin))) {
@@ -280,6 +288,67 @@
       pluginOrigin,
       hostVersion: VERSION,
       contractSha256: CONTRACT_SHA256,
+    };
+  }
+
+  function recordRelayLifecycle(event, persisted) {
+    relayLifecycle.event = event;
+    relayLifecycle.at = Date.now();
+    if (event === "pagehide" || event === "pageshow") {
+      relayLifecycle.pageHidePersisted = Boolean(persisted);
+    }
+  }
+
+  function installRelayRuntimeInstrumentation() {
+    window.addEventListener("beforeunload", function () {
+      recordRelayLifecycle("beforeunload", false);
+    });
+    window.addEventListener("pagehide", function (event) {
+      recordRelayLifecycle("pagehide", event && event.persisted);
+    });
+    window.addEventListener("pageshow", function (event) {
+      recordRelayLifecycle("pageshow", event && event.persisted);
+    });
+    window.addEventListener("offline", function () {
+      recordRelayLifecycle("offline", false);
+    });
+    window.addEventListener("online", function () {
+      recordRelayLifecycle("online", false);
+    });
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", function () {
+        recordRelayLifecycle(`visibilitychange:${String(document.visibilityState || "unknown")}`, false);
+      });
+    }
+  }
+
+  function relayNetworkSnapshot(failedAt) {
+    let navigatorOnline = null;
+    if (window.navigator && typeof window.navigator.onLine === "boolean") {
+      navigatorOnline = window.navigator.onLine;
+    }
+    const lifecycleAt = Number(relayLifecycle.at) || 0;
+    const lifecycleAgeMs = lifecycleAt > 0 ? Math.max(0, failedAt - lifecycleAt) : null;
+    const unloading = (
+      (relayLifecycle.event === "beforeunload" || relayLifecycle.event === "pagehide")
+      && lifecycleAgeMs !== null
+      && lifecycleAgeMs <= 10000
+    );
+    const classification = unloading
+      ? "page-unloading"
+      : navigatorOnline === false || relayLifecycle.event === "offline"
+        ? "browser-offline"
+        : "fetch-rejected";
+    return {
+      classification,
+      navigatorOnline,
+      documentReadyState: String(document.readyState || "unknown"),
+      pageVisibilityState: String(document.visibilityState || "unknown"),
+      lifecycleEvent: relayLifecycle.event,
+      lifecycleAtMs: lifecycleAt,
+      lifecycleAgeMs,
+      pageHidePersisted: relayLifecycle.pageHidePersisted,
+      relayState: relayStateValue || "unknown",
     };
   }
 
@@ -1215,6 +1284,7 @@
   };
 
   installEditorStartupInstrumentation();
+  installRelayRuntimeInstrumentation();
 
   window.aiBridge = api;
   window.onlyofficeAI = api;
@@ -1259,6 +1329,35 @@
       headers["X-CSRF-Token"] = decodeURIComponent(csrf.split("=").slice(1).join("="));
     }
     return headers;
+  }
+
+  function reportRuntimeFailure(sessionId, error) {
+    if (!REQUEST_ID_PATTERN.test(String(sessionId || ""))) return;
+    const details = error && error.details && typeof error.details === "object"
+      ? error.details
+      : {};
+    const now = Date.now();
+    if (httpRelayConsecutiveFailures > 1 && now - httpRelayLastRuntimeReportAt < 60000) return;
+    httpRelayLastRuntimeReportAt = now;
+    const body = JSON.stringify({
+      diagnosticId: details.diagnosticId || createRequestId("diagnostic"),
+      sessionId,
+      code: error && error.code || "HTTP_RELAY_NETWORK_ERROR",
+      message: error && error.message || "HTTP Relay 运行期请求失败",
+      details,
+    });
+    try {
+      const pending = window.fetch(`${httpRelayBaseURL()}/runtime-failure`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: httpRelayHeaders(),
+        body,
+        keepalive: true,
+      });
+      if (pending && typeof pending.catch === "function") pending.catch(function () {});
+    } catch (reportError) {
+      // The original diagnostic remains visible when the reporting path is unavailable too.
+    }
   }
 
   async function persistenceRequest(action, requestId, payload) {
@@ -1329,6 +1428,9 @@
   }
 
   async function httpRelayPost(path, payload) {
+    httpRelayRequestSequence += 1;
+    const requestSequence = httpRelayRequestSequence;
+    const startedAtMs = Date.now();
     let response;
     try {
       response = await window.fetch(`${httpRelayBaseURL()}/${path}`, {
@@ -1338,12 +1440,31 @@
         body: JSON.stringify(payload),
       });
     } catch (error) {
-      throw bridgeError(
+      const failedAtMs = Date.now();
+      httpRelayConsecutiveFailures += 1;
+      const network = relayNetworkSnapshot(failedAtMs);
+      const relayError = bridgeError(
         "HTTP_RELAY_NETWORK_ERROR",
         `HTTP Relay 网络请求失败：${error && error.message ? error.message : String(error)}`,
-        { details: { path } },
+        {
+          details: {
+            diagnosticId: createRequestId("diagnostic"),
+            path,
+            classification: network.classification,
+            requestSequence,
+            consecutiveFailures: httpRelayConsecutiveFailures,
+            startedAtMs,
+            failedAtMs,
+            durationMs: Math.max(0, failedAtMs - startedAtMs),
+            errorName: error && error.name ? String(error.name) : "Error",
+            network,
+          },
+        },
       );
+      reportRuntimeFailure(payload && payload.sessionId, relayError);
+      throw relayError;
     }
+    httpRelayConsecutiveFailures = 0;
     let body;
     try {
       body = await response.json();
@@ -1578,6 +1699,7 @@
             await report(command, { ok: false, error: serializedError(error, command.requestId) });
           }
         } catch (error) {
+          if (stopped) return;
           const code = error && error.code;
           if (code === "INVALID_RELAY_SESSION") {
             relayKey = null;

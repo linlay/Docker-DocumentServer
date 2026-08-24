@@ -126,6 +126,11 @@ document-hub is the only caller of the internal endpoints:
   `/bridge/internal/drop`, `/bridge/internal/images/import`
 - diagnostics/assets: `/health`, `/bridge/contract/{editor}`, `/images/*`
 
+Browser-only failures are recorded by document-hub at
+`/api/v1/editor-relay/startup-failure` and
+`/api/v1/editor-relay/runtime-failure`; they are not forwarded to the private
+Relay.
+
 Every request requires the private Relay secret. Port 3001 must not be
 published.
 

@@ -112,7 +112,12 @@ function createHarness(options = {}) {
     setTimeout: options.hostSetTimeout || setTimeout,
     clearTimeout: options.hostClearTimeout || clearTimeout,
     history: { replaceState() {} },
-    navigator: { sendBeacon() { return true; } },
+    navigator: {
+      onLine: Object.prototype.hasOwnProperty.call(options, "navigatorOnline")
+        ? options.navigatorOnline
+        : true,
+      sendBeacon() { return true; },
+    },
     sessionStorage,
     localStorage,
     aiBridgeOptions: {
@@ -301,13 +306,15 @@ function createHarness(options = {}) {
     },
   };
 
-  const hostDocument = options.hostDocument || {
+  const hostDocument = options.hostDocument || eventTarget({
     documentElement,
+    readyState: options.documentReadyState,
+    visibilityState: options.pageVisibilityState,
     querySelector() { return null; },
     currentScript: {
       src: "https://docs.test/sdkjs-plugins/ai-bridge/host-bridge.js",
     },
-  };
+  });
   vm.runInNewContext(hostSource, {
     window: hostWindow,
     document: hostDocument,
@@ -1550,6 +1557,115 @@ test("explicit HTTPS opt-in starts HTTP Relay on a public host", async () => {
       { state: "ready" },
       { state: "superseded", code: "SESSION_SUPERSEDED" },
     ],
+  );
+});
+
+test("HTTP Relay reports a fetch rejection with runtime network diagnostics", async () => {
+  let pollCalls = 0;
+  let runtimeReport = null;
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    editorSessionId: "33333333-3333-4333-8333-333333333333",
+    documentReadyState: "complete",
+    pageVisibilityState: "visible",
+    hostSetTimeout(callback, delay) {
+      return setTimeout(callback, delay === 1000 ? 0 : delay);
+    },
+    hostFetch: async (requestPath, requestOptions) => {
+      if (requestPath.endsWith("/register")) {
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/runtime-failure")) {
+        runtimeReport = JSON.parse(requestOptions.body);
+        return relayResponse(202, { ok: true, diagnosticId: runtimeReport.diagnosticId });
+      }
+      if (requestPath.endsWith("/poll")) {
+        pollCalls += 1;
+        if (pollCalls === 1) throw new TypeError("Failed to fetch");
+        return relayResponse(409, {
+          ok: false,
+          error: { code: "SESSION_SUPERSEDED", message: "test complete" },
+        });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => runtimeReport !== null);
+  await waitFor(() => harness.documentElement.dataset.aiBridgeRelayState === "superseded");
+  const retrying = harness.hostWindow.dispatchedEvents.find(
+    event => event.type === "ai-bridge-relay-state" && event.detail.state === "retrying",
+  );
+  assert.ok(retrying);
+  assert.equal(retrying.detail.code, "HTTP_RELAY_NETWORK_ERROR");
+  assert.match(retrying.detail.details.diagnosticId, /^diagnostic:/);
+  assert.equal(retrying.detail.details.path, "poll");
+  assert.equal(retrying.detail.details.classification, "fetch-rejected");
+  assert.equal(retrying.detail.details.requestSequence, 2);
+  assert.equal(retrying.detail.details.consecutiveFailures, 1);
+  assert.equal(retrying.detail.details.errorName, "TypeError");
+  assert.equal(retrying.detail.details.network.navigatorOnline, true);
+  assert.equal(retrying.detail.details.network.documentReadyState, "complete");
+  assert.equal(retrying.detail.details.network.pageVisibilityState, "visible");
+  assert.equal(runtimeReport.diagnosticId, retrying.detail.details.diagnosticId);
+  assert.equal(runtimeReport.sessionId.startsWith("http-session:"), true);
+  assert.equal(runtimeReport.code, "HTTP_RELAY_NETWORK_ERROR");
+  assert.deepEqual(runtimeReport.details, JSON.parse(JSON.stringify(retrying.detail.details)));
+});
+
+test("HTTP Relay classifies a poll canceled during unload without showing a retry state", async () => {
+  let rejectPoll = null;
+  let runtimeReport = null;
+  const harness = createHarness({
+    hostname: "localhost",
+    httpRelay: true,
+    relayBaseUrl: "/api/v1/editor-relay",
+    editorSessionId: "33333333-3333-4333-8333-333333333333",
+    hostFetch: async (requestPath, requestOptions) => {
+      if (requestPath.endsWith("/register")) {
+        return relayResponse(200, {
+          ok: true,
+          relayKey: "relay-key",
+          resumeToken: "resume-token",
+        });
+      }
+      if (requestPath.endsWith("/poll")) {
+        return new Promise((resolve, reject) => {
+          rejectPoll = reject;
+        });
+      }
+      if (requestPath.endsWith("/unregister")) {
+        return relayResponse(200, { ok: true });
+      }
+      if (requestPath.endsWith("/runtime-failure")) {
+        runtimeReport = JSON.parse(requestOptions.body);
+        return relayResponse(202, { ok: true, diagnosticId: runtimeReport.diagnosticId });
+      }
+      throw new Error(`unexpected Relay request: ${requestPath}`);
+    },
+  });
+
+  await waitFor(() => typeof rejectPoll === "function");
+  harness.hostWindow.dispatch("beforeunload", {});
+  rejectPoll(new TypeError("Failed to fetch"));
+  await waitFor(() => runtimeReport !== null);
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  assert.equal(runtimeReport.details.path, "poll");
+  assert.equal(runtimeReport.details.classification, "page-unloading");
+  assert.equal(runtimeReport.details.network.lifecycleEvent, "beforeunload");
+  assert.equal(runtimeReport.details.network.navigatorOnline, true);
+  assert.equal(
+    harness.hostWindow.dispatchedEvents.some(
+      event => event.type === "ai-bridge-relay-state" && event.detail.state === "retrying",
+    ),
+    false,
   );
 });
 
