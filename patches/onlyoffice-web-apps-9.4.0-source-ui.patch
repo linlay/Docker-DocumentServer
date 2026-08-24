@@ -168,6 +168,14 @@
 +                        Common.UI.LayoutManager.applyCustomization();
 --- a/apps/presentationeditor/main/app/controller/Toolbar.js
 +++ b/apps/presentationeditor/main/app/controller/Toolbar.js
+@@ -309,7 +309,5 @@
+                 'tipChartTab' : {name: 'pe-help-tip-chart-tab', placement: 'bottom', text: this.helpChartTab, header: this.helpChartTabHeader, target: 'li.ribtab #charttab', maxwidth: 300,
+                     automove: true, closable: false, isNewFeature: true},
+-                'gifPlayback' : {name:'pe-help-tip-gif-payback', placement: 'bottom', text: this.helpGifPlayback, header: this.helpGifPlaybackHeader, target: '#toolbar', maxwidth: 300,
+-                    automove: true, noArrow: true, noHighlight: true, closable: false, isNewFeature: true},
+                 'slideTransitions' : {name:'pe-help-tip-slideTransitions', placement: 'bottom', text: this.helpSlideTransitions, header: this.helpSlideTransitionsHeader, target: '#transit-field-effects', maxwidth: 300,
+                     automove: true, closable: false, isNewFeature: true},
+                 'slideTheme' : {name:'pe-help-tip-slideTheme', placement: 'bottom', text: this.helpSlideTheme, header: this.helpSlideThemeHeader, target: '#slot-field-styles', maxwidth: 300,
 @@ -2805 +2805,3 @@
 -            if ( Common.localStorage.itemExists(editmode ? "pe-compact-toolbar" : "pe-view-compact-toolbar") ) {
 +            if (config.customization && config.customization.forceCompactToolbar) {

@@ -26,6 +26,8 @@ the Document, Spreadsheet, and Presentation editors:
   enabling extended branding, logo, or white-label customization. This keeps
   `layout.leftMenu: false` and `layout.rightMenu: true` consistent for DOCX,
   XLSX, and PPTX sessions.
+- The Presentation Editor does not register the GIF playback new-feature tip.
+  GIF playback during slideshows remains available and unchanged.
 
 The existing ONLYOFFICE source remains responsible for `compactHeader`,
 `layout.leftMenu`, toolbar tab visibility, and double-click ribbon folding.
